@@ -1,16 +1,18 @@
 import { create } from "zustand";
 import type { WidgetConversation, WidgetMessage, WidgetAccount } from "./types";
-import type { AirtableInfra } from "@/lib/airtable";
+import type { ContactInfra } from "@/lib/contact-info";
 
 interface WidgetState {
   isOpen: boolean;
   account: WidgetAccount | null;
   conversation: WidgetConversation | null;
   messages: WidgetMessage[];
-  infras: AirtableInfra[];
+  infras: ContactInfra[];
   isTyping: boolean;
   isAiResponding: boolean;
   isWaitingForHuman: boolean;
+  /** true após um operador assumir a conversa (status open + assigned_agent_id) */
+  agentConnected: boolean;
   showCsat: boolean;
   csatSubmitted: boolean;
   unreadCount: number;
@@ -20,10 +22,11 @@ interface WidgetState {
   setConversation: (conv: WidgetConversation | null) => void;
   setMessages: (msgs: WidgetMessage[]) => void;
   addMessage: (msg: WidgetMessage) => void;
-  setInfras: (infras: AirtableInfra[]) => void;
+  setInfras: (infras: ContactInfra[]) => void;
   setIsTyping: (v: boolean) => void;
   setIsAiResponding: (v: boolean) => void;
   setIsWaitingForHuman: (v: boolean) => void;
+  setAgentConnected: (v: boolean) => void;
   setShowCsat: (v: boolean) => void;
   setCsatSubmitted: (v: boolean) => void;
   setUnreadCount: (n: number) => void;
@@ -47,16 +50,17 @@ export const useWidgetStore = create<WidgetState>((set) => ({
   isTyping: false,
   isAiResponding: false,
   isWaitingForHuman: false,
+  agentConnected: false,
   showCsat: false,
   csatSubmitted: false,
   unreadCount: 0,
   setOpen: (open) => {
-    try { localStorage.setItem("clouddesk-widget-open", String(open)); } catch {}
+    try { localStorage.setItem("clouddesk-widget-open", String(open)); } catch { /* localStorage indisponível */ }
     set({ isOpen: open });
   },
   toggleOpen: () => set((s) => {
     const next = !s.isOpen;
-    try { localStorage.setItem("clouddesk-widget-open", String(next)); } catch {}
+    try { localStorage.setItem("clouddesk-widget-open", String(next)); } catch { /* localStorage indisponível */ }
     return { isOpen: next };
   }),
   setAccount: (account) => set({ account }),
@@ -67,6 +71,7 @@ export const useWidgetStore = create<WidgetState>((set) => ({
   setIsTyping: (isTyping) => set({ isTyping }),
   setIsAiResponding: (isAiResponding) => set({ isAiResponding }),
   setIsWaitingForHuman: (isWaitingForHuman) => set({ isWaitingForHuman }),
+  setAgentConnected: (agentConnected) => set({ agentConnected }),
   setShowCsat: (showCsat) => set({ showCsat }),
   setCsatSubmitted: (csatSubmitted) => set({ csatSubmitted }),
   setUnreadCount: (unreadCount) => set({ unreadCount }),

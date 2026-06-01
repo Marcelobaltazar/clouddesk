@@ -6,7 +6,7 @@ import { DEFAULT_SETTINGS } from "@/components/widget/types";
 import { supabase } from "@/integrations/supabase/client";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import type { ContactInfo } from "@/lib/airtable";
+import type { ContactInfo } from "@/lib/contact-info";
 
 const DEFAULT_EMAIL = "nexamarketingdigital@gmail.com";
 
@@ -53,7 +53,7 @@ export default function WidgetPreview() {
       setClientName(name);
       setStripeId(customerId);
 
-      // WidgetAccount needs id + user_id (Supabase UUIDs, not available from Airtable).
+      // WidgetAccount needs id + user_id (Supabase UUIDs, not returned by get-contact-info).
       // For preview we derive a stable fake UUID from the email so the widget
       // behaves consistently across re-applies of the same email.
       const fakeUuid = emailToFakeUuid(trimmed);
@@ -94,7 +94,7 @@ export default function WidgetPreview() {
     idle:     null,
     loading:  <span className="text-[11px] text-muted-foreground animate-pulse">Buscando...</span>,
     ok:       <span className="text-[11px] text-emerald-500">✓ Cliente encontrado</span>,
-    notfound: <span className="text-[11px] text-amber-500">⚠ Não encontrado no Airtable — widget usa email como nome</span>,
+    notfound: <span className="text-[11px] text-amber-500">⚠ Não encontrado no CRM — widget usa email como nome</span>,
     error:    <span className="text-[11px] text-rose-500">✗ Erro ao buscar — verifique o email</span>,
   }[status];
 

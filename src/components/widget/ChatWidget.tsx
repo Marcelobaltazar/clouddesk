@@ -9,7 +9,7 @@ import { ChatWidgetComposer } from "./ChatWidgetComposer";
 import { WidgetActionBar } from "./WidgetActionBar";
 import { CSATFeedback } from "./CSATFeedback";
 import type { CloudDeskSettings, WidgetMessage, WidgetMessageMetadata } from "./types";
-import type { ContactInfo } from "@/lib/airtable";
+import type { ContactInfo } from "@/lib/contact-info";
 
 // ── Welcome message builder ────────────────────────────────────────────────────
 
@@ -198,11 +198,13 @@ export function ChatWidget({ settings, embedUser }: Props) {
     showCsat,
     isAiResponding,
     isWaitingForHuman,
+    agentConnected,
     setConversation,
     addMessage,
     setInfras,
     setIsAiResponding,
     setIsWaitingForHuman,
+    setAgentConnected,
   } = useWidgetStore();
   // `messages` is used only for rendering — passed down to ChatWidgetThread
 
@@ -212,6 +214,9 @@ export function ChatWidget({ settings, embedUser }: Props) {
   const startConversation = useCallback(
     async (firstMessage: string) => {
       setIsAiResponding(true);
+      // Nova conversa começa limpa (sem estado de espera/atendente herdado)
+      setIsWaitingForHuman(false);
+      setAgentConnected(false);
 
       try {
         // 1. Create conversation record in desk_conversations
@@ -224,6 +229,7 @@ export function ChatWidget({ settings, embedUser }: Props) {
           .from("desk_conversations")
           .insert({
             account_user_id: accountUserId,
+            user_email: embedUser?.email ?? account?.email ?? null,
             channel: "chat",
             status: "open",
             priority: "medium",
@@ -259,6 +265,8 @@ export function ChatWidget({ settings, embedUser }: Props) {
         if (aiResult.blocked) {
           // AI is disabled for this conversation — do nothing
         } else if (aiResult.should_handoff) {
+          // Auto-handoff: trava o composer e mostra "aguardando atendente"
+          setIsWaitingForHuman(true);
           const handoffMsg = await handleHandoff(convData.id);
           if (handoffMsg) addMessage(handoffMsg);
         } else if (aiResult.reply) {
@@ -280,7 +288,7 @@ export function ChatWidget({ settings, embedUser }: Props) {
         setIsAiResponding(false);
       }
     },
-    [account, embedUser, addMessage, setConversation, setIsAiResponding]
+    [account, embedUser, addMessage, setConversation, setIsAiResponding, setIsWaitingForHuman, setAgentConnected]
   );
 
   const handleSend = useCallback(
@@ -308,6 +316,8 @@ export function ChatWidget({ settings, embedUser }: Props) {
         if (aiResult.blocked) {
           // AI is disabled for this conversation — do nothing
         } else if (aiResult.should_handoff) {
+          // Auto-handoff: trava o composer e mostra "aguardando atendente"
+          setIsWaitingForHuman(true);
           const handoffMsg = await handleHandoff(conversation.id);
           if (handoffMsg) addMessage(handoffMsg);
         } else if (aiResult.reply) {
@@ -330,7 +340,7 @@ export function ChatWidget({ settings, embedUser }: Props) {
         setIsAiResponding(false);
       }
     },
-    [account, embedUser, conversation, addMessage, setIsAiResponding, startConversation]
+    [account, embedUser, conversation, addMessage, setIsAiResponding, setIsWaitingForHuman, startConversation]
   );
 
   // ── Welcome message: fires once when the widget opens with no existing conversation ──
@@ -355,7 +365,7 @@ export function ChatWidget({ settings, embedUser }: Props) {
       if (!accountUserId) return;
 
       try {
-        // 1. Fetch contact info — no OpenAI, just Airtable
+        // 1. Fetch contact info — no OpenAI, just CRM (Supabase de produção)
         const { data: contactData } = await supabase.functions.invoke<ContactInfo>(
           "get-contact-info",
           { body: { email } },
@@ -371,6 +381,7 @@ export function ChatWidget({ settings, embedUser }: Props) {
           .from("desk_conversations")
           .insert({
             account_user_id: accountUserId,
+            user_email: email,
             channel: "chat",
             status: "open",
             priority: "medium",
@@ -427,27 +438,31 @@ export function ChatWidget({ settings, embedUser }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, embedUser?.email, account?.email]);
 
-  // ── Realtime: detect agent reply while waiting for human ────────────────────
-  // When the conversation is in "pending/waiting for human" state and an agent
-  // sends a message, we unlock the composer so the client can continue chatting.
+  // ── Realtime: detect an operator taking over the conversation ───────────────
+  // While the client waits for a human, we watch desk_conversations for the
+  // moment an operator assumes it: assigned_agent_id becomes non-null (usually
+  // alongside status going back to 'open'). When that happens we surface a
+  // "✅ Atendente conectado" banner and unlock the composer.
   useEffect(() => {
     const convId = conversation?.id;
     if (!convId || !isWaitingForHuman) return;
 
     const channel = supabase
-      .channel(`widget-agent-reply:${convId}`)
+      .channel(`widget-agent-takeover:${convId}`)
       .on(
         "postgres_changes",
         {
-          event: "INSERT",
+          event: "UPDATE",
           schema: "public",
-          table: "desk_messages",
-          filter: `conversation_id=eq.${convId}`,
+          table: "desk_conversations",
+          filter: `id=eq.${convId}`,
         },
         (payload) => {
-          const msg = payload.new as Record<string, unknown>;
-          if (msg.sender_type === "agent") {
-            // Agent responded — unlock the composer
+          const conv = payload.new as Record<string, unknown>;
+          const assigned = conv.assigned_agent_id;
+          // Operator assumed the conversation
+          if (assigned !== null && assigned !== undefined && assigned !== "") {
+            setAgentConnected(true);
             setIsWaitingForHuman(false);
           }
         }
@@ -455,7 +470,7 @@ export function ChatWidget({ settings, embedUser }: Props) {
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
-  }, [conversation?.id, isWaitingForHuman, setIsWaitingForHuman]);
+  }, [conversation?.id, isWaitingForHuman, setIsWaitingForHuman, setAgentConnected]);
 
   // ── Realtime: subscribe at the ChatWidget level (NOT inside ChatWidgetThread)
   // This runs before any isOpen/conversation guard, so the subscription stays alive
@@ -488,6 +503,14 @@ export function ChatWidget({ settings, embedUser }: Props) {
 
         console.log(`[Widget] new message — sender: ${newMsg.sender_type}`);
         store.setMessages([...current, newMsg]);
+
+        // Destrava o composer assim que um operador humano responde.
+        // Caminho mais confiável que o UPDATE de desk_conversations (que pode ser
+        // bloqueado por RLS): desk_messages já tem Realtime + broadcast escutados aqui.
+        if (newMsg.sender_type === "agent" && store.isWaitingForHuman) {
+          store.setIsWaitingForHuman(false);
+          store.setAgentConnected(true);
+        }
       } catch (err) {
         console.error("[Widget] addToStore error:", err);
       }
@@ -565,8 +588,8 @@ export function ChatWidget({ settings, embedUser }: Props) {
             <CSATFeedback />
           ) : (
             <>
-              {/* "Falar com humano" — only shown when AI is active and not already waiting */}
-              {!isWaitingForHuman && (
+              {/* "Falar com humano" — só quando a IA está ativa, sem espera nem atendente conectado */}
+              {!isWaitingForHuman && !agentConnected && (
                 <div className="px-4 pb-1">
                   <button
                     onClick={async () => {
@@ -608,12 +631,21 @@ export function ChatWidget({ settings, embedUser }: Props) {
                 </div>
               )}
 
-              {/* Waiting state banner */}
+              {/* Aguardando atendente humano */}
               {isWaitingForHuman && (
                 <div className="px-4 pb-2">
                   <p className="text-[11px] text-amber-500 flex items-center gap-1.5">
-                    <span className="animate-pulse">●</span>
-                    Aguardando atendente disponível...
+                    <span className="animate-pulse">⏳</span>
+                    Aguardando um atendente humano...
+                  </p>
+                </div>
+              )}
+
+              {/* Atendente conectou na conversa */}
+              {agentConnected && !isWaitingForHuman && (
+                <div className="px-4 pb-2">
+                  <p className="text-[11px] text-emerald-500 flex items-center gap-1.5">
+                    ✅ Atendente conectado
                   </p>
                 </div>
               )}

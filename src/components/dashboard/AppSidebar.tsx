@@ -23,7 +23,7 @@ interface DeskView {
   color: string;
   order_index: number;
   filters: {
-    airtable_product?: string;
+    plan_product?: string;
     status?: string;
     priority?: string;
   };
@@ -116,9 +116,9 @@ export function AppSidebar() {
           query = query.eq("priority", f.priority);
         }
 
-        // TODO: filter by airtable_product
-        // This requires a cache of (account_user_id → plan) fetched from Airtable.
-        // Until that cache is implemented, airtable_product filter is skipped here
+        // TODO: filter by plan_product
+        // This requires a cache of (account_user_id → plan) fetched from the CRM.
+        // Until that cache is implemented, plan_product filter is skipped here
         // and will always show all conversations matching the other criteria.
 
         const { count } = await query;

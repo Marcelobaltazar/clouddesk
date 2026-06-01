@@ -24,7 +24,7 @@ import { format, formatDistanceToNow } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { type ContactInfo, planLabel } from "@/lib/airtable";
+import { type ContactInfo, planLabel } from "@/lib/contact-info";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -84,7 +84,7 @@ export default function Contacts() {
     }
 
     debounceRef.current = setTimeout(() => {
-      searchAirtable(query.trim());
+      searchContact(query.trim());
     }, 400);
 
     return () => {
@@ -92,7 +92,7 @@ export default function Contacts() {
     };
   }, [query]);
 
-  async function searchAirtable(email: string) {
+  async function searchContact(email: string) {
     setIsSearching(true);
     setError(null);
     setHasSearched(true);
@@ -110,7 +110,9 @@ export default function Contacts() {
     }
 
     const info = data as ContactInfo | null;
-    if (info?.customer || info?.subscription || info?.infra) {
+    const hasData =
+      !!info?.customer || (info?.subscriptions?.length ?? 0) > 0 || (info?.infras?.length ?? 0) > 0;
+    if (info && hasData) {
       setResults([info]);
     } else {
       setResults([]);
@@ -204,7 +206,8 @@ function ContactCard({
   info: ContactInfo;
   onClick: () => void;
 }) {
-  const { customer, subscription } = info;
+  const { customer } = info;
+  const subscription = info.subscriptions[0] ?? null;
   const plan = planLabel(subscription);
 
   return (
@@ -306,7 +309,9 @@ function ContactDrawer({
 
   if (!info) return null;
 
-  const { customer, subscription, infra } = info;
+  const { customer } = info;
+  const subscription = info.subscriptions[0] ?? null;
+  const infra = info.infras[0] ?? null;
 
   return (
     <Sheet open={!!info} onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -316,13 +321,6 @@ function ContactDrawer({
         </SheetHeader>
 
         <div className="space-y-5">
-          {info.airtable_limited && (
-            <div className="flex items-center gap-1.5 text-[11px] text-amber-500 bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1.5">
-              <AlertCircle className="h-3 w-3 shrink-0" />
-              Dados parciais — limite do Airtable atingido
-            </div>
-          )}
-
           {/* Identity */}
           <Section icon={Users} title="Dados do contato">
             <InfoRow label="Nome" value={customer?.name} />

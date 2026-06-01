@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { KeyRound, Loader2, Check, X } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import type { AirtableInfra } from "@/lib/airtable";
+import type { ContactInfra } from "@/lib/contact-info";
 
 interface Props {
-  infras: AirtableInfra[];
+  infras: ContactInfra[];
 }
 
 type SendState = "idle" | "loading" | "done" | "error" | "no_infra";

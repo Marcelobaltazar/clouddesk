@@ -9,11 +9,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { MessageSquare, Mail, Bot, User, Search, UserRound, CheckCircle, X } from "lucide-react";
-import { formatDistanceToNow, differenceInSeconds } from "date-fns";
-import { ptBR } from "date-fns/locale";
+import { MessageSquare, Mail, Bot, User, Search, UserRound, CheckCircle, X, Clock } from "lucide-react";
+import { differenceInSeconds } from "date-fns";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { timeAgoShort, timeUntilShort } from "@/lib/dates";
 
 // ─── Tab config ───────────────────────────────────────────────────────────────
 
@@ -196,7 +196,8 @@ export function ConversationList() {
   function toggleOne(id: string) {
     setSelected((prev) => {
       const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   }
@@ -267,37 +268,47 @@ export function ConversationList() {
         </button>
       </div>
 
-      {/* ── Tabs ── */}
+      {/* ── Tabs (live counters per status — Item 6) ── */}
       <div className="flex border-b border-border shrink-0">
-        {TABS.map((tab) => (
-          <button
-            key={tab.value}
-            onClick={() => setActiveTab(tab.value, true)}
-            className={cn(
-              "flex-1 py-2.5 text-[11px] font-medium transition-colors relative",
-              activeTab === tab.value
-                ? "text-primary"
-                : "text-muted-foreground hover:text-foreground"
-            )}
-          >
-            {tab.label}
-            {/* "open" tab: show unread indicator if there are unseen conversations */}
-            {tab.value === "open" && unreadCount > 0 && (
-              <Badge className="ml-1 bg-primary text-primary-foreground text-[9px] px-1 py-0 h-4">
-                {unreadCount}
-              </Badge>
-            )}
-            {/* Other tabs: show count from DB (accurate, not in-memory) */}
-            {tab.value !== "open" && tab.value !== "resolved" && tabCounts[tab.value] > 0 && (
-              <Badge className="ml-1 bg-primary/10 text-primary text-[9px] px-1 py-0 h-4">
-                {tabCounts[tab.value]}
-              </Badge>
-            )}
-            {activeTab === tab.value && (
-              <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-full" />
-            )}
-          </button>
-        ))}
+        {TABS.map((tab) => {
+          const isActive = activeTab === tab.value;
+          const count = tabCounts[tab.value];
+          // "open" tab highlights unread (unseen) conversations; the rest show total per status.
+          const showUnread = tab.value === "open" && unreadCount > 0;
+          return (
+            <button
+              key={tab.value}
+              onClick={() => setActiveTab(tab.value, true)}
+              className={cn(
+                "flex-1 py-2.5 text-[11px] font-medium transition-colors relative inline-flex items-center justify-center gap-1",
+                isActive ? "text-primary" : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {tab.label}
+              {showUnread ? (
+                <Badge className="bg-primary text-primary-foreground text-[9px] px-1 py-0 h-4 min-w-4 justify-center">
+                  {unreadCount}
+                </Badge>
+              ) : (
+                count > 0 && (
+                  <Badge
+                    className={cn(
+                      "text-[9px] px-1 py-0 h-4 min-w-4 justify-center",
+                      isActive
+                        ? "bg-primary/15 text-primary"
+                        : "bg-muted text-muted-foreground"
+                    )}
+                  >
+                    {count}
+                  </Badge>
+                )
+              )}
+              {isActive && (
+                <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-full" />
+              )}
+            </button>
+          );
+        })}
       </div>
 
       {/* ── Bulk action bar (replaces header when selecting) ── */}
@@ -398,7 +409,7 @@ function ConversationItem({
   const preview     = conv.last_message?.content?.slice(0, 80) ?? "Sem mensagens";
   const isBot       = conv.last_message?.sender_type === "bot";
   const time        = conv.last_message?.created_at
-    ? formatDistanceToNow(new Date(conv.last_message.created_at), { addSuffix: false, locale: ptBR })
+    ? timeAgoShort(conv.last_message.created_at)
     : "";
 
   const showCheckbox = selectionMode || hovered || isSelected;
@@ -520,6 +531,12 @@ function ConversationItem({
 
           <div className="flex items-center justify-between mt-1">
             <div className="flex items-center gap-1 flex-wrap">
+              {conv.status === "snoozed" && (
+                <span className="inline-flex items-center gap-0.5 text-[9px] text-violet-400 bg-violet-500/10 border border-violet-500/20 px-1.5 py-0.5 rounded-full font-medium">
+                  <Clock className="h-2.5 w-2.5" /> Adiada
+                  {conv.snoozed_until && ` · ${timeUntilShort(conv.snoozed_until)}`}
+                </span>
+              )}
               {conv.status === "pending" && (
                 <span className="inline-flex items-center gap-0.5 text-[9px] text-amber-500 bg-amber-500/10 border border-amber-500/20 px-1.5 py-0.5 rounded-full font-medium">
                   <UserRound className="h-2.5 w-2.5" /> Aguardando humano

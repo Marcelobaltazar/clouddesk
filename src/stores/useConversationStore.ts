@@ -54,7 +54,7 @@ export interface ClientProfile {
   purchases: ClientPurchase[];
 }
 
-export interface AirtableContactInfo {
+export interface CrmContactInfo {
   product: string | null;   // nome do plano (ex: "Cloud Advanced") — usado no match de SLA
   interval: string | null;  // "month" | "year"
   status: string | null;
@@ -73,9 +73,9 @@ interface ConversationState {
   clientProfile: ClientProfile | null;
   isLoadingProfile: boolean;
 
-  // Airtable enrichment (plan, status, mrr) — set externally by ClientInfoPanel
-  airtableInfo: AirtableContactInfo | null;
-  setAirtableInfo: (info: AirtableContactInfo | null) => void;
+  // CRM enrichment (plan, status, mrr) — set externally by ClientInfoPanel
+  crmInfo: CrmContactInfo | null;
+  setCrmInfo: (info: CrmContactInfo | null) => void;
 
   // Actions
   loadMessages: (conversationId: string) => Promise<void>;
@@ -105,8 +105,8 @@ export const useConversationStore = create<ConversationState>((set) => ({
   isLoadingMessages: false,
   clientProfile: null,
   isLoadingProfile: false,
-  airtableInfo: null,
-  setAirtableInfo: (info) => set({ airtableInfo: info }),
+  crmInfo: null,
+  setCrmInfo: (info) => set({ crmInfo: info }),
 
   // ── Messages ────────────────────────────────────────────────────────────────
 
@@ -205,7 +205,7 @@ export const useConversationStore = create<ConversationState>((set) => ({
     });
   },
 
-  clearClientProfile: () => set({ clientProfile: null, isLoadingProfile: false, airtableInfo: null }),
+  clearClientProfile: () => set({ clientProfile: null, isLoadingProfile: false, crmInfo: null }),
 
   // ── SLA ─────────────────────────────────────────────────────────────────────
 

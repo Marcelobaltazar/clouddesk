@@ -18,13 +18,15 @@ import {
   RefreshCw,
   Copy,
   Building2,
-  TrendingUp,
+  Server,
+  MessageSquare,
 } from "lucide-react";
 import { format, formatDistanceToNow } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { type ContactInfo, planLabel } from "@/lib/airtable";
+import { type ContactInfo, type ContactSubscription, type ContactInfra, planLabel, deploymentStatusStyle } from "@/lib/contact-info";
+import { formatDateTimeBR } from "@/lib/dates";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -98,7 +100,7 @@ export function ClientInfoPanel() {
   const conversations = useInboxStore((s) => s.conversations);
   const conversation = conversations.find((c) => c.id === activeConversationId);
 
-  const { clientProfile, isLoadingProfile, loadClientProfile, clearClientProfile, setAirtableInfo } =
+  const { clientProfile, isLoadingProfile, loadClientProfile, clearClientProfile, setCrmInfo } =
     useConversationStore();
 
   const [contactInfo, setContactInfo] = useState<ContactInfo | null>(null);
@@ -115,49 +117,58 @@ export function ClientInfoPanel() {
     }
   }, [conversation?.account_user_id, loadClientProfile, clearClientProfile]);
 
-  // Fetch Airtable data once we have the email from the Supabase profile
+  // Email do cliente: prioriza o salvo na própria conversa (funciona até para
+  // visitantes sem linha em `account`), com fallback para o email do perfil.
+  const contactEmail = conversation?.user_email ?? clientProfile?.account?.email ?? null;
+
+  // Busca dados do CRM (Supabase de produção) assim que temos o email
   useEffect(() => {
-    const email = clientProfile?.account?.email;
-    console.log("[ClientInfoPanel] clientProfile atualizado, email:", email, "| clientProfile:", clientProfile);
+    const email = contactEmail;
     if (!email) return;
 
-    console.log("[ClientInfoPanel] 4. chamando get-contact-info com email:", email);
     setContactInfo(null);
     supabase.functions
       .invoke("get-contact-info", { body: { email } })
-      .then(({ data, error }) => {
-        console.log("[ClientInfoPanel] 5. retorno get-contact-info:", { data, error });
+      .then(({ data }) => {
         const info = data as ContactInfo | null;
-        if (info?.customer || info?.subscription || info?.infra) {
+        const hasData =
+          !!info?.customer || (info?.subscriptions?.length ?? 0) > 0 || (info?.infras?.length ?? 0) > 0;
+        if (info && hasData) {
           setContactInfo(info);
-          // Expose plan (product) + key fields to the store so ConversationThread can apply SLA
-          setAirtableInfo({
-            product:  info.subscription?.product ?? null,
-            interval: info.subscription?.interval ?? null,
-            status:   info.subscription?.status ?? null,
-            mrr:      info.subscription?.mrr ?? null,
+          // Primeira assinatura define o plano usado no match de SLA
+          const primarySub = info.subscriptions[0] ?? null;
+          setCrmInfo({
+            product:  primarySub?.product ?? null,
+            interval: primarySub?.interval ?? null,
+            status:   primarySub?.status ?? null,
+            mrr:      primarySub?.mrr ?? null,
             referral: info.customer?.referral ?? null,
           });
         } else {
           setContactInfo(null);
-          setAirtableInfo(null);
+          setCrmInfo(null);
         }
       })
       .catch((err) => {
-        console.warn("[ClientInfoPanel] Airtable fetch failed:", err);
+        console.warn("[ClientInfoPanel] get-contact-info falhou:", err);
       });
-  }, [clientProfile?.account?.email]);
+  }, [contactEmail]);
 
   if (!conversation) return null;
 
   if (isLoadingProfile) return <ClientInfoSkeleton />;
 
+  // ── Visitante sem linha em `account` ────────────────────────────────────────
+  // Mesmo sem registro local, podemos ter o email salvo na conversa e dados de
+  // CRM (assinaturas/infra) vindos do get-contact-info. Mostramos tudo que houver
+  // em vez da mensagem seca de "não identificado".
   if (!clientProfile) {
     return (
-      <div className="flex flex-col items-center justify-center gap-2 p-6 text-center text-muted-foreground">
-        <User className="h-8 w-8 opacity-30" />
-        <p className="text-xs">Dados do cliente não encontrados</p>
-      </div>
+      <UnknownContactPanel
+        conversation={conversation}
+        email={contactEmail}
+        contactInfo={contactInfo}
+      />
     );
   }
 
@@ -264,86 +275,38 @@ export function ClientInfoPanel() {
         )}
       </div>
 
-      {/* ── Airtable CRM data ── */}
-      {(contactInfo?.subscription || contactInfo?.infra) && (
+      {/* ── Assinaturas (CRM Cloudfy via get-contact-info) ── */}
+      {contactInfo && contactInfo.subscriptions.length > 0 && (
         <>
           <Separator />
           <div className="px-4 py-3 space-y-2.5">
-            <SectionHeader icon={Building2} title="CRM (Airtable)" />
+            <SectionHeader icon={Building2} title="Assinaturas" count={contactInfo.subscriptions.length} />
+            <div className="space-y-2">
+              {contactInfo.subscriptions.map((sub, i) => (
+                <SubscriptionCard key={sub.subscription_id || i} sub={sub} />
+              ))}
+            </div>
+          </div>
+        </>
+      )}
 
-            {contactInfo.airtable_limited && (
-              <div className="flex items-center gap-1.5 text-[10px] text-amber-500 bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1">
-                <AlertTriangle className="h-2.5 w-2.5 shrink-0" />
-                Dados parciais — limite do Airtable atingido
-              </div>
-            )}
-
-            {contactInfo.subscription && (
-              <div className="space-y-1.5 text-xs">
-                {planLabel(contactInfo.subscription) && (
-                  <MetaRow label="Plano" value={planLabel(contactInfo.subscription)!} />
-                )}
-                {contactInfo.subscription.status && (
-                  <MetaRow label="Status CRM" value={contactInfo.subscription.status} />
-                )}
-                {contactInfo.subscription.mrr != null && contactInfo.subscription.mrr > 0 && (
-                  <MetaRow
-                    label="MRR"
-                    value={formatCurrency(contactInfo.subscription.mrr, "BRL")}
-                    highlight
-                  />
-                )}
-                {contactInfo.subscription.promocode && (
-                  <MetaRow label="Promocode" value={contactInfo.subscription.promocode} />
-                )}
-                {contactInfo.customer?.referral && (
-                  <MetaRow label="Referral" value={contactInfo.customer.referral} />
-                )}
-                {contactInfo.subscription.subscription_id && (
-                  <div className="flex items-center gap-2 group">
-                    <CreditCard className="h-3 w-3 text-muted-foreground shrink-0" />
-                    <span className="font-mono text-[10px] text-muted-foreground truncate flex-1">
-                      {contactInfo.subscription.subscription_id}
-                    </span>
-                    <button
-                      onClick={() => copyToClipboard(contactInfo.subscription!.subscription_id, "Subscription ID")}
-                      className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-muted"
-                    >
-                      <Copy className="h-3 w-3 text-muted-foreground" />
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Infra usage */}
-            {contactInfo.infra && (
-              <div className="mt-2 rounded-md border border-border bg-muted/30 p-2 space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1">
-                    <TrendingUp className="h-3 w-3 text-muted-foreground" />
-                    <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
-                      Infraestrutura
-                    </span>
-                  </div>
-                  {contactInfo.infra.status && (
-                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 h-4">
-                      {contactInfo.infra.status}
-                    </Badge>
-                  )}
-                </div>
-                {contactInfo.infra.purchase_code && (
-                  <p className="text-[10px] font-mono text-muted-foreground opacity-70 truncate">
-                    {contactInfo.infra.purchase_code}
-                  </p>
-                )}
-                <div className="grid grid-cols-3 gap-1 pt-0.5">
-                  <UsageStat label="24h" value={contactInfo.infra.requests_24h} />
-                  <UsageStat label="7d"  value={contactInfo.infra.requests_7d} />
-                  <UsageStat label="30d" value={contactInfo.infra.requests_30d} />
-                </div>
-              </div>
-            )}
+      {/* ── Infraestruturas (CRM Cloudfy via get-contact-info) ── */}
+      {contactInfo && contactInfo.infras.length > 0 && (
+        <>
+          <Separator />
+          <div className="px-4 py-3 space-y-2.5">
+            <SectionHeader icon={Server} title="Infraestruturas" count={contactInfo.infras.length} />
+            <div className="space-y-2">
+              {contactInfo.infras.map((infra, i) => (
+                <InfraCard
+                  key={infra.infra_id || i}
+                  infra={infra}
+                  onCopyDomain={() =>
+                    infra.default_domain && copyToClipboard(infra.default_domain, "Domínio")
+                  }
+                />
+              ))}
+            </div>
           </div>
         </>
       )}
@@ -498,7 +461,7 @@ function MetaGrid({
       <MetaRow label="Prioridade" value={priorityLabels[conversation.priority] ?? conversation.priority} />
       <MetaRow
         label="Criada"
-        value={format(new Date(conversation.created_at), "dd/MM/yyyy HH:mm", { locale: ptBR })}
+        value={formatDateTimeBR(conversation.created_at)}
       />
       {conversation.sla_deadline && (
         <MetaRow
@@ -517,13 +480,159 @@ function MetaGrid({
   );
 }
 
-function UsageStat({ label, value }: { label: string; value: number }) {
+/** Data curta pt-BR: "15/02/2026" (vazio → "—") */
+function formatDateShortBR(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
+}
+
+function SubscriptionCard({ sub }: { sub: ContactSubscription }) {
+  const style = deploymentStatusStyle(sub.infra_status);
+  const plan = planLabel(sub) ?? sub.product ?? "Assinatura";
+
   return (
-    <div className="flex flex-col items-center rounded bg-card/60 py-1">
-      <span className="text-[11px] font-semibold text-card-foreground tabular-nums">
-        {value.toLocaleString("pt-BR")}
-      </span>
-      <span className="text-[9px] text-muted-foreground">{label}</span>
+    <div className="rounded-lg border border-border bg-surface p-2.5 space-y-1.5">
+      <div className="flex items-start justify-between gap-1.5">
+        <p className="text-xs font-medium text-card-foreground leading-tight">{plan}</p>
+        <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0 h-4 shrink-0 border", style.cls)}>
+          <span className={cn("h-1.5 w-1.5 rounded-full mr-1", style.dotCls)} />
+          {style.label}
+        </Badge>
+      </div>
+      <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+        <span>Desde {formatDateShortBR(sub.created_at)}</span>
+        {sub.mrr > 0 && (
+          <span className="font-medium text-card-foreground">
+            {formatCurrency(sub.mrr, "BRL")}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function InfraCard({ infra, onCopyDomain }: { infra: ContactInfra; onCopyDomain: () => void }) {
+  const style = deploymentStatusStyle(infra.status);
+  const name = infra.default_domain || infra.purchase_code || "Infraestrutura";
+
+  return (
+    <div className="rounded-lg border border-border bg-surface p-2.5 space-y-1.5">
+      <div className="flex items-start justify-between gap-1.5">
+        <div className="flex items-center gap-1.5 min-w-0 group">
+          <Server className="h-3 w-3 text-muted-foreground shrink-0" />
+          <p className="text-xs font-medium text-card-foreground truncate">{name}</p>
+          {infra.default_domain && (
+            <button
+              onClick={onCopyDomain}
+              className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-muted shrink-0"
+              title="Copiar domínio"
+            >
+              <Copy className="h-3 w-3 text-muted-foreground" />
+            </button>
+          )}
+        </div>
+        <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0 h-4 shrink-0 border", style.cls)}>
+          <span className={cn("h-1.5 w-1.5 rounded-full mr-1", style.dotCls)} />
+          {style.label}
+        </Badge>
+      </div>
+      {infra.purchase_code && infra.purchase_code !== infra.default_domain && (
+        <p className="text-[10px] font-mono text-muted-foreground opacity-60 truncate">
+          {infra.purchase_code}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ─── Correção 3: painel para visitante sem conta cadastrada ───────────────────
+
+function UnknownContactPanel({
+  conversation,
+  email,
+  contactInfo,
+}: {
+  conversation: ReturnType<typeof useInboxStore.getState>["conversations"][number];
+  email: string | null;
+  contactInfo: ContactInfo | null;
+}) {
+  const name =
+    contactInfo?.customer?.name || conversation.contact?.name || conversation.subject || "Visitante";
+  const avatarColor = nameToHsl(name);
+  const abbr = initials(name, email);
+  const identified = !!contactInfo?.customer || (contactInfo?.subscriptions?.length ?? 0) > 0;
+
+  return (
+    <div className="space-y-0">
+      {/* Avatar + identidade */}
+      <div className="p-4 flex flex-col items-center text-center gap-1.5">
+        <div
+          className="h-14 w-14 rounded-full flex items-center justify-center text-white font-bold text-lg select-none"
+          style={{ backgroundColor: avatarColor }}
+        >
+          {abbr}
+        </div>
+        <h3 className="text-sm font-semibold text-card-foreground leading-tight">{name}</h3>
+        {!identified && (
+          <p className="text-[10px] text-muted-foreground italic">Cliente não identificado no sistema</p>
+        )}
+      </div>
+
+      {/* Email (quando salvo na conversa) */}
+      {email && (
+        <div className="px-4 pb-3">
+          <ContactRow icon={Mail} label={email} onCopy={() => copyToClipboard(email, "E-mail")} />
+        </div>
+      )}
+
+      {/* Assinaturas do CRM */}
+      {contactInfo && contactInfo.subscriptions.length > 0 && (
+        <>
+          <Separator />
+          <div className="px-4 py-3 space-y-2.5">
+            <SectionHeader icon={Building2} title="Assinaturas" count={contactInfo.subscriptions.length} />
+            <div className="space-y-2">
+              {contactInfo.subscriptions.map((sub, i) => (
+                <SubscriptionCard key={sub.subscription_id || i} sub={sub} />
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Infraestruturas do CRM */}
+      {contactInfo && contactInfo.infras.length > 0 && (
+        <>
+          <Separator />
+          <div className="px-4 py-3 space-y-2.5">
+            <SectionHeader icon={Server} title="Infraestruturas" count={contactInfo.infras.length} />
+            <div className="space-y-2">
+              {contactInfo.infras.map((infra, i) => (
+                <InfraCard
+                  key={infra.infra_id || i}
+                  infra={infra}
+                  onCopyDomain={() =>
+                    infra.default_domain && copyToClipboard(infra.default_domain, "Domínio")
+                  }
+                />
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+
+      <Separator />
+
+      {/* Metadados da conversa */}
+      <div className="px-4 py-3 space-y-2.5">
+        <SectionHeader icon={MessageSquare} title="Conversa" />
+        <div className="space-y-1.5 text-xs">
+          <MetaRow label="Canal" value={conversation.channel === "email" ? "E-mail" : "Chat"} />
+          <MetaRow label="Iniciado em" value={formatDateTimeBR(conversation.created_at)} />
+        </div>
+      </div>
     </div>
   );
 }

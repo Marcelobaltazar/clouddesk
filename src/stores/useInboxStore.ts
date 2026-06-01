@@ -23,6 +23,7 @@ export interface ConversationLastMessage {
 export interface Conversation {
   id: string;
   account_user_id: string;
+  user_email: string | null;
   assigned_agent_id: string | null;
   channel: ConversationChannel;
   status: ConversationStatus;
@@ -30,6 +31,7 @@ export interface Conversation {
   subject: string | null;
   ai_active: boolean;
   sla_deadline: string | null;
+  snoozed_until: string | null;
   first_response_at: string | null;
   resolved_at: string | null;
   first_seen_by_agent_at: string | null;

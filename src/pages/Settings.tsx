@@ -51,7 +51,7 @@ interface DeskView {
 }
 
 interface ViewFilters {
-  airtable_product?: string;
+  plan_product?: string;
   status?: string;
   priority?: string;
 }
@@ -326,7 +326,7 @@ function ViewsTab() {
     setSaving(true);
 
     const filters: ViewFilters = {};
-    if (form.filter_product.trim()) filters.airtable_product = form.filter_product.trim();
+    if (form.filter_product.trim()) filters.plan_product = form.filter_product.trim();
     if (form.filter_status !== STATUS_ALL) filters.status = form.filter_status;
     if (form.filter_priority !== PRIORITY_ALL) filters.priority = form.filter_priority;
 
@@ -449,7 +449,7 @@ function ViewsTab() {
 
           <div className="grid grid-cols-1 gap-3">
             <div className="space-y-1.5">
-              <label className="text-xs text-muted-foreground">Plano (Airtable)</label>
+              <label className="text-xs text-muted-foreground">Plano (CRM)</label>
               <Input
                 placeholder="Ex: Cloud Max, Cloud Starter"
                 value={form.filter_product}
@@ -583,7 +583,7 @@ function ViewsTab() {
 
 function ViewFilterSummary({ filters }: { filters: ViewFilters }) {
   const parts: string[] = [];
-  if (filters.airtable_product) parts.push(`Plano: ${filters.airtable_product}`);
+  if (filters.plan_product) parts.push(`Plano: ${filters.plan_product}`);
   if (filters.status) {
     const label = statusOptions.find((o) => o.value === filters.status)?.label ?? filters.status;
     parts.push(`Status: ${label}`);
@@ -716,7 +716,7 @@ function SlaTab() {
               />
             </div>
             <div className="space-y-1.5">
-              <label className="text-xs text-muted-foreground">Plano (Airtable)</label>
+              <label className="text-xs text-muted-foreground">Plano (CRM)</label>
               <Input
                 placeholder="Ex: Cloud Max"
                 value={form.plan}
