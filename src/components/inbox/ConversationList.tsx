@@ -38,6 +38,28 @@ const channelIcon: Record<string, typeof MessageSquare> = {
   email: Mail,
 };
 
+// ─── Plan badge (item 3) ───────────────────────────────────────────────────────
+// A Edge Function desk-ai-respond grava a tag do plano mais alto do cliente em
+// desk_conversations.tags. Mapeamos cada plano para um rótulo + cor de badge.
+
+const PLAN_BADGES: Record<string, { label: string; cls: string }> = {
+  max:        { label: "Max",     cls: "bg-fuchsia-500/15 text-fuchsia-400 border border-fuchsia-500/30" },
+  ultra:      { label: "Ultra",   cls: "bg-violet-500/15 text-violet-400 border border-violet-500/30"   },
+  advanced:   { label: "Advanced",cls: "bg-sky-500/15 text-sky-400 border border-sky-500/30"            },
+  starter:    { label: "Starter", cls: "bg-slate-500/15 text-slate-400 border border-slate-500/30"      },
+  "sem-plano":{ label: "Sem plano",cls: "bg-muted text-muted-foreground border border-border"           },
+};
+
+/** Retorna a config de badge do plano a partir das tags da conversa (ou null). */
+function planBadgeFor(tags: string[] | null | undefined): { label: string; cls: string } | null {
+  if (!tags?.length) return null;
+  for (const tag of tags) {
+    const badge = PLAN_BADGES[tag.toLowerCase()];
+    if (badge) return badge;
+  }
+  return null;
+}
+
 // ─── SLA helpers ──────────────────────────────────────────────────────────────
 
 function SlaTimer({ deadline }: { deadline: string }) {
@@ -408,6 +430,7 @@ function ConversationItem({
   const name        = conv.contact?.name || conv.contact?.email || "Visitante";
   const preview     = conv.last_message?.content?.slice(0, 80) ?? "Sem mensagens";
   const isBot       = conv.last_message?.sender_type === "bot";
+  const planBadge   = planBadgeFor(conv.tags);
   const time        = conv.last_message?.created_at
     ? timeAgoShort(conv.last_message.created_at)
     : "";
@@ -531,6 +554,11 @@ function ConversationItem({
 
           <div className="flex items-center justify-between mt-1">
             <div className="flex items-center gap-1 flex-wrap">
+              {planBadge && (
+                <span className={cn("text-[9px] px-1.5 py-0.5 rounded-full font-medium", planBadge.cls)}>
+                  {planBadge.label}
+                </span>
+              )}
               {conv.status === "snoozed" && (
                 <span className="inline-flex items-center gap-0.5 text-[9px] text-violet-400 bg-violet-500/10 border border-violet-500/20 px-1.5 py-0.5 rounded-full font-medium">
                   <Clock className="h-2.5 w-2.5" /> Adiada

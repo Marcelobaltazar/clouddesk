@@ -11,7 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { Bot, Lock, Info, CheckCircle, Send, MessageSquare, UserPlus, Clock, BookOpen, Reply, Search } from "lucide-react";
+import { Bot, Lock, Info, CheckCircle, Send, MessageSquare, UserPlus, Clock, BookOpen, Reply, Search, Zap } from "lucide-react";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
@@ -60,6 +60,16 @@ interface KbArticle {
   id: string;
   title: string;
   content: string;
+}
+
+// ─── Snippet type (resposta rápida reutilizável) ───────────────────────────────
+
+interface Snippet {
+  id: string;
+  title: string;
+  content: string;
+  shortcut: string | null;
+  category: string | null;
 }
 
 // Remove sintaxe Markdown comum, deixando texto limpo e legível para o cliente.
@@ -132,6 +142,12 @@ export function ConversationThread() {
   const [kbResults, setKbResults]   = useState<KbArticle[]>([]);
   const [kbLoading, setKbLoading]   = useState(false);
 
+  // Snippets picker (respostas rápidas) — item 5
+  const [snippetOpen, setSnippetOpen]   = useState(false);
+  const [snippetQuery, setSnippetQuery] = useState("");
+  const [snippets, setSnippets]         = useState<Snippet[]>([]);
+  const [snippetsLoaded, setSnippetsLoaded] = useState(false);
+
   const isNote = mode === "note";
   const conversation = conversations.find((c) => c.id === activeConversationId);
 
@@ -171,6 +187,7 @@ export function ConversationThread() {
     setMode("reply");
     setSnoozeOpen(false);
     setKbOpen(false);
+    setSnippetOpen(false);
   }, [activeConversationId, loadMessages, clearMessages]);
 
   // ── Mark conversation as first seen by agent ────────────────────────────────
@@ -255,6 +272,35 @@ export function ConversationThread() {
     const t = setTimeout(() => searchKb(kbQuery), 250);
     return () => clearTimeout(t);
   }, [kbQuery, kbOpen, searchKb]);
+
+  // ── Snippets: carga preguiçosa na primeira abertura (lista pequena) ──────────
+  const loadSnippets = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("desk_snippets")
+      .select("id, title, content, shortcut, category")
+      .order("title");
+    if (error) {
+      console.warn("[ConversationThread] snippets load failed:", error.message);
+      return;
+    }
+    setSnippets((data ?? []) as Snippet[]);
+    setSnippetsLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (snippetOpen && !snippetsLoaded) loadSnippets();
+  }, [snippetOpen, snippetsLoaded, loadSnippets]);
+
+  const filteredSnippets = (() => {
+    const q = snippetQuery.trim().toLowerCase();
+    if (!q) return snippets;
+    return snippets.filter(
+      (s) =>
+        s.title.toLowerCase().includes(q) ||
+        s.shortcut?.toLowerCase().includes(q) ||
+        s.content.toLowerCase().includes(q),
+    );
+  })();
 
   // ── Global keyboard shortcuts (Item 1 + Item 2) ─────────────────────────────
   // R → reply · N → note · Z → snooze · A → assign to me
@@ -533,6 +579,15 @@ export function ConversationThread() {
     requestAnimationFrame(() => textareaRef.current?.focus());
   };
 
+  const insertSnippet = (snippet: Snippet) => {
+    // Insere o conteúdo do snippet no composer (respeita o que já foi digitado).
+    setContent((prev) => (prev.trim() ? `${prev}\n\n${snippet.content}` : snippet.content));
+    setMode("reply");
+    setSnippetOpen(false);
+    setSnippetQuery("");
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  };
+
   return (
     <div className="flex-1 flex flex-col bg-background min-w-0">
 
@@ -731,6 +786,72 @@ export function ConversationThread() {
                 rows={1}
               />
               <div className="flex items-center gap-1 shrink-0">
+                {/* Insert snippet / resposta rápida (item 5) */}
+                <Popover open={snippetOpen} onOpenChange={setSnippetOpen}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <PopoverTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-muted-foreground"
+                        >
+                          <Zap className="h-4 w-4" />
+                        </Button>
+                      </PopoverTrigger>
+                    </TooltipTrigger>
+                    <TooltipContent>Resposta rápida</TooltipContent>
+                  </Tooltip>
+                  <PopoverContent align="end" className="w-80 p-0">
+                    <div className="p-2 border-b border-border">
+                      <div className="relative">
+                        <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
+                        <Input
+                          autoFocus
+                          value={snippetQuery}
+                          onChange={(e) => setSnippetQuery(e.target.value)}
+                          placeholder="Buscar resposta rápida..."
+                          className="pl-8 h-9 text-sm"
+                        />
+                      </div>
+                    </div>
+                    <div className="max-h-64 overflow-y-auto scrollbar-thin p-1">
+                      {!snippetsLoaded ? (
+                        <div className="p-3 space-y-2">
+                          <Skeleton className="h-8 w-full" />
+                          <Skeleton className="h-8 w-full" />
+                        </div>
+                      ) : filteredSnippets.length === 0 ? (
+                        <p className="text-xs text-muted-foreground text-center py-6">
+                          {snippets.length === 0
+                            ? "Nenhuma resposta rápida cadastrada"
+                            : "Nenhum resultado"}
+                        </p>
+                      ) : (
+                        filteredSnippets.map((snippet) => (
+                          <button
+                            key={snippet.id}
+                            onClick={() => insertSnippet(snippet)}
+                            className="w-full text-left px-2 py-1.5 rounded-md hover:bg-surface transition-colors"
+                          >
+                            <p className="text-xs font-medium text-card-foreground truncate flex items-center gap-1.5">
+                              {snippet.title}
+                              {snippet.shortcut && (
+                                <span className="text-[9px] text-muted-foreground font-mono">
+                                  {snippet.shortcut}
+                                </span>
+                              )}
+                            </p>
+                            <p className="text-[10px] text-muted-foreground truncate">
+                              {snippet.content.slice(0, 80)}
+                            </p>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  </PopoverContent>
+                </Popover>
+
                 {/* Insert KB article (Item 4) */}
                 <Popover open={kbOpen} onOpenChange={setKbOpen}>
                   <Tooltip>

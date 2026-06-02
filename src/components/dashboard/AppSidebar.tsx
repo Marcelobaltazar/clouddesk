@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { Inbox, Users, BookOpen, Zap, Settings, Cloud, LogOut, Moon, Sun, Circle, Bell, BellOff, LayoutGrid, PanelLeft } from "lucide-react";
+import { Inbox, Users, BookOpen, Zap, Settings, Cloud, LogOut, Moon, Sun, Circle, Bell, BellOff, LayoutGrid, PanelLeft, Flame } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useAuthStore } from "@/stores/authStore";
 import { useTheme } from "@/lib/theme";
@@ -36,7 +36,7 @@ const navItems = [
   { title: "Inbox",                url: "/inbox",     icon: Inbox    },
   { title: "Contatos",             url: "/contacts",  icon: Users    },
   { title: "Base de Conhecimento", url: "/knowledge", icon: BookOpen },
-  { title: "Macros",               url: "/macros",    icon: Zap      },
+  { title: "Respostas rápidas",    url: "/macros",    icon: Zap      },
   { title: "Configurações",        url: "/settings",  icon: Settings },
 ];
 
@@ -64,9 +64,14 @@ export function AppSidebar() {
       return next;
     });
   };
-  const { conversations, activeTab, setActiveTab, loadConversations, setPriorityFilter } = useInboxStore();
+  const { conversations, activeTab, setActiveTab, loadConversations, setPriorityFilter, setPriorityInFilter } = useInboxStore();
   const { isEnabled, toggle } = useNotifications();
   const location = useLocation();
+
+  // ── Prioritários: conversas abertas com prioridade high OU urgent (item 4) ──
+  const PRIORITY_LEVELS: ("high" | "urgent")[] = ["high", "urgent"];
+  const [priorityCount, setPriorityCount] = useState(0);
+  const [priorityActive, setPriorityActive] = useState(false);
 
   const openCount = activeTab === "open" ? conversations.length : 0;
   const initials = agent?.name?.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase() ?? "?";
@@ -93,6 +98,30 @@ export function AppSidebar() {
   useEffect(() => {
     loadViews();
   }, [loadViews, location.pathname]);
+
+  // Contador de prioritários (open + high/urgent). Reconta quando a inbox muda.
+  const refreshPriorityCount = useCallback(async () => {
+    const { count } = await supabase
+      .from("desk_conversations")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "open")
+      .in("priority", PRIORITY_LEVELS);
+    setPriorityCount(count ?? 0);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    refreshPriorityCount();
+  }, [refreshPriorityCount, conversations.length]);
+
+  function handlePriorityClick() {
+    setPriorityActive(true);
+    setActiveViewId(null);
+    // Define o filtro multi-prioridade ANTES de carregar (set é síncrono no Zustand).
+    setPriorityInFilter(PRIORITY_LEVELS);
+    // Garante que a aba ativa seja "Abertas" sem limpar o filtro recém-definido.
+    if (activeTab !== "open") setActiveTab("open");
+    loadConversations("open");
+  }
 
   async function fetchViewCounts(loaded: DeskView[]) {
     const counts: Record<string, number> = {};
@@ -131,6 +160,7 @@ export function AppSidebar() {
 
   function handleViewClick(view: DeskView) {
     setActiveViewId(view.id);
+    setPriorityActive(false);
 
     const targetStatus = (view.filters.status as "open" | "pending" | "snoozed" | "resolved" | undefined) ?? "open";
     const targetPriority = (view.filters.priority as "low" | "medium" | "high" | "urgent" | undefined) ?? null;
@@ -184,6 +214,13 @@ export function AppSidebar() {
               key={item.url}
               to={item.url}
               end={item.url === "/inbox"}
+              onClick={item.url === "/inbox" ? () => {
+                // Voltar para a inbox limpa qualquer filtro de prioridade ativo.
+                setPriorityActive(false);
+                setActiveViewId(null);
+                setPriorityFilter(null);
+                if (activeTab === "open") loadConversations("open", null, true);
+              } : undefined}
               className="flex items-center gap-3 px-2 py-2 rounded-md text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors text-sm"
               activeClassName="bg-sidebar-accent text-sidebar-accent-foreground font-medium"
             >
@@ -196,6 +233,31 @@ export function AppSidebar() {
               )}
             </NavLink>
           ))}
+
+          {/* Prioritários — fixo (open + high/urgent) — item 4 */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={handlePriorityClick}
+                className={cn(
+                  "w-full flex items-center gap-3 px-2 py-2 rounded-md text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors text-sm",
+                  priorityActive && "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
+                )}
+              >
+                <Flame className="h-5 w-5 shrink-0 text-rose-500" />
+                {isOpen && <span className="whitespace-nowrap flex-1 text-left">Prioritários</span>}
+                {isOpen && priorityCount > 0 && (
+                  <Badge className="ml-auto bg-rose-500/15 text-rose-500 text-[10px] px-1.5 py-0 h-5 min-w-5 flex items-center justify-center">
+                    {priorityCount}
+                  </Badge>
+                )}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="right">
+              <p>Prioritários</p>
+              <p className="text-xs text-muted-foreground">{priorityCount} conversas abertas (alta/urgente)</p>
+            </TooltipContent>
+          </Tooltip>
 
           {/* Dynamic views section */}
           {views.length > 0 && (

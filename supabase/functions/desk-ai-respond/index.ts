@@ -86,15 +86,36 @@ async function applyPlanTag(
   }
 }
 
-// URL pública do artigo na central de ajuda. Só existe para artigos importados
-// do Intercom (público ou interno) — para esses o source_id é o ID do Intercom.
-// 'intercom_gap' e 'manual' não têm página pública por ora → sem link.
-function kbArticleUrl(source: string | null, sourceId: string | null): string | null {
-  if (!sourceId) return null;
-  if (source === 'intercom' || source === 'intercom_internal') {
-    return `https://ajuda.cloudfy.cloud/pt-BR/articles/${sourceId}`;
-  }
-  return null;
+// Base pública da Central de Ajuda própria do CloudDesk (rota /ajuda do app).
+// Configurável via env HELP_CENTER_URL — sem barra final. Default: produção.
+const HELP_CENTER_URL = (Deno.env.get('HELP_CENTER_URL') ?? 'https://ajuda.cloudfy.cloud').replace(/\/+$/, '');
+
+// Gera o slug do título igual ao usado no frontend (HelpCenter.articlePath).
+function slugifyTitle(title: string): string {
+  return title
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9\s-]/g, '')
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .slice(0, 60);
+}
+
+// URL pública do artigo na Central de Ajuda PRÓPRIA (rota /ajuda/:id-slug do app),
+// não mais o Intercom externo. A chave é source_id (quando importado) ou o id interno.
+// Espelha src/pages/HelpCenter.tsx → articlePath().
+function kbArticleUrl(
+  _source: string | null,
+  sourceId: string | null,
+  id?: string | null,
+  title?: string | null,
+): string | null {
+  const key = sourceId ?? id;
+  if (!key) return null;
+  const slug = title ? slugifyTitle(title) : '';
+  return `${HELP_CENTER_URL}/ajuda/${key}${slug ? `-${slug}` : ''}`;
 }
 
 interface FAQMatch {
@@ -308,7 +329,7 @@ function buildSystemPrompt(
     if (kbMatches.length > 0) {
       parts.push('[ARTIGOS RELEVANTES]');
       for (const kb of kbMatches) {
-        const url = kbArticleUrl(kb.source, kb.source_id);
+        const url = kbArticleUrl(kb.source, kb.source_id, kb.id, kb.title);
         parts.push(
           `Artigo: ${kb.title}${kb.category ? ` (${kb.category})` : ''}\n` +
           `URL: ${url ?? 'null'}\n` +
@@ -334,7 +355,7 @@ function buildSystemPrompt(
     ? `
 [PLANO STARTER — SEM TRANSFERÊNCIA]
 Este cliente tem apenas plano(s) Starter ativo(s). NUNCA transfira para humano — mesmo que ele peça explicitamente. NÃO use ${TRANSFER_KEYWORD} em nenhuma hipótese.
-Tente resolver tudo você mesma. Se não conseguir resolver, oriente o cliente a usar a Central de ajuda (https://ajuda.cloudfy.cloud/pt-BR/) e o Discord (https://discord.gg/uDftSRtfKe).
+Tente resolver tudo você mesma. Se não conseguir resolver, oriente o cliente a usar a Central de ajuda (${HELP_CENTER_URL}/ajuda) e o Discord (https://discord.gg/uDftSRtfKe).
 `
     : '';
 
@@ -377,7 +398,7 @@ Você DEVE responder APENAS com a palavra-chave ${TRANSFER_KEYWORD} SOMENTE em u
 Quando transferir, retorne APENAS ${TRANSFER_KEYWORD} — nada antes ou depois, sem explicação.
 Dúvida genérica, pergunta fora de contexto, ou algo que você consegue responder NÃO são motivos para transferir.
 
-Se o cliente tem APENAS plano(s) Starter ativo(s) (nenhuma assinatura ativa de Advanced, Ultra, Max ou outro), NUNCA transfira para humano — mesmo que peça. Tente resolver tudo. Se não conseguir, oriente para a Central de ajuda (https://ajuda.cloudfy.cloud/pt-BR/) e o Discord (https://discord.gg/uDftSRtfKe). Se o cliente tiver alguma assinatura ativa não-Starter, o atendimento humano é normal.
+Se o cliente tem APENAS plano(s) Starter ativo(s) (nenhuma assinatura ativa de Advanced, Ultra, Max ou outro), NUNCA transfira para humano — mesmo que peça. Tente resolver tudo. Se não conseguir, oriente para a Central de ajuda (${HELP_CENTER_URL}/ajuda) e o Discord (https://discord.gg/uDftSRtfKe). Se o cliente tiver alguma assinatura ativa não-Starter, o atendimento humano é normal.
 
 ---
 
@@ -633,6 +654,12 @@ Deno.serve(async (req) => {
     const isFirstMessage = history.length === 0;
     console.log(`[AI] History: ${history.length} messages, firstMessage=${isFirstMessage}`);
 
+    // Tag automática por plano (item 2). Fire-and-forget: não bloqueia a resposta.
+    // Mantém desk_conversations.tags com a tag do plano mais alto do cliente.
+    const planTag = detectPlanTag(contactInfo?.subscriptions ?? []);
+    void applyPlanTag(supabase, conversation_id, planTag);
+    console.log(`[AI] Plan tag: ${planTag}`);
+
     // ── Step 2: Semantic search (RAG) ─────────────────────────────────────────
     // Generate embedding for the user's message, then query KB and FAQ in parallel.
     // Falls back gracefully: if embedding fails, the AI responds without KB context.
@@ -699,7 +726,7 @@ Deno.serve(async (req) => {
     // Starter: se o modelo tentou transferir mesmo proibido, troca o "[TRANSFERIR]"
     // residual por uma orientação para os canais de autoatendimento.
     if (isStarterClient && reply.includes(TRANSFER_KEYWORD)) {
-      reply = 'Não consegui resolver isso por aqui agora. Recomendo conferir nossa Central de ajuda em https://ajuda.cloudfy.cloud/pt-BR/ ou pedir ajuda no nosso Discord: https://discord.gg/uDftSRtfKe';
+      reply = `Não consegui resolver isso por aqui agora. Recomendo conferir nossa Central de ajuda em ${HELP_CENTER_URL}/ajuda ou pedir ajuda no nosso Discord: https://discord.gg/uDftSRtfKe`;
       metadata = null;
     }
 

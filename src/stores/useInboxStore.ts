@@ -36,6 +36,7 @@ export interface Conversation {
   resolved_at: string | null;
   first_seen_by_agent_at: string | null;
   unread_count: number;
+  tags: string[] | null;
   created_at: string;
   updated_at: string;
   // Enriched client-side
@@ -57,6 +58,8 @@ interface InboxState {
   searchQuery: string;
   isLoading: boolean;
   priorityFilter: ConversationPriority | null;
+  /** Multi-priority "OR" filter (ex.: Prioritários = high + urgent). Tem precedência sobre priorityFilter. */
+  priorityInFilter: ConversationPriority[] | null;
   /** Counts per status fetched from the DB — used for tab badges */
   tabCounts: Record<ConversationStatus, number>;
   /** Per-tab cache to avoid redundant reloads within a short window */
@@ -67,6 +70,7 @@ interface InboxState {
   setActiveConversationId: (id: string | null) => void;
   setSearchQuery: (q: string) => void;
   setPriorityFilter: (priority: ConversationPriority | null) => void;
+  setPriorityInFilter: (priorities: ConversationPriority[] | null) => void;
   loadConversations: (status: ConversationStatus, priority?: ConversationPriority | null, force?: boolean) => Promise<void>;
   refreshTabCounts: () => Promise<void>;
   upsertConversation: (raw: Record<string, unknown>) => Promise<void>;
@@ -155,23 +159,31 @@ export const useInboxStore = create<InboxState>((set, get) => ({
   searchQuery:          "",
   isLoading:            false,
   priorityFilter:       null,
+  priorityInFilter:     null,
   tabCounts:            { open: 0, pending: 0, snoozed: 0, resolved: 0 },
   _tabCache:            {},
 
   // ── Tab switching ────────────────────────────────────────────────────────────
   setActiveTab: (tab, clearPriority = false) => {
-    const { priorityFilter, _tabCache, activeConversationId, conversations } = get();
-    const newPriorityFilter = clearPriority ? null : priorityFilter;
+    const { priorityFilter, priorityInFilter, _tabCache, activeConversationId, conversations } = get();
+    const newPriorityFilter   = clearPriority ? null : priorityFilter;
+    const newPriorityInFilter = clearPriority ? null : priorityInFilter;
+    const hasFilter = !!newPriorityFilter || (newPriorityInFilter?.length ?? 0) > 0;
 
     // Clear active conversation if it doesn't belong to the new tab
     const activeConv = conversations.find((c) => c.id === activeConversationId);
     const newActiveId = activeConv?.status === tab ? activeConversationId : null;
 
-    set({ activeTab: tab, activeConversationId: newActiveId, priorityFilter: newPriorityFilter });
+    set({
+      activeTab: tab,
+      activeConversationId: newActiveId,
+      priorityFilter: newPriorityFilter,
+      priorityInFilter: newPriorityInFilter,
+    });
 
     // Serve from cache if fresh enough and no priority filter is active
     const cache = _tabCache[tab];
-    if (!newPriorityFilter && cache && Date.now() - cache.loadedAt < CACHE_TTL_MS) {
+    if (!hasFilter && cache && Date.now() - cache.loadedAt < CACHE_TTL_MS) {
       set({ conversations: cache.conversations });
       return;
     }
@@ -183,14 +195,18 @@ export const useInboxStore = create<InboxState>((set, get) => ({
 
   setSearchQuery: (q) => set({ searchQuery: q }),
 
-  setPriorityFilter: (priority) => set({ priorityFilter: priority }),
+  // priorityFilter e priorityInFilter são mutuamente exclusivos.
+  setPriorityFilter: (priority) => set({ priorityFilter: priority, priorityInFilter: null }),
+  setPriorityInFilter: (priorities) => set({ priorityInFilter: priorities, priorityFilter: null }),
 
   // ── Load conversations for a tab ─────────────────────────────────────────────
   loadConversations: async (status, priority, force = false) => {
-    const { _tabCache } = get();
+    const { _tabCache, priorityInFilter } = get();
+    const hasFilter = !!priority || (priorityInFilter?.length ?? 0) > 0;
 
-    // Honour cache unless forced
-    if (!force && !priority) {
+    // Honour cache unless forced. Filtered loads bypass the cache entirely
+    // (both read and write) so they never pollute the unfiltered tab list.
+    if (!force && !hasFilter) {
       const cache = _tabCache[status];
       if (cache && Date.now() - cache.loadedAt < CACHE_TTL_MS) {
         set({ conversations: cache.conversations });
@@ -207,7 +223,8 @@ export const useInboxStore = create<InboxState>((set, get) => ({
       .order("updated_at", { ascending: false })  // most recently active first
       .limit(100);
 
-    if (priority) query = query.eq("priority", priority);
+    if (priorityInFilter?.length) query = query.in("priority", priorityInFilter);
+    else if (priority)            query = query.eq("priority", priority);
 
     const { data, error } = await query;
 
@@ -218,6 +235,12 @@ export const useInboxStore = create<InboxState>((set, get) => ({
     }
 
     const enriched = await enrichConversations(data as Record<string, unknown>[]);
+
+    // Filtered results are transient — do not overwrite the tab cache with them.
+    if (hasFilter) {
+      set({ conversations: enriched, isLoading: false });
+      return;
+    }
 
     set((s) => ({
       conversations: enriched,
