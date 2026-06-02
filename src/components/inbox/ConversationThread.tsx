@@ -147,6 +147,9 @@ export function ConversationThread() {
   const [snippetQuery, setSnippetQuery] = useState("");
   const [snippets, setSnippets]         = useState<Snippet[]>([]);
   const [snippetsLoaded, setSnippetsLoaded] = useState(false);
+  // true quando o picker foi aberto digitando "/" no composer (vs. botão ⚡).
+  // Nesse modo, ao inserir o snippet limpamos o texto "/query" do composer.
+  const [snippetSlashMode, setSnippetSlashMode] = useState(false);
 
   const isNote = mode === "note";
   const conversation = conversations.find((c) => c.id === activeConversationId);
@@ -449,6 +452,25 @@ export function ConversationThread() {
     if (error) toast.error("Erro ao resolver conversa");
   };
 
+  // Pausar / reativar a IA na conversa (handoff humano ↔ IA — CLAUDE.md §7.7).
+  const handleToggleAI = async () => {
+    if (!conversation) return;
+    const next = !conversation.ai_active;
+    const { error } = await supabase
+      .from("desk_conversations")
+      .update({ ai_active: next, updated_at: new Date().toISOString() })
+      .eq("id", activeConversationId!);
+
+    if (error) { toast.error("Erro ao alterar a IA"); return; }
+
+    await supabase.from("desk_messages").insert({
+      conversation_id: activeConversationId,
+      sender_type: "system",
+      content: next ? "IA reativada nesta conversa" : "IA pausada — atendimento humano assumiu",
+    });
+    toast.success(next ? "IA reativada" : "IA pausada");
+  };
+
   const handleSnooze = async (option: SnoozeOption) => {
     const until = option.resolve();
     const { error } = await supabase
@@ -554,10 +576,43 @@ export function ConversationThread() {
 
   sendAndResolveRef.current = () => handleSend({ resolveAfter: true });
 
+  // Detecta o trigger "/": se o texto começa com "/" (sem espaço logo após),
+  // abre o picker de snippets e usa o que vem depois da "/" como busca.
+  const handleContentChange = (value: string) => {
+    setContent(value);
+
+    const slashMatch = !isNote && /^\/(\S*)$/.test(value);
+    if (slashMatch) {
+      const query = value.slice(1);
+      setSnippetSlashMode(true);
+      setSnippetQuery(query);
+      if (!snippetOpen) setSnippetOpen(true);
+    } else if (snippetSlashMode) {
+      // Saiu do padrão "/..." → fecha o picker do modo slash.
+      setSnippetSlashMode(false);
+      setSnippetOpen(false);
+      setSnippetQuery("");
+    }
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Ctrl/Cmd+Enter (enviar e resolver) é tratado pelo listener global —
     // deixamos passar aqui para não disparar duas vezes.
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) return;
+    // Com o picker de snippets aberto via "/", Enter insere o primeiro resultado.
+    if (snippetSlashMode && snippetOpen && e.key === "Enter" && !e.shiftKey) {
+      if (filteredSnippets.length > 0) {
+        e.preventDefault();
+        insertSnippet(filteredSnippets[0]);
+        return;
+      }
+    }
+    // Escape fecha o picker do modo slash sem limpar o texto.
+    if (snippetSlashMode && e.key === "Escape") {
+      setSnippetSlashMode(false);
+      setSnippetOpen(false);
+      return;
+    }
     // Enter → enviar
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -580,11 +635,17 @@ export function ConversationThread() {
   };
 
   const insertSnippet = (snippet: Snippet) => {
-    // Insere o conteúdo do snippet no composer (respeita o que já foi digitado).
-    setContent((prev) => (prev.trim() ? `${prev}\n\n${snippet.content}` : snippet.content));
+    // No modo slash o composer contém apenas "/query" → substitui pelo conteúdo.
+    // Pelo botão ⚡ → anexa ao texto já digitado.
+    if (snippetSlashMode) {
+      setContent(snippet.content);
+    } else {
+      setContent((prev) => (prev.trim() ? `${prev}\n\n${snippet.content}` : snippet.content));
+    }
     setMode("reply");
     setSnippetOpen(false);
     setSnippetQuery("");
+    setSnippetSlashMode(false);
     requestAnimationFrame(() => textareaRef.current?.focus());
   };
 
@@ -677,6 +738,31 @@ export function ConversationThread() {
                     ))}
                   </DropdownMenuContent>
                 </DropdownMenu>
+
+                {/* Pausar / reativar IA */}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleToggleAI}
+                      className={cn(
+                        "text-xs h-7 gap-1",
+                        conversation.ai_active
+                          ? "border-primary/40 text-primary hover:text-primary"
+                          : "text-muted-foreground"
+                      )}
+                    >
+                      <Bot className="h-3 w-3" />
+                      {conversation.ai_active ? "Pausar IA" : "Reativar IA"}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {conversation.ai_active
+                      ? "Pausar a IA e assumir o atendimento"
+                      : "Reativar a IA nesta conversa"}
+                  </TooltipContent>
+                </Tooltip>
 
                 {/* Resolve button */}
                 <Tooltip>
@@ -775,7 +861,7 @@ export function ConversationThread() {
               <Textarea
                 ref={textareaRef}
                 value={content}
-                onChange={(e) => setContent(e.target.value)}
+                onChange={(e) => handleContentChange(e.target.value)}
                 onKeyDown={handleKeyDown}
                 placeholder={
                   isNote
@@ -786,8 +872,14 @@ export function ConversationThread() {
                 rows={1}
               />
               <div className="flex items-center gap-1 shrink-0">
-                {/* Insert snippet / resposta rápida (item 5) */}
-                <Popover open={snippetOpen} onOpenChange={setSnippetOpen}>
+                {/* Insert snippet / resposta rápida (item 5) — botão ⚡ ou "/" no composer */}
+                <Popover
+                  open={snippetOpen}
+                  onOpenChange={(o) => {
+                    setSnippetOpen(o);
+                    if (!o) { setSnippetSlashMode(false); setSnippetQuery(""); }
+                  }}
+                >
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <PopoverTrigger asChild>
@@ -800,20 +892,31 @@ export function ConversationThread() {
                         </Button>
                       </PopoverTrigger>
                     </TooltipTrigger>
-                    <TooltipContent>Resposta rápida</TooltipContent>
+                    <TooltipContent>Resposta rápida · digite / no início</TooltipContent>
                   </Tooltip>
-                  <PopoverContent align="end" className="w-80 p-0">
+                  <PopoverContent
+                    align="end"
+                    className="w-80 p-0"
+                    // No modo slash o foco fica no composer — não roubar o foco.
+                    onOpenAutoFocus={(e) => { if (snippetSlashMode) e.preventDefault(); }}
+                  >
                     <div className="p-2 border-b border-border">
-                      <div className="relative">
-                        <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
-                        <Input
-                          autoFocus
-                          value={snippetQuery}
-                          onChange={(e) => setSnippetQuery(e.target.value)}
-                          placeholder="Buscar resposta rápida..."
-                          className="pl-8 h-9 text-sm"
-                        />
-                      </div>
+                      {snippetSlashMode ? (
+                        <p className="text-[11px] text-muted-foreground px-1 py-1.5">
+                          Continue digitando após <span className="font-mono">/</span> para filtrar · Enter insere o primeiro
+                        </p>
+                      ) : (
+                        <div className="relative">
+                          <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
+                          <Input
+                            autoFocus
+                            value={snippetQuery}
+                            onChange={(e) => setSnippetQuery(e.target.value)}
+                            placeholder="Buscar resposta rápida..."
+                            className="pl-8 h-9 text-sm"
+                          />
+                        </div>
+                      )}
                     </div>
                     <div className="max-h-64 overflow-y-auto scrollbar-thin p-1">
                       {!snippetsLoaded ? (

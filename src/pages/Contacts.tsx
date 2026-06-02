@@ -92,31 +92,59 @@ export default function Contacts() {
     };
   }, [query]);
 
-  async function searchContact(email: string) {
+  async function searchContact(term: string) {
     setIsSearching(true);
     setError(null);
     setHasSearched(true);
 
-    const { data, error: fnError } = await supabase.functions.invoke("get-contact-info", {
-      body: { email },
-    });
+    // Resolve uma lista de e-mails candidatos. Se o termo já é um e-mail completo,
+    // usa direto; senão, busca por substring (ilike) em email/nome na tabela account.
+    let emails: string[] = [];
+    const isFullEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(term);
 
-    setIsSearching(false);
+    if (isFullEmail) {
+      emails = [term];
+    } else {
+      const { data: accounts, error: accErr } = await supabase
+        .from("account")
+        .select("email")
+        .or(`email.ilike.%${term}%,name.ilike.%${term}%`)
+        .not("email", "is", null)
+        .limit(12);
 
-    if (fnError) {
-      setError("Erro ao conectar com o CRM. Tente novamente.");
+      if (accErr) {
+        setIsSearching(false);
+        setError("Erro ao buscar contatos. Tente novamente.");
+        setResults([]);
+        return;
+      }
+      emails = [...new Set((accounts ?? []).map((a) => a.email as string).filter(Boolean))];
+    }
+
+    if (emails.length === 0) {
+      setIsSearching(false);
       setResults([]);
       return;
     }
 
-    const info = data as ContactInfo | null;
-    const hasData =
-      !!info?.customer || (info?.subscriptions?.length ?? 0) > 0 || (info?.infras?.length ?? 0) > 0;
-    if (info && hasData) {
-      setResults([info]);
-    } else {
-      setResults([]);
-    }
+    // Busca a ficha completa de cada candidato (em paralelo, com teto de 12).
+    const infos = await Promise.all(
+      emails.slice(0, 12).map(async (email) => {
+        const { data, error: fnError } = await supabase.functions.invoke("get-contact-info", {
+          body: { email },
+        });
+        if (fnError) return null;
+        const info = data as ContactInfo | null;
+        const hasData =
+          !!info?.customer ||
+          (info?.subscriptions?.length ?? 0) > 0 ||
+          (info?.infras?.length ?? 0) > 0;
+        return info && hasData ? info : null;
+      })
+    );
+
+    setIsSearching(false);
+    setResults(infos.filter((i): i is ContactInfo => i !== null));
   }
 
   return (
@@ -129,7 +157,7 @@ export default function Contacts() {
         <div className="relative w-72">
           <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input
-            placeholder="Buscar por e-mail (mín. 3 caracteres)..."
+            placeholder="Buscar por nome ou e-mail (mín. 3 caracteres)..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             className="pl-9 h-9"
@@ -161,7 +189,7 @@ export default function Contacts() {
         {!isSearching && !error && !hasSearched && (
           <div className="flex flex-col items-center gap-2 py-16 text-center text-muted-foreground">
             <Search className="h-10 w-10 opacity-20" />
-            <p className="text-sm">Digite um e-mail para buscar no CRM</p>
+            <p className="text-sm">Digite um nome ou e-mail para buscar no CRM</p>
             <p className="text-xs opacity-60">Mínimo de 3 caracteres</p>
           </div>
         )}
@@ -170,7 +198,7 @@ export default function Contacts() {
         {!isSearching && !error && hasSearched && results.length === 0 && (
           <div className="flex flex-col items-center gap-2 py-16 text-center text-muted-foreground">
             <Users className="h-10 w-10 opacity-20" />
-            <p className="text-sm">Nenhum contato encontrado para este e-mail</p>
+            <p className="text-sm">Nenhum contato encontrado</p>
           </div>
         )}
 

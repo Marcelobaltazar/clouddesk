@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { notifyViewsChanged } from "@/lib/views-events";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -348,6 +349,7 @@ function ViewsTab() {
     setForm(emptyViewForm());
     setShowForm(false);
     load();
+    notifyViewsChanged();
   }
 
   async function handleDelete(id: string) {
@@ -355,6 +357,7 @@ function ViewsTab() {
     if (error) { toast.error("Erro ao deletar visualização"); return; }
     toast.success("Visualização removida");
     setViews((prev) => prev.filter((v) => v.id !== id));
+    notifyViewsChanged();
   }
 
   async function handleToggleActive(view: DeskView) {
@@ -366,6 +369,7 @@ function ViewsTab() {
     setViews((prev) =>
       prev.map((v) => (v.id === view.id ? { ...v, is_active: !v.is_active } : v))
     );
+    notifyViewsChanged();
   }
 
   async function handleMove(view: DeskView, direction: "up" | "down") {
@@ -390,6 +394,7 @@ function ViewsTab() {
       return;
     }
     load();
+    notifyViewsChanged();
   }
 
   return (

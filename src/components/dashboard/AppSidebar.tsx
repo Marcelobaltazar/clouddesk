@@ -12,6 +12,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { useInboxStore } from "@/stores/useInboxStore";
 import { useNotifications } from "@/hooks/useNotifications";
 import { supabase } from "@/integrations/supabase/client";
+import { VIEWS_CHANGED_EVENT } from "@/lib/views-events";
 import { cn } from "@/lib/utils";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -23,11 +24,27 @@ interface DeskView {
   color: string;
   order_index: number;
   filters: {
-    plan_product?: string;
+    plan_product?: string;      // nome novo (editor de Settings)
+    airtable_product?: string;  // nome legado (views antigas) — tratado como sinônimo
     status?: string;
     priority?: string;
   };
   is_active: boolean;
+}
+
+/**
+ * Plano do filtro da view, normalizado para a tag gravada em
+ * desk_conversations.tags (max / ultra / advanced / starter).
+ * Aceita tanto plan_product quanto airtable_product e extrai a palavra-chave
+ * do plano de strings como "Cloud Max", "n8n-advanced", "Starter".
+ */
+function planTagFromFilter(filters: DeskView["filters"]): string | null {
+  const raw = (filters.plan_product ?? filters.airtable_product ?? "").toLowerCase();
+  if (!raw) return null;
+  for (const plan of ["max", "ultra", "advanced", "starter"]) {
+    if (raw.includes(plan)) return plan;
+  }
+  return null;
 }
 
 // ─── Fixed nav items ──────────────────────────────────────────────────────────
@@ -64,7 +81,7 @@ export function AppSidebar() {
       return next;
     });
   };
-  const { conversations, activeTab, setActiveTab, loadConversations, setPriorityFilter, setPriorityInFilter } = useInboxStore();
+  const { conversations, activeTab, setActiveTab, loadConversations, setPriorityFilter, setPriorityInFilter, applyView } = useInboxStore();
   const { isEnabled, toggle } = useNotifications();
   const location = useLocation();
 
@@ -99,6 +116,13 @@ export function AppSidebar() {
     loadViews();
   }, [loadViews, location.pathname]);
 
+  // Recarrega imediatamente quando uma view é criada/editada/removida em Settings.
+  useEffect(() => {
+    const handler = () => loadViews();
+    window.addEventListener(VIEWS_CHANGED_EVENT, handler);
+    return () => window.removeEventListener(VIEWS_CHANGED_EVENT, handler);
+  }, [loadViews]);
+
   // Contador de prioritários (open + high/urgent). Reconta quando a inbox muda.
   const refreshPriorityCount = useCallback(async () => {
     const { count } = await supabase
@@ -116,11 +140,8 @@ export function AppSidebar() {
   function handlePriorityClick() {
     setPriorityActive(true);
     setActiveViewId(null);
-    // Define o filtro multi-prioridade ANTES de carregar (set é síncrono no Zustand).
-    setPriorityInFilter(PRIORITY_LEVELS);
-    // Garante que a aba ativa seja "Abertas" sem limpar o filtro recém-definido.
-    if (activeTab !== "open") setActiveTab("open");
-    loadConversations("open");
+    // Prioritários = abertas com prioridade high OU urgent, sem filtro de plano.
+    applyView({ status: "open", priorityIn: PRIORITY_LEVELS, plan: null });
   }
 
   async function fetchViewCounts(loaded: DeskView[]) {
@@ -145,10 +166,13 @@ export function AppSidebar() {
           query = query.eq("priority", f.priority);
         }
 
-        // TODO: filter by plan_product
-        // This requires a cache of (account_user_id → plan) fetched from the CRM.
-        // Until that cache is implemented, plan_product filter is skipped here
-        // and will always show all conversations matching the other criteria.
+        // Filtro de plano via tag gravada em desk_conversations.tags
+        // (max/ultra/advanced/starter). A tag é populada pela Edge Function
+        // desk-ai-respond a cada resposta da IA.
+        const planTag = planTagFromFilter(f);
+        if (planTag) {
+          query = query.contains("tags", [planTag]);
+        }
 
         const { count } = await query;
         counts[view.id] = count ?? 0;
@@ -164,18 +188,11 @@ export function AppSidebar() {
 
     const targetStatus = (view.filters.status as "open" | "pending" | "snoozed" | "resolved" | undefined) ?? "open";
     const targetPriority = (view.filters.priority as "low" | "medium" | "high" | "urgent" | undefined) ?? null;
+    const targetPlan = planTagFromFilter(view.filters);
 
-    setPriorityFilter(targetPriority);
-
-    if (targetStatus !== activeTab) {
-      // setActiveTab clears priorityFilter — set it again after
-      setActiveTab(targetStatus);
-      if (targetPriority) {
-        loadConversations(targetStatus, targetPriority);
-      }
-    } else {
-      loadConversations(targetStatus, targetPriority);
-    }
+    // applyView define status + prioridade + plano atomicamente e recarrega,
+    // sem a corrida que deixava a lista vazia.
+    applyView({ status: targetStatus, priority: targetPriority, plan: targetPlan });
   }
 
   const handleToggleNotifications = () => {
@@ -218,8 +235,8 @@ export function AppSidebar() {
                 // Voltar para a inbox limpa qualquer filtro de prioridade ativo.
                 setPriorityActive(false);
                 setActiveViewId(null);
-                setPriorityFilter(null);
-                if (activeTab === "open") loadConversations("open", null, true);
+                // Volta para a inbox sem nenhum filtro (limpa prioridade e plano).
+                applyView({ status: "open" });
               } : undefined}
               className="flex items-center gap-3 px-2 py-2 rounded-md text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors text-sm"
               activeClassName="bg-sidebar-accent text-sidebar-accent-foreground font-medium"

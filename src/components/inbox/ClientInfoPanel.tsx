@@ -313,11 +313,114 @@ export function ClientInfoPanel() {
 
       <Separator />
 
+      {/* ── Histórico de conversas do cliente ── */}
+      <ConversationHistory
+        accountUserId={conversation.account_user_id}
+        currentConversationId={conversation.id}
+      />
+
+      <Separator />
+
       {/* ── Conversation metadata ── */}
       <div className="px-4 py-3 space-y-2.5">
         <SectionHeader title="Conversa" />
         <MetaGrid conversation={conversation} />
       </div>
+    </div>
+  );
+}
+
+// ─── Histórico de conversas do cliente ──────────────────────────────────────────
+// Lista as outras conversas do mesmo cliente (account_user_id), permitindo ao
+// operador abrir qualquer uma com um clique. Responde à pergunta "como vejo o
+// histórico do cliente" — antes só a IA tinha acesso a isso (CLAUDE.md §7.3).
+
+interface PastConversation {
+  id: string;
+  status: string;
+  subject: string | null;
+  created_at: string;
+  resolved_at: string | null;
+}
+
+const histStatusLabel: Record<string, string> = {
+  open: "Aberta",
+  pending: "Pendente",
+  snoozed: "Adiada",
+  resolved: "Resolvida",
+};
+
+function ConversationHistory({
+  accountUserId,
+  currentConversationId,
+}: {
+  accountUserId: string;
+  currentConversationId: string;
+}) {
+  const setActiveConversationId = useInboxStore((s) => s.setActiveConversationId);
+  const [items, setItems] = useState<PastConversation[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    supabase
+      .from("desk_conversations")
+      .select("id, status, subject, created_at, resolved_at")
+      .eq("account_user_id", accountUserId)
+      .neq("id", currentConversationId)
+      .order("created_at", { ascending: false })
+      .limit(10)
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        if (error) console.warn("[ClientInfoPanel] histórico falhou:", error.message);
+        setItems((data ?? []) as PastConversation[]);
+        setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [accountUserId, currentConversationId]);
+
+  return (
+    <div className="px-4 py-3 space-y-2.5">
+      <SectionHeader icon={MessageSquare} title="Conversas anteriores" count={items.length} />
+
+      {loading ? (
+        <div className="space-y-2">
+          <Skeleton className="h-10 w-full" />
+          <Skeleton className="h-10 w-full" />
+        </div>
+      ) : items.length === 0 ? (
+        <p className="text-xs text-muted-foreground">Nenhuma conversa anterior deste cliente.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {items.map((c) => (
+            <button
+              key={c.id}
+              onClick={() => setActiveConversationId(c.id)}
+              className="w-full text-left rounded-md border border-border bg-card px-2.5 py-2 hover:border-primary/40 transition-colors"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-medium text-card-foreground truncate">
+                  {c.subject || "Conversa"}
+                </span>
+                <span
+                  className={cn(
+                    "text-[9px] px-1.5 py-0.5 rounded-full shrink-0",
+                    c.status === "resolved"
+                      ? "bg-emerald-500/10 text-emerald-500"
+                      : "bg-muted text-muted-foreground"
+                  )}
+                >
+                  {histStatusLabel[c.status] ?? c.status}
+                </span>
+              </div>
+              <span className="text-[10px] text-muted-foreground">
+                {formatDateTimeBR(c.created_at)}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -622,6 +725,14 @@ function UnknownContactPanel({
           </div>
         </>
       )}
+
+      <Separator />
+
+      {/* Histórico de conversas do cliente */}
+      <ConversationHistory
+        accountUserId={conversation.account_user_id}
+        currentConversationId={conversation.id}
+      />
 
       <Separator />
 
