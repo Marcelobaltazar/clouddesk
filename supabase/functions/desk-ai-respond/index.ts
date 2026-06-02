@@ -36,6 +36,56 @@ interface KBMatch {
   similarity: number;
 }
 
+// ─── Plan tag ─────────────────────────────────────────────────────────────────
+
+// Hierarquia de planos: Max > Ultra > Advanced > Starter.
+// A tag mais alta vence; se o cliente não tem nenhuma assinatura ativa, usa 'sem-plano'.
+const PLAN_HIERARCHY = ['max', 'ultra', 'advanced', 'starter'] as const;
+type PlanTag = (typeof PLAN_HIERARCHY)[number] | 'sem-plano';
+
+function detectPlanTag(subscriptions: ContactSubscription[]): PlanTag {
+  const active = subscriptions.filter((s) => {
+    const st = (s.status ?? '').toLowerCase();
+    return st === 'active' || st === 'completed';
+  });
+  if (active.length === 0) return 'sem-plano';
+
+  for (const plan of PLAN_HIERARCHY) {
+    if (active.some((s) => (s.product ?? '').toLowerCase().includes(plan))) return plan;
+  }
+  return 'sem-plano';
+}
+
+/** Aplica a tag de plano à conversa (fire-and-forget, não bloqueia a resposta). */
+async function applyPlanTag(
+  supabase: ReturnType<typeof createClient>,
+  conversationId: string,
+  tag: PlanTag,
+): Promise<void> {
+  try {
+    // Remove tags de plano antigas e adiciona a nova.
+    const planTags = [...PLAN_HIERARCHY, 'sem-plano'] as string[];
+
+    // 1. Busca as tags atuais da conversa
+    const { data: conv } = await supabase
+      .from('desk_conversations')
+      .select('tags')
+      .eq('id', conversationId)
+      .maybeSingle();
+
+    const currentTags: string[] = (conv as Record<string, unknown> | null)?.tags as string[] ?? [];
+    const filtered = currentTags.filter((t) => !planTags.includes(t));
+    const newTags = [...filtered, tag];
+
+    await supabase
+      .from('desk_conversations')
+      .update({ tags: newTags })
+      .eq('id', conversationId);
+  } catch (e) {
+    console.warn('[AI] applyPlanTag failed:', e instanceof Error ? e.message : e);
+  }
+}
+
 // URL pública do artigo na central de ajuda. Só existe para artigos importados
 // do Intercom (público ou interno) — para esses o source_id é o ID do Intercom.
 // 'intercom_gap' e 'manual' não têm página pública por ora → sem link.
@@ -114,6 +164,7 @@ Quando quiser oferecer opções ao usuário, use o formato [OPCOES: Opção 1 | 
 // ─── OpenAI helpers ───────────────────────────────────────────────────────────
 
 async function generateEmbedding(text: string, apiKey: string): Promise<number[]> {
+  if (!apiKey) throw new Error('OPENAI_API_KEY not set — RAG skipped');
   const res = await fetch('https://api.openai.com/v1/embeddings', {
     method: 'POST',
     headers: {
@@ -135,19 +186,25 @@ async function generateEmbedding(text: string, apiKey: string): Promise<number[]
   return data.data[0].embedding;
 }
 
-async function callOpenAI(
+// Chama o LLM via OpenRouter (suporta qualquer provider com a mesma API).
+// Modelo configurável via env LLM_MODEL (default: google/gemini-2.5-flash).
+async function callLLM(
   apiKey: string,
   systemPrompt: string,
   messages: Array<{ role: string; content: string }>,
 ): Promise<string> {
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+  const model = Deno.env.get('LLM_MODEL') ?? 'google/gemini-2.5-flash';
+
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://cloudfy.host',
+      'X-Title': 'CloudDesk',
     },
     body: JSON.stringify({
-      model: 'gpt-4o-mini',
+      model,
       messages: [{ role: 'system', content: systemPrompt }, ...messages],
       temperature: 0.7,
       max_tokens: 512,
@@ -156,7 +213,7 @@ async function callOpenAI(
 
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`OpenAI chat error ${res.status}: ${err}`);
+    throw new Error(`OpenRouter chat error ${res.status}: ${err}`);
   }
 
   const data: OpenAIChatResponse = await res.json();
@@ -517,8 +574,12 @@ Deno.serve(async (req) => {
       );
     }
 
-    const apiKey = Deno.env.get('OPENAI_API_KEY');
-    if (!apiKey) throw new Error('Missing OPENAI_API_KEY secret');
+    const apiKey = Deno.env.get('OPENROUTER_API_KEY');
+    if (!apiKey) throw new Error('Missing OPENROUTER_API_KEY secret');
+
+    // Embeddings continuam na OpenAI (modelo text-embedding-3-small).
+    // Se OPENAI_API_KEY não estiver definida, o RAG é pulado graciosamente.
+    const openaiKey = Deno.env.get('OPENAI_API_KEY') ?? '';
 
     // ── Step 1: Conversation history + client contact info in parallel ─────────
     const accountUserId = (convRow as Record<string, unknown> | null)?.account_user_id as string | undefined;
@@ -579,7 +640,7 @@ Deno.serve(async (req) => {
     let faqMatches: FAQMatch[] = [];
 
     try {
-      const embedding = await generateEmbedding(message, apiKey);
+      const embedding = await generateEmbedding(message, openaiKey);
       console.log('[AI] Embedding generated');
 
       const [kbRes, faqRes] = await Promise.all([
@@ -622,7 +683,7 @@ Deno.serve(async (req) => {
     }));
     chatMessages.push({ role: 'user', content: message });
 
-    const rawReply = await callOpenAI(apiKey, systemPrompt, chatMessages);
+    const rawReply = await callLLM(apiKey, systemPrompt, chatMessages);
     console.log(`[AI] Reply: "${rawReply.substring(0, 80)}"`);
 
     // Somente Starter nunca transfere — reforço server-side caso o modelo ignore o prompt.
