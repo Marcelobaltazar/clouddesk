@@ -31,7 +31,20 @@ interface KBMatch {
   title: string;
   content: string;
   category: string | null;
+  source: string | null;
+  source_id: string | null;
   similarity: number;
+}
+
+// URL pública do artigo na central de ajuda. Só existe para artigos importados
+// do Intercom (público ou interno) — para esses o source_id é o ID do Intercom.
+// 'intercom_gap' e 'manual' não têm página pública por ora → sem link.
+function kbArticleUrl(source: string | null, sourceId: string | null): string | null {
+  if (!sourceId) return null;
+  if (source === 'intercom' || source === 'intercom_internal') {
+    return `https://ajuda.cloudfy.cloud/pt-BR/articles/${sourceId}`;
+  }
+  return null;
 }
 
 interface FAQMatch {
@@ -197,6 +210,26 @@ ${subLines || '(nenhuma assinatura registrada)'}
 `;
 }
 
+/**
+ * Decide se o cliente é "somente Starter" — caso em que a IA nunca transfere.
+ *
+ * Regra: se houver QUALQUER assinatura ativa que NÃO seja Starter (Advanced,
+ * Ultra, Max, etc.) → atendimento humano normal (isStarterOnly=false).
+ * Se TODAS as assinaturas ativas forem Starter, ou não houver assinatura ativa
+ * → nunca transfere (isStarterOnly=true).
+ */
+function isStarterOnlyClient(contactInfo?: ContactInfoResult | null): boolean {
+  const subscriptions = contactInfo?.subscriptions ?? [];
+  const activeSubscriptions = subscriptions.filter((s) => {
+    const st = (s.status ?? '').toLowerCase();
+    return st === 'active' || st === 'completed';
+  });
+  const hasNonStarter = activeSubscriptions.some(
+    (s) => !(s.product ?? '').toLowerCase().includes('starter'),
+  );
+  return !hasNonStarter;
+}
+
 function buildSystemPrompt(
   kbMatches: KBMatch[],
   faqMatches: FAQMatch[],
@@ -218,7 +251,12 @@ function buildSystemPrompt(
     if (kbMatches.length > 0) {
       parts.push('[ARTIGOS RELEVANTES]');
       for (const kb of kbMatches) {
-        parts.push(`### ${kb.title}${kb.category ? ` (${kb.category})` : ''}\n${kb.content}`);
+        const url = kbArticleUrl(kb.source, kb.source_id);
+        parts.push(
+          `Artigo: ${kb.title}${kb.category ? ` (${kb.category})` : ''}\n` +
+          `URL: ${url ?? 'null'}\n` +
+          `Conteúdo: ${kb.content}`,
+        );
       }
     }
 
@@ -233,6 +271,15 @@ function buildSystemPrompt(
   }
 
   const contactContext = buildClientContext(contactInfo ?? null);
+
+  // Somente Starter (sem nenhuma assinatura ativa não-Starter): a IA NUNCA transfere.
+  const starterRule = isStarterOnlyClient(contactInfo)
+    ? `
+[PLANO STARTER — SEM TRANSFERÊNCIA]
+Este cliente tem apenas plano(s) Starter ativo(s). NUNCA transfira para humano — mesmo que ele peça explicitamente. NÃO use ${TRANSFER_KEYWORD} em nenhuma hipótese.
+Tente resolver tudo você mesma. Se não conseguir resolver, oriente o cliente a usar a Central de ajuda (https://ajuda.cloudfy.cloud/pt-BR/) e o Discord (https://discord.gg/uDftSRtfKe).
+`
+    : '';
 
   const firstMessageInstruction = isFirstMessage && contactInfo?.customer
     ? `
@@ -256,19 +303,35 @@ Adapte o tom — não copie o formato acima palavra por palavra, mas inclua as i
     : '';
 
   return `${BASE_SYSTEM_PROMPT}
-${clientSection}${contactContext}${firstMessageInstruction}
+${clientSection}${contactContext}${firstMessageInstruction}${starterRule}
 ---
 
 [REGRA DE TRANSFERÊNCIA — OBRIGATÓRIA]
-Se o cliente pedir explicitamente para falar com um humano, OU se a dúvida NÃO puder ser respondida nem pelo bloco DADOS DO CLIENTE acima nem pela base de conhecimento abaixo, você DEVE responder APENAS com a palavra-chave: ${TRANSFER_KEYWORD}
-Não adicione nenhum texto antes ou depois. Não explique. Só retorne: ${TRANSFER_KEYWORD}
+NÃO transfira para humano por padrão. Antes de pensar em transferir, siga esta ordem:
 
-Perguntas que podem ser respondidas pelos DADOS DO CLIENTE (ex.: status de uma infraestrutura, nome do produto, quando foi assinado, quais assinaturas existem) NÃO devem ser transferidas — responda com base nos dados.
+1. Se a pergunta puder ser respondida pelos DADOS DO CLIENTE ou pela base de conhecimento, responda normalmente.
+2. Se for uma dúvida genérica (não técnica) que você consegue responder com bom senso, responda você mesma — não transfira.
+3. Se for uma pergunta completamente fora do contexto de suporte da Cloudfy (ex.: "onde comprar coca-cola", receitas, assuntos pessoais, notícias), NÃO transfira: responda educadamente que você só pode ajudar com questões relacionadas à Cloudfy (infraestrutura, n8n, Evolution API, assinaturas, etc.) e ofereça ajuda nesses temas.
+
+Você DEVE responder APENAS com a palavra-chave ${TRANSFER_KEYWORD} SOMENTE em um destes casos:
+  a) O cliente pediu EXPLICITAMENTE para falar com um humano/atendente; OU
+  b) É um problema técnico específico que realmente precisa de intervenção humana e que você não consegue resolver — por exemplo: infraestrutura bloqueada, problema de pagamento/cobrança não resolvido, ou um bug reportado pelo cliente.
+
+Quando transferir, retorne APENAS ${TRANSFER_KEYWORD} — nada antes ou depois, sem explicação.
+Dúvida genérica, pergunta fora de contexto, ou algo que você consegue responder NÃO são motivos para transferir.
+
+Se o cliente tem APENAS plano(s) Starter ativo(s) (nenhuma assinatura ativa de Advanced, Ultra, Max ou outro), NUNCA transfira para humano — mesmo que peça. Tente resolver tudo. Se não conseguir, oriente para a Central de ajuda (https://ajuda.cloudfy.cloud/pt-BR/) e o Discord (https://discord.gg/uDftSRtfKe). Se o cliente tiver alguma assinatura ativa não-Starter, o atendimento humano é normal.
 
 ---
 
 [BASE DE CONHECIMENTO — FONTE COMPLEMENTAR]
 Use o conteúdo abaixo COMBINADO com o bloco DADOS DO CLIENTE para responder. Os dois são fontes válidas. Se a pergunta for sobre dados específicos do cliente (status da infraestrutura, assinaturas dele etc.), priorize o bloco DADOS DO CLIENTE. Para perguntas gerais ou de como-fazer, use a base de conhecimento.
+
+Cada artigo abaixo tem um campo "URL". Quando você usar as informações de um artigo para montar a resposta, adicione no final da resposta:
+
+📚 Fonte: [título do artigo](url)
+
+Inclua a fonte APENAS se o artigo realmente usado tiver uma URL (campo URL diferente de "null"). Se a URL for "null", NÃO cite a fonte daquele artigo. Nunca invente URLs nem use uma URL diferente da fornecida. Se usar mais de um artigo com URL, liste uma linha "📚 Fonte:" por artigo.
 
 ${contextSection}`;
 }
@@ -562,13 +625,22 @@ Deno.serve(async (req) => {
     const rawReply = await callOpenAI(apiKey, systemPrompt, chatMessages);
     console.log(`[AI] Reply: "${rawReply.substring(0, 80)}"`);
 
-    const should_handoff = rawReply.includes(TRANSFER_KEYWORD);
+    // Somente Starter nunca transfere — reforço server-side caso o modelo ignore o prompt.
+    const isStarterClient = isStarterOnlyClient(contactInfo);
+    const should_handoff = !isStarterClient && rawReply.includes(TRANSFER_KEYWORD);
 
     // Strip the [OPCOES] marker into metadata. On handoff the reply is just the
     // transfer keyword, so there is nothing to parse.
-    const { text: reply, metadata } = should_handoff
+    let { text: reply, metadata } = should_handoff
       ? { text: rawReply, metadata: null }
       : parseReplyMarkers(rawReply);
+
+    // Starter: se o modelo tentou transferir mesmo proibido, troca o "[TRANSFERIR]"
+    // residual por uma orientação para os canais de autoatendimento.
+    if (isStarterClient && reply.includes(TRANSFER_KEYWORD)) {
+      reply = 'Não consegui resolver isso por aqui agora. Recomendo conferir nossa Central de ajuda em https://ajuda.cloudfy.cloud/pt-BR/ ou pedir ajuda no nosso Discord: https://discord.gg/uDftSRtfKe';
+      metadata = null;
+    }
 
     const result: AIRespondResult = { reply, should_handoff, metadata };
 

@@ -15,7 +15,7 @@ interface ResendResult {
 }
 
 const NO_INFRA_MESSAGE =
-  "Não encontramos uma infraestrutura ativa na sua conta. Clique em \"Falar com humano\" para que o suporte verifique o status do seu provisionamento.";
+  "Não encontramos uma infraestrutura ativa na sua conta. Descreva o problema no chat que a nossa equipe verifica o status do seu provisionamento.";
 
 export function WidgetActionBar({ infras }: Props) {
   const [state, setState] = useState<SendState>("idle");

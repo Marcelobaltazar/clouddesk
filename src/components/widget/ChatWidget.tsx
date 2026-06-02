@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef } from "react";
-import { UserRoundX } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useWidgetStore } from "./useWidgetStore";
 import { ChatWidgetHeader } from "./ChatWidgetHeader";
@@ -126,7 +125,15 @@ async function callAiEdgeFunction(
 
 // ── Handoff: escalate conversation to human ───────────────────────────────────
 
-const HANDOFF_MESSAGE = "Transferindo você para um de nossos especialistas da Cloudfy. Um momento, por favor... 🙏";
+const HANDOFF_MESSAGE = `Vou encaminhar sua solicitação para nossa equipe.
+
+⏰ Nosso SLA:
+- Seg a Sex, 9h às 19h
+- Resposta em até 12 horas úteis
+- Fora do horário: fila para próximo dia útil
+
+📚 Central de ajuda: https://ajuda.cloudfy.cloud/pt-BR/
+💬 Discord: https://discord.gg/uDftSRtfKe`;
 
 async function handleHandoff(conversationId: string): Promise<WidgetMessage | null> {
   // 1. Mark conversation as pending (waiting for human)
@@ -588,48 +595,8 @@ export function ChatWidget({ settings, embedUser }: Props) {
             <CSATFeedback />
           ) : (
             <>
-              {/* "Falar com humano" — só quando a IA está ativa, sem espera nem atendente conectado */}
-              {!isWaitingForHuman && !agentConnected && (
-                <div className="px-4 pb-1">
-                  <button
-                    onClick={async () => {
-                      if (!conversation?.id) return;
-                      setIsWaitingForHuman(true);
-                      setIsAiResponding(false);
-
-                      // 1. Update conversation status
-                      await supabase
-                        .from("desk_conversations")
-                        .update({
-                          status: "pending",
-                          ai_active: false,
-                          updated_at: new Date().toISOString(),
-                        })
-                        .eq("id", conversation.id);
-
-                      // 2. Insert visible system message
-                      const { data: sysRow } = await supabase
-                        .from("desk_messages")
-                        .insert({
-                          conversation_id: conversation.id,
-                          sender_type: "system",
-                          content: "🙋 Cliente solicitou atendimento humano",
-                          is_private_note: false,
-                          content_type: "text",
-                          ai_generated: false,
-                        })
-                        .select("id, conversation_id, sender_type, content, created_at, ai_generated, is_private_note")
-                        .single();
-
-                      if (sysRow) addMessage(sysRow as WidgetMessage);
-                    }}
-                    className="flex items-center gap-1.5 text-[11px] text-primary hover:underline"
-                  >
-                    <UserRoundX className="h-3 w-3" />
-                    Falar com humano
-                  </button>
-                </div>
-              )}
+              {/* Transferência só acontece quando a IA decide (should_handoff) —
+                  não há mais botão manual de "Falar com humano". */}
 
               {/* Aguardando atendente humano */}
               {isWaitingForHuman && (

@@ -17,17 +17,27 @@ import SettingsPage from "./pages/Settings";
 import NotFound from "./pages/NotFound";
 import WidgetPreview from "./pages/WidgetPreview";
 import { DashboardLayout } from "./components/dashboard/DashboardLayout";
+import { HelpCenterHome, HelpCenterArticle } from "./pages/HelpCenter";
 
 const queryClient = new QueryClient();
 
 const PUBLIC_PATHS = ["/login", "/widget-preview"];
+// Prefixos públicos: qualquer sub-rota abaixo dessas raízes é livre
+const PUBLIC_PREFIXES = ["/ajuda"];
+
+function isPublicPath(pathname: string): boolean {
+  return (
+    PUBLIC_PATHS.includes(pathname) ||
+    PUBLIC_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + "/"))
+  );
+}
 
 function AuthGate({ children }: { children: React.ReactNode }) {
   const { user, agent, loading, setUser, setLoading, fetchAgent, signOut } = useAuthStore();
   const navigate = useNavigate();
   const location = useLocation();
 
-  const isPublic = PUBLIC_PATHS.includes(location.pathname) || PUBLIC_PATHS.includes(window.location.pathname);
+  const isPublic = isPublicPath(location.pathname);
 
   useEffect(() => {
     let mounted = true;
@@ -38,7 +48,7 @@ function AuthGate({ children }: { children: React.ReactNode }) {
 
       if (!session) {
         setLoading(false);
-        if (!PUBLIC_PATHS.includes(window.location.pathname)) {
+        if (!isPublicPath(window.location.pathname)) {
           navigate("/login", { replace: true });
         }
         return;
@@ -64,7 +74,7 @@ function AuthGate({ children }: { children: React.ReactNode }) {
       if (!session) {
         useAuthStore.getState().setUser(null);
         useAuthStore.getState().setAgent(null);
-        if (!PUBLIC_PATHS.includes(window.location.pathname)) {
+        if (!isPublicPath(window.location.pathname)) {
           navigate("/login", { replace: true });
         }
       }
@@ -100,6 +110,9 @@ function AppRoutes() {
   return (
     <AuthGate>
       <Routes>
+        {/* Rotas públicas — sem autenticação */}
+        <Route path="/ajuda" element={<HelpCenterHome />} />
+        <Route path="/ajuda/:articleId" element={<HelpCenterArticle />} />
         <Route path="/widget-preview" element={<WidgetPreview />} />
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<Navigate to="/inbox" replace />} />
