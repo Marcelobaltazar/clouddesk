@@ -66,11 +66,16 @@ interface InboxState {
   tabCounts: Record<ConversationStatus, number>;
   /** Per-tab cache to avoid redundant reloads within a short window */
   _tabCache: Partial<Record<ConversationStatus, TabCache>>;
+  /** Resultados da busca global (todas as conversas, qualquer status). */
+  searchResults: Conversation[];
+  isSearching: boolean;
 
   // Actions
   setActiveTab: (tab: ConversationStatus, clearPriority?: boolean) => void;
   setActiveConversationId: (id: string | null) => void;
   setSearchQuery: (q: string) => void;
+  /** Busca global no banco por nome/e-mail/assunto, em qualquer status. */
+  searchConversations: (query: string) => Promise<void>;
   setPriorityFilter: (priority: ConversationPriority | null) => void;
   setPriorityInFilter: (priorities: ConversationPriority[] | null) => void;
   /** Aplica uma Visualização (status + prioridade + plano) de forma atômica e carrega. */
@@ -172,6 +177,8 @@ export const useInboxStore = create<InboxState>((set, get) => ({
   planFilter:           null,
   tabCounts:            { open: 0, pending: 0, snoozed: 0, resolved: 0 },
   _tabCache:            {},
+  searchResults:        [],
+  isSearching:          false,
 
   // ── Tab switching ────────────────────────────────────────────────────────────
   setActiveTab: (tab, clearPriority = false) => {
@@ -206,6 +213,51 @@ export const useInboxStore = create<InboxState>((set, get) => ({
   setActiveConversationId: (id) => set({ activeConversationId: id }),
 
   setSearchQuery: (q) => set({ searchQuery: q }),
+
+  // ── Busca global (todas as conversas, qualquer status) ────────────────────────
+  // Resolve a limitação da busca em memória: cruza nome/e-mail (account + user_email)
+  // e assunto, retornando conversas abertas E fechadas — como o "Buscar" do Intercom.
+  searchConversations: async (query) => {
+    const q = query.trim();
+    if (q.length < 2) {
+      set({ searchResults: [], isSearching: false });
+      return;
+    }
+
+    set({ isSearching: true });
+
+    // 1. e-mails de contas cujo nome/e-mail casam com o termo (visitantes do widget
+    //    não têm linha em account, mas têm user_email na conversa — cobrimos os dois).
+    const { data: accounts } = await supabase
+      .from("account")
+      .select("user_id, email")
+      .or(`email.ilike.%${q}%,name.ilike.%${q}%`)
+      .limit(50);
+
+    const accountUserIds = (accounts ?? []).map((a) => a.user_id as string);
+
+    // 2. busca conversas por: account_user_id (nome/e-mail do CRM), user_email, ou assunto.
+    const ors = [`user_email.ilike.%${q}%`, `subject.ilike.%${q}%`];
+    if (accountUserIds.length > 0) {
+      ors.push(`account_user_id.in.(${accountUserIds.join(",")})`);
+    }
+
+    const { data, error } = await supabase
+      .from("desk_conversations")
+      .select("*")
+      .or(ors.join(","))
+      .order("updated_at", { ascending: false })
+      .limit(50);
+
+    if (error || !data) {
+      console.error("[useInboxStore] searchConversations error:", error);
+      set({ searchResults: [], isSearching: false });
+      return;
+    }
+
+    const enriched = await enrichConversations(data as Record<string, unknown>[]);
+    set({ searchResults: enriched, isSearching: false });
+  },
 
   // priorityFilter e priorityInFilter são mutuamente exclusivos.
   setPriorityFilter: (priority) => set({ priorityFilter: priority, priorityInFilter: null }),

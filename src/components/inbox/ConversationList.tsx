@@ -50,6 +50,14 @@ const PLAN_BADGES: Record<string, { label: string; cls: string }> = {
   "sem-plano":{ label: "Sem plano",cls: "bg-muted text-muted-foreground border border-border"           },
 };
 
+// Badge de status (usado nos resultados de busca, que misturam status).
+const statusBadge: Record<string, { label: string; cls: string }> = {
+  open:     { label: "Aberta",    cls: "bg-emerald-500/10 text-emerald-500 border border-emerald-500/20" },
+  pending:  { label: "Pendente",  cls: "bg-amber-500/10 text-amber-500 border border-amber-500/20"       },
+  snoozed:  { label: "Adiada",    cls: "bg-violet-500/10 text-violet-400 border border-violet-500/20"     },
+  resolved: { label: "Resolvida", cls: "bg-muted text-muted-foreground border border-border"              },
+};
+
 /** Retorna a config de badge do plano a partir das tags da conversa (ou null). */
 function planBadgeFor(tags: string[] | null | undefined): { label: string; cls: string } | null {
   if (!tags?.length) return null;
@@ -104,14 +112,19 @@ export function ConversationList() {
     searchQuery,
     isLoading,
     tabCounts,
+    searchResults,
+    isSearching,
     setActiveTab,
     setActiveConversationId,
     setSearchQuery,
+    searchConversations,
     loadConversations,
     refreshTabCounts,
     upsertConversation,
     removeConversation,
   } = useInboxStore();
+
+  const isSearchMode = searchQuery.trim().length >= 2;
 
   const agent = useAuthStore((s) => s.agent);
   const [mineOnly, setMineOnly]   = useState(false);
@@ -197,20 +210,34 @@ export function ConversationList() {
     return () => { supabase.removeChannel(channel); };
   }, [activeConversationId, conversations, notify]);
 
+  // ── Busca global (servidor) com debounce ─────────────────────────────────────
+  // Em modo de busca exibimos searchResults (todas as conversas, qualquer status),
+  // não apenas as da aba ativa em memória.
+  useEffect(() => {
+    if (!isSearchMode) return;
+    const t = setTimeout(() => searchConversations(searchQuery), 300);
+    return () => clearTimeout(t);
+  }, [searchQuery, isSearchMode, searchConversations]);
+
   // ── Derived list ─────────────────────────────────────────────────────────────
-  const filtered = conversations.filter((c) => {
+  const source = isSearchMode ? searchResults : conversations;
+  const filtered = source.filter((c) => {
     if (mineOnly && c.assigned_agent_id !== agent?.id) return false;
-    if (!searchQuery) return true;
-    const q = searchQuery.toLowerCase();
-    return (
-      c.contact?.name?.toLowerCase().includes(q) ||
-      c.contact?.email?.toLowerCase().includes(q) ||
-      c.subject?.toLowerCase().includes(q)
-    );
+    return true;
   });
 
   // unread count is local — only "open" tab is loaded in memory
   const unreadCount = conversations.filter((c) => !c.first_seen_by_agent_at).length;
+
+  // Abre uma conversa vinda da busca: garante que ela esteja na aba correta
+  // (pode ter qualquer status) antes de ativá-la, para o thread/detalhes acharem.
+  function handleSelectConversation(conv: Conversation) {
+    if (isSearchMode && conv.status !== activeTab) {
+      setSearchQuery("");
+      setActiveTab(conv.status, true);
+    }
+    setActiveConversationId(conv.id);
+  }
 
   // ── Selection helpers ────────────────────────────────────────────────────────
   const allSelected = filtered.length > 0 && filtered.every((c) => selected.has(c.id));
@@ -267,7 +294,7 @@ export function ConversationList() {
         <div className="relative">
           <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input
-            placeholder="Buscar conversas..."
+            placeholder="Buscar por nome, e-mail ou assunto..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="pl-9 h-9 bg-surface border-none text-sm"
@@ -382,10 +409,18 @@ export function ConversationList() {
 
       {/* ── List ── */}
       <div className="flex-1 overflow-y-auto scrollbar-thin">
-        {isLoading ? (
+        {(isSearchMode ? isSearching : isLoading) ? (
           <LoadingSkeleton />
         ) : filtered.length === 0 ? (
-          <EmptyState tab={activeTab} />
+          isSearchMode ? (
+            <div className="flex flex-col items-center justify-center h-40 text-muted-foreground text-sm gap-2">
+              <Search className="h-8 w-8 opacity-30" />
+              <p>Nenhuma conversa encontrada</p>
+              <p className="text-[10px] opacity-70">Busca por nome, e-mail ou assunto · todos os status</p>
+            </div>
+          ) : (
+            <EmptyState tab={activeTab} />
+          )
         ) : (
           filtered.map((conv) => (
             <ConversationItem
@@ -394,8 +429,9 @@ export function ConversationList() {
               isActive={conv.id === activeConversationId}
               isSelected={selected.has(conv.id)}
               selectionMode={selectionMode}
+              showStatus={isSearchMode}
               agentMap={agentMap}
-              onSelect={() => setActiveConversationId(conv.id)}
+              onSelect={() => handleSelectConversation(conv)}
               onToggle={() => toggleOne(conv.id)}
             />
           ))
@@ -412,6 +448,7 @@ function ConversationItem({
   isActive,
   isSelected,
   selectionMode,
+  showStatus = false,
   agentMap,
   onSelect,
   onToggle,
@@ -420,6 +457,7 @@ function ConversationItem({
   isActive: boolean;
   isSelected: boolean;
   selectionMode: boolean;
+  showStatus?: boolean;
   agentMap: Record<string, { name: string; status: string }>;
   onSelect: () => void;
   onToggle: () => void;
@@ -427,7 +465,7 @@ function ConversationItem({
   const [hovered, setHovered] = useState(false);
   const isUnread    = !conv.first_seen_by_agent_at;
   const ChannelIcon = channelIcon[conv.channel] ?? MessageSquare;
-  const name        = conv.contact?.name || conv.contact?.email || "Visitante";
+  const name        = conv.contact?.name || conv.contact?.email || conv.user_email || "Visitante";
   const preview     = conv.last_message?.content?.slice(0, 80) ?? "Sem mensagens";
   const isBot       = conv.last_message?.sender_type === "bot";
   const planBadge   = planBadgeFor(conv.tags);
@@ -559,7 +597,13 @@ function ConversationItem({
                   {planBadge.label}
                 </span>
               )}
-              {conv.status === "snoozed" && (
+              {/* Em modo de busca, mostra o status (resultados misturam abertos/fechados) */}
+              {showStatus && (
+                <span className={cn("text-[9px] px-1.5 py-0.5 rounded-full font-medium", statusBadge[conv.status]?.cls)}>
+                  {statusBadge[conv.status]?.label ?? conv.status}
+                </span>
+              )}
+              {!showStatus && conv.status === "snoozed" && (
                 <span className="inline-flex items-center gap-0.5 text-[9px] text-violet-400 bg-violet-500/10 border border-violet-500/20 px-1.5 py-0.5 rounded-full font-medium">
                   <Clock className="h-2.5 w-2.5" /> Adiada
                   {conv.snoozed_until && ` · ${timeUntilShort(conv.snoozed_until)}`}
