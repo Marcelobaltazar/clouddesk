@@ -226,16 +226,19 @@ export function ChatWidget({ settings, embedUser }: Props) {
 
       try {
         // 1. Create conversation record in desk_conversations
-        const accountUserId = embedUser?.id ?? account?.user_id;
-        if (!accountUserId) {
-          throw new Error("Usuário não autenticado — widget não pode criar conversa sem sessão ativa");
+        // O cliente vive no Supabase de PRODUÇÃO da Cloudfy, não no do CloudDesk —
+        // logo não tem auth.uid() aqui. Identificamos a conversa por user_email.
+        // account_user_id fica null (a RLS do widget valida por email).
+        const userEmail = embedUser?.email ?? account?.email ?? null;
+        if (!userEmail) {
+          throw new Error("Email do cliente ausente — widget não pode criar conversa");
         }
 
         const { data: convData, error: convError } = await supabase
           .from("desk_conversations")
           .insert({
-            account_user_id: accountUserId,
-            user_email: embedUser?.email ?? account?.email ?? null,
+            account_user_id: null,
+            user_email: userEmail,
             channel: "chat",
             status: "open",
             priority: "medium",
@@ -367,9 +370,8 @@ export function ChatWidget({ settings, embedUser }: Props) {
     welcomeSentRef.current = true;
 
     (async () => {
-      const accountUserId = embedUser?.id ?? account?.user_id;
-      if (!accountUserId) return;
-
+      // Identificação por email (cliente vive no Supabase de produção da Cloudfy,
+      // sem auth.uid() aqui). O guard de `email` já foi feito acima.
       try {
         // 1. Fetch contact info — no OpenAI, just CRM (Supabase de produção)
         const { data: contactData } = await supabase.functions.invoke<ContactInfo>(
@@ -382,11 +384,11 @@ export function ChatWidget({ settings, embedUser }: Props) {
         const welcomeText = contactData ? buildWelcomeMessage(contactData) : null;
         if (!welcomeText) return;
 
-        // 2. Create conversation record
+        // 2. Create conversation record (account_user_id null — RLS valida por email)
         const { data: convData, error: convError } = await supabase
           .from("desk_conversations")
           .insert({
-            account_user_id: accountUserId,
+            account_user_id: null,
             user_email: email,
             channel: "chat",
             status: "open",
