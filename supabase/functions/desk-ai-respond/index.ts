@@ -501,22 +501,33 @@ function resolveInfraId(mentionText: string, infras: ContactInfra[]): string | n
   return null;
 }
 
+// Aciona o reenvio de credenciais chamando a API de parceiros da Cloudfy
+// DIRETAMENTE (inline), igual ao fetchContactInfo. Não fazemos function-to-function
+// HTTP para desk-resend-credentials porque o gateway de Edge Functions rejeita a
+// autenticação interna (UNAUTHORIZED_INVALID_JWT_FORMAT) — mesma razão pela qual
+// get-contact-info foi inlined aqui. A Cloudfy envia o e-mail; só disparamos.
+const CLOUDFY_PARTNER_BASE = 'https://partner.cloudfy.space';
+
 async function triggerResendCredentials(infraId: string): Promise<boolean> {
-  const supabaseUrl = Deno.env.get('SUPABASE_URL');
-  const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-  if (!supabaseUrl || !supabaseKey) return false;
+  const partnerKey = Deno.env.get('CLOUDFY_PARTNER_KEY');
+  if (!partnerKey) {
+    console.error('[AI] triggerResendCredentials: CLOUDFY_PARTNER_KEY missing');
+    return false;
+  }
 
   try {
-    const res = await fetch(`${supabaseUrl}/functions/v1/desk-resend-credentials`, {
+    const url = `${CLOUDFY_PARTNER_BASE}/api/partners/infrastructure/${encodeURIComponent(infraId)}/resend-credentials`;
+    const res = await fetch(url, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${supabaseKey}`,
+        'X-Partner-Key': partnerKey,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ infra_id: infraId }),
     });
     const data = await res.json().catch(() => null) as { success?: boolean } | null;
-    return res.ok && data?.success === true;
+    const ok = res.ok && data?.success !== false;
+    if (!ok) console.error(`[AI] resend-credentials failed: ${res.status}`, JSON.stringify(data));
+    return ok;
   } catch (e) {
     console.error('[AI] triggerResendCredentials failed:', e instanceof Error ? e.message : e);
     return false;
