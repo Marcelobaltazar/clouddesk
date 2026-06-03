@@ -5,7 +5,6 @@ import { ChatWidgetHeader } from "./ChatWidgetHeader";
 import { ChatWidgetWelcome } from "./ChatWidgetWelcome";
 import { ChatWidgetThread } from "./ChatWidgetThread";
 import { ChatWidgetComposer } from "./ChatWidgetComposer";
-import { WidgetActionBar } from "./WidgetActionBar";
 import { CSATFeedback } from "./CSATFeedback";
 import type { CloudDeskSettings, WidgetMessage, WidgetMessageMetadata } from "./types";
 import type { ContactInfo } from "@/lib/contact-info";
@@ -417,10 +416,11 @@ export function ChatWidget({ settings, embedUser }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
-  // ── Load infras for the fixed action bar ────────────────────────────────────
+  // ── Load infras into the store ──────────────────────────────────────────────
   // Independent of the welcome flow (which only runs for brand-new conversations).
-  // Ensures the "Reenviar credenciais" bar has the client's infra list whenever
-  // the widget is open with a known email.
+  // Guarantees the client's infra list is available whenever the widget is open
+  // with a known email — used to map an infra name chosen via quick-reply chip
+  // back to its infra_id (credential-resend flow, see ChatWidgetThread).
   useEffect(() => {
     if (!isOpen) return;
     if (infras.length > 0) return; // already loaded this session
@@ -616,9 +616,6 @@ export function ChatWidget({ settings, embedUser }: Props) {
                   </p>
                 </div>
               )}
-
-              {/* Fixed action bar — always-available quick actions */}
-              <WidgetActionBar infras={infras} />
 
               <ChatWidgetComposer
                 onSend={handleSend}
