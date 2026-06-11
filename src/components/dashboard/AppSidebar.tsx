@@ -49,13 +49,19 @@ function planTagFromFilter(filters: DeskView["filters"]): string | null {
 
 // ─── Fixed nav items ──────────────────────────────────────────────────────────
 
-const navItems = [
-  { title: "Inbox",                url: "/inbox",     icon: Inbox    },
-  { title: "Contatos",             url: "/contacts",  icon: Users    },
+const primaryNav = [
+  { title: "Inbox",     url: "/inbox",    icon: Inbox },
+  { title: "Contatos",  url: "/contacts", icon: Users },
+];
+
+const secondaryNav = [
   { title: "Base de Conhecimento", url: "/knowledge", icon: BookOpen },
-  { title: "Respostas rápidas",    url: "/macros",    icon: Zap       },
-  { title: "Relatórios",           url: "/reports",   icon: BarChart3 },
-  { title: "Configurações",        url: "/settings",  icon: Settings  },
+  { title: "Respostas rápidas",    url: "/macros",    icon: Zap      },
+];
+
+const tertiaryNav = [
+  { title: "Relatórios",    url: "/reports",  icon: BarChart3 },
+  { title: "Configurações", url: "/settings", icon: Settings  },
 ];
 
 const statusColors: Record<string, string> = {
@@ -141,6 +147,7 @@ export function AppSidebar() {
   function handlePriorityClick() {
     setPriorityActive(true);
     setActiveViewId(null);
+    navigate("/inbox");
     // Prioritários = abertas com prioridade high OU urgent, sem filtro de plano.
     applyView({ status: "open", priorityIn: PRIORITY_LEVELS, plan: null });
   }
@@ -191,6 +198,7 @@ export function AppSidebar() {
     const targetPriority = (view.filters.priority as "low" | "medium" | "high" | "urgent" | undefined) ?? null;
     const targetPlan = planTagFromFilter(view.filters);
 
+    navigate("/inbox");
     // applyView define status + prioridade + plano atomicamente e recarrega,
     // sem a corrida que deixava a lista vazia.
     applyView({ status: targetStatus, priority: targetPriority, plan: targetPlan });
@@ -225,32 +233,71 @@ export function AppSidebar() {
         </div>
 
         {/* Nav */}
-        <nav className="flex-1 py-3 space-y-1 px-2 overflow-y-auto scrollbar-thin">
-          {/* Fixed items */}
-          {navItems.map((item) => (
-            <NavLink
-              key={item.url}
-              to={item.url}
-              end={item.url === "/inbox"}
-              onClick={item.url === "/inbox" ? () => {
-                // Voltar para a inbox limpa qualquer filtro de prioridade ativo.
-                setPriorityActive(false);
-                setActiveViewId(null);
-                // Volta para a inbox sem nenhum filtro (limpa prioridade e plano).
-                applyView({ status: "open" });
-              } : undefined}
-              className="flex items-center gap-3 px-2 py-2 rounded-xl text-muted-foreground hover:bg-sidebar-accent hover:text-foreground transition-colors text-sm"
-              activeClassName="bg-card card-selected text-foreground font-medium"
-            >
-              <item.icon className="h-5 w-5 shrink-0" />
-              {isOpen && <span className="whitespace-nowrap flex-1">{item.title}</span>}
-              {isOpen && item.url === "/inbox" && openCount > 0 && (
-                <span className="ml-auto text-xs text-muted-foreground tabular-nums">
-                  {openCount}
-                </span>
-              )}
-            </NavLink>
-          ))}
+        <nav className="flex-1 py-3 px-2 overflow-y-auto scrollbar-thin">
+          {/* Primary: Inbox + Contatos */}
+          <div className="space-y-1">
+            {primaryNav.map((item) => (
+              <NavLink
+                key={item.url}
+                to={item.url}
+                end={item.url === "/inbox"}
+                onClick={item.url === "/inbox" ? () => {
+                  setPriorityActive(false);
+                  setActiveViewId(null);
+                  applyView({ status: "open" });
+                } : undefined}
+                className="flex items-center gap-3 px-2 py-2 rounded-xl text-muted-foreground hover:bg-sidebar-accent hover:text-foreground transition-colors text-sm"
+                activeClassName="bg-card card-selected text-foreground font-medium"
+              >
+                <item.icon className="h-5 w-5 shrink-0" />
+                {isOpen && <span className="whitespace-nowrap flex-1">{item.title}</span>}
+                {isOpen && item.url === "/inbox" && openCount > 0 && (
+                  <span className="ml-auto text-xs text-muted-foreground tabular-nums">
+                    {openCount}
+                  </span>
+                )}
+              </NavLink>
+            ))}
+          </div>
+
+          {/* Divider */}
+          <div className="my-2 border-t border-border/50" />
+
+          {/* Secondary: Base de Conhecimento + Respostas Rápidas */}
+          <div className="space-y-1">
+            {secondaryNav.map((item) => (
+              <NavLink
+                key={item.url}
+                to={item.url}
+                className="flex items-center gap-3 px-2 py-2 rounded-xl text-muted-foreground hover:bg-sidebar-accent hover:text-foreground transition-colors text-sm"
+                activeClassName="bg-card card-selected text-foreground font-medium"
+              >
+                <item.icon className="h-5 w-5 shrink-0" />
+                {isOpen && <span className="whitespace-nowrap flex-1">{item.title}</span>}
+              </NavLink>
+            ))}
+          </div>
+
+          {/* Divider */}
+          <div className="my-2 border-t border-border/50" />
+
+          {/* Tertiary: Relatórios + Configurações */}
+          <div className="space-y-1">
+            {tertiaryNav.map((item) => (
+              <NavLink
+                key={item.url}
+                to={item.url}
+                className="flex items-center gap-3 px-2 py-2 rounded-xl text-muted-foreground hover:bg-sidebar-accent hover:text-foreground transition-colors text-sm"
+                activeClassName="bg-card card-selected text-foreground font-medium"
+              >
+                <item.icon className="h-5 w-5 shrink-0" />
+                {isOpen && <span className="whitespace-nowrap flex-1">{item.title}</span>}
+              </NavLink>
+            ))}
+          </div>
+
+          {/* Divider before views */}
+          <div className="my-2 border-t border-border/50" />
 
           {/* Prioritários — fixo (open + high/urgent) — item 4 */}
           <Tooltip>

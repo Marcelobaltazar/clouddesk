@@ -238,14 +238,22 @@ export function ConversationList() {
   }, [searchQuery, isSearchMode, searchConversations]);
 
   // ── Derived list ─────────────────────────────────────────────────────────────
+  // Fora do modo busca, a lista só mostra conversas cujo status bate com a aba.
+  // Uma conversa que muda de status (ex.: handoff open→pending) permanece no
+  // array (o thread ativo precisa dela) mas some da lista da aba antiga —
+  // corrige a duplicidade "Abertas E Pendentes ao mesmo tempo".
   const source = isSearchMode ? searchResults : conversations;
   const filtered = source.filter((c) => {
+    if (!isSearchMode && c.status !== activeTab) return false;
     if (mineOnly && c.assigned_agent_id !== agent?.id) return false;
     return true;
   });
 
-  // unread count is local — only "open" tab is loaded in memory
-  const unreadCount = conversations.filter((c) => !c.first_seen_by_agent_at).length;
+  // Não lidas: apenas conversas ABERTAS sem first_seen — nunca contaminado por
+  // outras abas carregadas em memória (ex.: Resolvidas inflava o badge de Abertas).
+  const unreadCount = conversations.filter(
+    (c) => c.status === "open" && !c.first_seen_by_agent_at
+  ).length;
 
   // Abre uma conversa vinda da busca: garante que ela esteja na aba correta
   // (pode ter qualquer status) antes de ativá-la, para o thread/detalhes acharem.

@@ -470,11 +470,12 @@ const RESEND_ACTION_RE = /\[ACTION:\s*resend_credentials\s*\]/i;
 const META_INSTRUCTION = `
 [ANÁLISE OBRIGATÓRIA — BLOCO META]
 No FINAL de TODA resposta (inclusive quando responder apenas ${TRANSFER_KEYWORD}), anexe em uma linha própria:
-[META: intent=<valor> sentiment=<valor> urgency=<valor>]
+[META: intent=<valor> sentiment=<valor> urgency=<valor> resolved=<sim|nao>]
 
 - intent: credenciais | n8n | evolution | infra_down | billing | cancelamento | upgrade | dominio | duvida_geral | outro
 - sentiment: positivo | neutro | negativo | irritado
 - urgency: baixa | media | alta | critica
+- resolved: sim (se você acredita que resolveu o problema do cliente nesta resposta) | nao (se ainda há algo pendente)
 
 Critérios de urgency:
 - critica: produção fora do ar, cliente perdendo dinheiro/clientes agora
@@ -482,14 +483,15 @@ Critérios de urgency:
 - media: problema real mas contornável
 - baixa: dúvida, curiosidade, configuração sem pressa
 
-O bloco META nunca deve aparecer sem os 3 campos. Não explique o bloco ao cliente.`;
+O bloco META nunca deve aparecer sem todos os 4 campos. Não explique o bloco ao cliente.`;
 
-const META_RE = /\[META:\s*intent=([\w-]+)\s+sentiment=([\w-]+)\s+urgency=([\w-]+)\s*\]/i;
+const META_RE = /\[META:\s*intent=([\w-]+)\s+sentiment=([\w-]+)\s+urgency=([\w-]+)(?:\s+resolved=(sim|nao))?\s*\]/i;
 
 interface MessageAnalysis {
   intent: string;
   sentiment: string;
   urgency: string;
+  resolved: boolean;
 }
 
 function parseMetaBlock(raw: string): { text: string; analysis: MessageAnalysis | null } {
@@ -501,6 +503,7 @@ function parseMetaBlock(raw: string): { text: string; analysis: MessageAnalysis 
       intent: m[1].toLowerCase(),
       sentiment: m[2].toLowerCase(),
       urgency: m[3].toLowerCase(),
+      resolved: (m[4] ?? '').toLowerCase() === 'sim',
     },
   };
 }
@@ -548,6 +551,46 @@ async function applyAnalysis(
     }
   } catch (e) {
     console.warn('[AI] applyAnalysis failed:', e instanceof Error ? e.message : e);
+  }
+}
+
+/**
+ * Auto-fecha a conversa quando a IA sinalizou resolved=sim E o cliente tem
+ * plano Advanced, Ultra ou Max. Fire-and-forget — não bloqueia a resposta.
+ *
+ * Starter: nunca auto-fecha (a IA nunca transfere, mas o encerramento é
+ * manual ou via CSAT).
+ * Advanced/Ultra/Max: se a IA sinalizou resolved=sim, a conversa é marcada
+ * como 'resolved' com uma mensagem de sistema de encerramento.
+ */
+async function maybeAutoResolve(
+  supabase: ReturnType<typeof createClient>,
+  conversationId: string,
+  analysis: MessageAnalysis | null,
+  contactInfo: ContactInfoResult | null,
+): Promise<void> {
+  if (!analysis?.resolved) return;
+
+  const planTag = detectPlanTag(contactInfo?.subscriptions ?? []);
+  const autoresolvePlans: PlanTag[] = ['advanced', 'ultra', 'max'];
+  if (!autoresolvePlans.includes(planTag)) return;
+
+  try {
+    await supabase
+      .from('desk_conversations')
+      .update({ status: 'resolved', resolved_at: new Date().toISOString() })
+      .eq('id', conversationId);
+
+    await supabase.from('desk_messages').insert({
+      conversation_id: conversationId,
+      sender_type: 'system',
+      content: 'Conversa encerrada automaticamente pela IA após resolução.',
+      content_type: 'text',
+    });
+
+    console.log(`[AI] Auto-resolved conversation ${conversationId} (plan=${planTag})`);
+  } catch (e) {
+    console.warn('[AI] maybeAutoResolve failed:', e instanceof Error ? e.message : e);
   }
 }
 
@@ -983,10 +1026,15 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
     const isStarterClient = isStarterOnlyClient(contactInfo);
     const should_handoff = !isDraft && !isStarterClient && rawReply.includes(TRANSFER_KEYWORD);
 
-    // Inteligência aplicada à conversa (prioridade + tag de intenção) e log de
-    // analytics — fire-and-forget, nunca bloqueia a resposta ao cliente.
+    // Inteligência aplicada à conversa (prioridade + tag de intenção), auto-resolve
+    // e log de analytics — fire-and-forget, nunca bloqueia a resposta ao cliente.
     if (!isDraft && analysis) {
       void applyAnalysis(supabase, conversation_id, analysis);
+      // Auto-resolve: Advanced/Ultra/Max quando IA sinaliza resolved=sim (via META).
+      // Ocorre DEPOIS da resposta ser salva para não criar race condition.
+      if (!should_handoff) {
+        void maybeAutoResolve(supabase, conversation_id, analysis, contactInfo);
+      }
     }
     void logInteraction(supabase, {
       conversationId: conversation_id,
