@@ -233,18 +233,29 @@ export default function Knowledge() {
     loadArticles();
     loadStats();
 
-    if (savedId) generateArticleEmbedding(savedId, `${payload.title}\n\n${payload.content}`);
+    if (savedId) generateArticleEmbedding(savedId, `${payload.title}\n\n${payload.content}`, { silent: true });
   };
 
-  const generateArticleEmbedding = async (id: string, content: string) => {
+  const generateArticleEmbedding = async (id: string, content: string, opts?: { silent?: boolean }) => {
     setEmbedding(true);
     try {
-      const { error: fnErr } = await supabase.functions.invoke("desk-embed-article", {
+      const { data, error: fnErr } = await supabase.functions.invoke("desk-embed-article", {
         body: { id, content, table: "desk_knowledge_base" },
       });
-      if (fnErr) console.warn("[Knowledge] Embedding failed (non-fatal):", fnErr.message);
+      // Edge Functions devolvem 4xx/5xx como erro do invoke OU como { error } no corpo.
+      const bodyErr = (data as { error?: string } | null)?.error;
+      if (fnErr || bodyErr) {
+        const msg = bodyErr ?? fnErr?.message ?? "Falha desconhecida";
+        console.warn("[Knowledge] Embedding failed:", msg);
+        if (!opts?.silent) toast.error("Erro ao gerar índice do artigo", { description: msg });
+      } else {
+        if (!opts?.silent) toast.success("Índice semântico gerado");
+        await loadArticles();
+      }
     } catch (err) {
-      console.warn("[Knowledge] Embedding error (non-fatal):", err);
+      const msg = err instanceof Error ? err.message : "Erro inesperado";
+      console.warn("[Knowledge] Embedding error:", msg);
+      if (!opts?.silent) toast.error("Erro ao gerar índice do artigo", { description: msg });
     } finally {
       setEmbedding(false);
     }
@@ -328,18 +339,28 @@ export default function Knowledge() {
     setSnippetSheetOpen(false);
     loadSnippets();
 
-    if (savedId) generateSnippetEmbedding(savedId, `${payload.title}\n\n${payload.content}`);
+    if (savedId) generateSnippetEmbedding(savedId, `${payload.title}\n\n${payload.content}`, { silent: true });
   };
 
-  const generateSnippetEmbedding = async (id: string, content: string) => {
+  const generateSnippetEmbedding = async (id: string, content: string, opts?: { silent?: boolean }) => {
     setEmbeddingSnippet(true);
     try {
-      const { error: fnErr } = await supabase.functions.invoke("desk-embed-article", {
+      const { data, error: fnErr } = await supabase.functions.invoke("desk-embed-article", {
         body: { id, content, table: "desk_ai_snippets" },
       });
-      if (fnErr) console.warn("[Snippets] Embedding failed (non-fatal):", fnErr.message);
+      const bodyErr = (data as { error?: string } | null)?.error;
+      if (fnErr || bodyErr) {
+        const msg = bodyErr ?? fnErr?.message ?? "Falha desconhecida";
+        console.warn("[Snippets] Embedding failed:", msg);
+        if (!opts?.silent) toast.error("Erro ao indexar snippet", { description: msg });
+      } else {
+        if (!opts?.silent) toast.success("Snippet indexado");
+        await loadSnippets();
+      }
     } catch (err) {
-      console.warn("[Snippets] Embedding error (non-fatal):", err);
+      const msg = err instanceof Error ? err.message : "Erro inesperado";
+      console.warn("[Snippets] Embedding error:", msg);
+      if (!opts?.silent) toast.error("Erro ao indexar snippet", { description: msg });
     } finally {
       setEmbeddingSnippet(false);
     }
