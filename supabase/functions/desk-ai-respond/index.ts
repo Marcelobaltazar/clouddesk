@@ -8,6 +8,12 @@ interface AIRespondRequest {
   message: string;
   account_name?: string;
   account_email?: string; // passed by widget directly — avoids account table lookup
+  /**
+   * 'draft': modo copilot do operador — gera um rascunho de resposta usando o
+   * mesmo pipeline de contexto, SEM inserir mensagem, SEM executar ações
+   * (reenvio de credenciais), SEM transferir e ignorando o guard de ai_active.
+   */
+  mode?: 'draft';
 }
 
 interface MessageMetadata {
@@ -223,11 +229,24 @@ async function generateEmbedding(text: string, apiKey: string): Promise<number[]
 
 // Chama o LLM via OpenRouter (suporta qualquer provider com a mesma API).
 // Modelo configurável via env LLM_MODEL (default: google/gemini-2.5-flash).
+
+interface LLMUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+}
+
+interface LLMResult {
+  content: string;
+  model: string;
+  usage: LLMUsage | null;
+}
+
 async function callLLM(
   apiKey: string,
   systemPrompt: string,
   messages: Array<{ role: string; content: string }>,
-): Promise<string> {
+): Promise<LLMResult> {
   const model = Deno.env.get('LLM_MODEL') ?? 'google/gemini-2.5-flash';
 
   const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -242,7 +261,8 @@ async function callLLM(
       model,
       messages: [{ role: 'system', content: systemPrompt }, ...messages],
       temperature: 0.7,
-      max_tokens: 512,
+      max_tokens: 768,
+      usage: { include: true },
     }),
   });
 
@@ -251,8 +271,12 @@ async function callLLM(
     throw new Error(`OpenRouter chat error ${res.status}: ${err}`);
   }
 
-  const data: OpenAIChatResponse = await res.json();
-  return data.choices[0].message.content;
+  const data: OpenAIChatResponse & { usage?: LLMUsage } = await res.json();
+  return {
+    content: data.choices[0].message.content,
+    model,
+    usage: data.usage ?? null,
+  };
 }
 
 // ─── Prompt builder ───────────────────────────────────────────────────────────
@@ -437,6 +461,134 @@ ${contextSection}`;
 
 const OPCOES_RE = /\[OPCOES:\s*([^\]]+)\]/i;
 const RESEND_ACTION_RE = /\[ACTION:\s*resend_credentials\s*\]/i;
+
+// ─── Análise de intenção / sentimento / urgência ─────────────────────────────
+// O modelo anexa um bloco [META: ...] no FINAL de toda resposta (instrução no
+// system prompt). Isso dá classificação estruturada na MESMA chamada — zero
+// custo/latência extra. O bloco é removido do texto visível.
+
+const META_INSTRUCTION = `
+[ANÁLISE OBRIGATÓRIA — BLOCO META]
+No FINAL de TODA resposta (inclusive quando responder apenas ${TRANSFER_KEYWORD}), anexe em uma linha própria:
+[META: intent=<valor> sentiment=<valor> urgency=<valor>]
+
+- intent: credenciais | n8n | evolution | infra_down | billing | cancelamento | upgrade | dominio | duvida_geral | outro
+- sentiment: positivo | neutro | negativo | irritado
+- urgency: baixa | media | alta | critica
+
+Critérios de urgency:
+- critica: produção fora do ar, cliente perdendo dinheiro/clientes agora
+- alta: serviço degradado, bloqueio de trabalho, cliente irritado, ameaça de cancelamento
+- media: problema real mas contornável
+- baixa: dúvida, curiosidade, configuração sem pressa
+
+O bloco META nunca deve aparecer sem os 3 campos. Não explique o bloco ao cliente.`;
+
+const META_RE = /\[META:\s*intent=([\w-]+)\s+sentiment=([\w-]+)\s+urgency=([\w-]+)\s*\]/i;
+
+interface MessageAnalysis {
+  intent: string;
+  sentiment: string;
+  urgency: string;
+}
+
+function parseMetaBlock(raw: string): { text: string; analysis: MessageAnalysis | null } {
+  const m = raw.match(META_RE);
+  if (!m) return { text: raw.trim(), analysis: null };
+  return {
+    text: raw.replace(META_RE, '').replace(/\n{3,}/g, '\n\n').trim(),
+    analysis: {
+      intent: m[1].toLowerCase(),
+      sentiment: m[2].toLowerCase(),
+      urgency: m[3].toLowerCase(),
+    },
+  };
+}
+
+// urgência → prioridade da conversa. Só PROMOVE (nunca rebaixa o que o operador definiu).
+const PRIORITY_RANK: Record<string, number> = { low: 0, medium: 1, high: 2, urgent: 3 };
+
+function priorityForUrgency(urgency: string): string | null {
+  if (urgency === 'critica') return 'urgent';
+  if (urgency === 'alta') return 'high';
+  return null;
+}
+
+/** Aplica análise à conversa: prioridade (promoção) + tag de intenção. Fire-and-forget. */
+async function applyAnalysis(
+  supabase: ReturnType<typeof createClient>,
+  conversationId: string,
+  analysis: MessageAnalysis,
+): Promise<void> {
+  try {
+    const { data: conv } = await supabase
+      .from('desk_conversations')
+      .select('priority, tags')
+      .eq('id', conversationId)
+      .maybeSingle();
+    if (!conv) return;
+
+    const update: Record<string, unknown> = {};
+
+    const target = priorityForUrgency(analysis.urgency);
+    const current = (conv as Record<string, unknown>).priority as string;
+    if (target && (PRIORITY_RANK[target] ?? 0) > (PRIORITY_RANK[current] ?? 0)) {
+      update.priority = target;
+    }
+
+    const tags: string[] = ((conv as Record<string, unknown>).tags as string[]) ?? [];
+    const intentTag = `intent:${analysis.intent}`;
+    const withoutIntents = tags.filter((t) => !t.startsWith('intent:'));
+    if (!tags.includes(intentTag) || tags.length !== withoutIntents.length + 1) {
+      update.tags = [...withoutIntents, intentTag];
+    }
+
+    if (Object.keys(update).length > 0) {
+      await supabase.from('desk_conversations').update(update).eq('id', conversationId);
+    }
+  } catch (e) {
+    console.warn('[AI] applyAnalysis failed:', e instanceof Error ? e.message : e);
+  }
+}
+
+/** Log estruturado da interação em desk_ai_interactions (analytics da IA). */
+async function logInteraction(
+  supabase: ReturnType<typeof createClient>,
+  params: {
+    conversationId: string;
+    model: string;
+    usage: LLMUsage | null;
+    latencyMs: number;
+    wasEscalated: boolean;
+    analysis: MessageAnalysis | null;
+    kbIds: string[];
+    faqIds: string[];
+    draft: boolean;
+  },
+): Promise<void> {
+  try {
+    await supabase.from('desk_ai_interactions').insert({
+      conversation_id: params.conversationId,
+      provider: 'openrouter',
+      model: params.model,
+      prompt_tokens: params.usage?.prompt_tokens ?? null,
+      completion_tokens: params.usage?.completion_tokens ?? null,
+      total_tokens: params.usage?.total_tokens ?? null,
+      latency_ms: params.latencyMs,
+      was_escalated: params.wasEscalated,
+      context_sources: {
+        kb: params.kbIds,
+        faq: params.faqIds,
+        intent: params.analysis?.intent ?? null,
+        sentiment: params.analysis?.sentiment ?? null,
+        urgency: params.analysis?.urgency ?? null,
+        draft: params.draft,
+      },
+    });
+  } catch (e) {
+    console.warn('[AI] logInteraction failed:', e instanceof Error ? e.message : e);
+  }
+}
 
 function parseReplyMarkers(
   raw: string,
@@ -647,7 +799,8 @@ Deno.serve(async (req) => {
 
   try {
     const body: AIRespondRequest = await req.json();
-    const { conversation_id, message, account_name, account_email } = body;
+    const { conversation_id, message, account_name, account_email, mode } = body;
+    const isDraft = mode === 'draft';
 
     if (!conversation_id || !message) {
       return new Response(
@@ -676,6 +829,7 @@ Deno.serve(async (req) => {
     }
 
     if (
+      !isDraft &&
       convRow &&
       (!convRow.ai_active || convRow.status === 'pending' || convRow.status === 'resolved')
     ) {
@@ -748,9 +902,12 @@ Deno.serve(async (req) => {
 
     // Tag automática por plano (item 2). Fire-and-forget: não bloqueia a resposta.
     // Mantém desk_conversations.tags com a tag do plano mais alto do cliente.
-    const planTag = detectPlanTag(contactInfo?.subscriptions ?? []);
-    void applyPlanTag(supabase, conversation_id, planTag);
-    console.log(`[AI] Plan tag: ${planTag}`);
+    // No modo draft (copilot do operador) não mexemos na conversa.
+    if (!isDraft) {
+      const planTag = detectPlanTag(contactInfo?.subscriptions ?? []);
+      void applyPlanTag(supabase, conversation_id, planTag);
+      console.log(`[AI] Plan tag: ${planTag}`);
+    }
 
     // ── Step 2: Semantic search (RAG) ─────────────────────────────────────────
     // Generate embedding for the user's message, then query KB and FAQ in parallel.
@@ -794,7 +951,18 @@ Deno.serve(async (req) => {
     }
 
     // ── Step 3: Build prompt + call OpenAI ────────────────────────────────────
-    const systemPrompt = buildSystemPrompt(kbMatches, faqMatches, account_name, contactInfo, isFirstMessage);
+    let systemPrompt = buildSystemPrompt(kbMatches, faqMatches, account_name, contactInfo, isFirstMessage);
+    systemPrompt += `\n${META_INSTRUCTION}`;
+
+    if (isDraft) {
+      systemPrompt += `
+
+[MODO RASCUNHO — COPILOT DO OPERADOR]
+Esta resposta será revisada por um operador HUMANO antes de ser enviada ao cliente.
+- NUNCA use ${TRANSFER_KEYWORD} — o humano já está aqui.
+- Escreva a melhor resposta possível como se fosse o operador.
+- Não use [OPCOES] nem [ACTION].`;
+    }
 
     const chatMessages = history.map((m) => ({
       role: m.sender_type === 'contact' ? 'user' : 'assistant',
@@ -802,18 +970,56 @@ Deno.serve(async (req) => {
     }));
     chatMessages.push({ role: 'user', content: message });
 
-    const rawReply = await callLLM(apiKey, systemPrompt, chatMessages);
-    console.log(`[AI] Reply: "${rawReply.substring(0, 80)}"`);
+    const llmStart = Date.now();
+    const llm = await callLLM(apiKey, systemPrompt, chatMessages);
+    const latencyMs = Date.now() - llmStart;
+
+    // Bloco [META: ...] — classificação estruturada embutida na mesma resposta.
+    const { text: replyWithoutMeta, analysis } = parseMetaBlock(llm.content);
+    const rawReply = replyWithoutMeta;
+    console.log(`[AI] Reply: "${rawReply.substring(0, 80)}" meta=${JSON.stringify(analysis)} latency=${latencyMs}ms`);
 
     // Somente Starter nunca transfere — reforço server-side caso o modelo ignore o prompt.
     const isStarterClient = isStarterOnlyClient(contactInfo);
-    const should_handoff = !isStarterClient && rawReply.includes(TRANSFER_KEYWORD);
+    const should_handoff = !isDraft && !isStarterClient && rawReply.includes(TRANSFER_KEYWORD);
+
+    // Inteligência aplicada à conversa (prioridade + tag de intenção) e log de
+    // analytics — fire-and-forget, nunca bloqueia a resposta ao cliente.
+    if (!isDraft && analysis) {
+      void applyAnalysis(supabase, conversation_id, analysis);
+    }
+    void logInteraction(supabase, {
+      conversationId: conversation_id,
+      model: llm.model,
+      usage: llm.usage,
+      latencyMs,
+      wasEscalated: should_handoff,
+      analysis,
+      kbIds: kbMatches.map((k) => k.id),
+      faqIds: faqMatches.map((f) => f.id),
+      draft: isDraft,
+    });
 
     // Strip the [OPCOES] / [ACTION] markers. On handoff the reply is just the
     // transfer keyword, so there is nothing to parse.
     let { text: reply, metadata, resendCredentials } = should_handoff
       ? { text: rawReply, metadata: null, resendCredentials: false }
       : parseReplyMarkers(rawReply);
+
+    // Modo draft: nunca executa ações nem transfere — apenas devolve o texto
+    // limpo para o operador revisar.
+    if (isDraft) {
+      const draftReply = reply.replace(TRANSFER_KEYWORD, '').trim();
+      const draftResult: AIRespondResult = {
+        reply: draftReply || 'Não consegui gerar uma sugestão para esta conversa.',
+        should_handoff: false,
+        metadata: null,
+      };
+      return new Response(
+        JSON.stringify(draftResult),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      );
+    }
 
     // [ACTION: resend_credentials] — resolve a infra ATIVA escolhida pelo cliente
     // (cruza o nome citado na mensagem com contactInfo.infras) e dispara o reenvio.

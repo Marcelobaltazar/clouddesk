@@ -8,6 +8,7 @@ import { ChatWidgetComposer } from "./ChatWidgetComposer";
 import { CSATFeedback } from "./CSATFeedback";
 import type { CloudDeskSettings, WidgetMessage, WidgetMessageMetadata } from "./types";
 import type { ContactInfo } from "@/lib/contact-info";
+import { computeSlaDeadline, markFirstResponse } from "@/lib/sla";
 
 // ── Welcome message builder ────────────────────────────────────────────────────
 
@@ -234,6 +235,10 @@ export function ChatWidget({ settings, embedUser }: Props) {
           throw new Error("Email do cliente ausente — widget não pode criar conversa");
         }
 
+        // SLA calculado já no INSERT (anon não tem policy de UPDATE) — o trigger
+        // do banco cobre o fallback quando a migration estiver aplicada.
+        const slaDeadline = await computeSlaDeadline("medium").catch(() => null);
+
         const { data: convData, error: convError } = await supabase
           .from("desk_conversations")
           .insert({
@@ -244,6 +249,7 @@ export function ChatWidget({ settings, embedUser }: Props) {
             priority: "medium",
             subject: firstMessage.slice(0, 60),
             ai_active: true,
+            sla_deadline: slaDeadline,
           })
           .select("id, status, created_at, subject")
           .single();
@@ -281,6 +287,8 @@ export function ChatWidget({ settings, embedUser }: Props) {
         } else if (aiResult.reply) {
           const botMsg = await insertMessage(convData.id, "bot", aiResult.reply, true, aiResult.metadata);
           if (botMsg) addMessage(botMsg);
+          // Primeira resposta da IA ao cliente → métrica de tempo de 1ª resposta
+          void markFirstResponse(convData.id);
         }
       } catch (err) {
         console.error("[Widget] Erro no fluxo de IA:", err);
@@ -332,6 +340,7 @@ export function ChatWidget({ settings, embedUser }: Props) {
         } else if (aiResult.reply) {
           const botMsg = await insertMessage(conversation.id, "bot", aiResult.reply, true, aiResult.metadata);
           if (botMsg) addMessage(botMsg);
+          void markFirstResponse(conversation.id);
         }
       } catch (err) {
         console.error("[Widget] Erro no fluxo de IA:", err);
@@ -385,6 +394,7 @@ export function ChatWidget({ settings, embedUser }: Props) {
         if (!welcomeText) return;
 
         // 2. Create conversation record (account_user_id null — RLS valida por email)
+        const slaDeadline = await computeSlaDeadline("medium").catch(() => null);
         const { data: convData, error: convError } = await supabase
           .from("desk_conversations")
           .insert({
@@ -395,6 +405,7 @@ export function ChatWidget({ settings, embedUser }: Props) {
             priority: "medium",
             subject: "Atendimento via widget",
             ai_active: true,
+            sla_deadline: slaDeadline,
           })
           .select("id, status, created_at, subject")
           .single();
@@ -446,6 +457,36 @@ export function ChatWidget({ settings, embedUser }: Props) {
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, embedUser?.email, account?.email]);
+
+  // ── Realtime: CSAT quando a conversa é resolvida ─────────────────────────────
+  // Sempre ativo enquanto há conversa. Quando status vira 'resolved' e o cliente
+  // ainda não avaliou, mostra o formulário de CSAT (😞😐😊) no lugar do composer.
+  useEffect(() => {
+    const convId = conversation?.id;
+    if (!convId) return;
+
+    const channel = supabase
+      .channel(`widget-csat:${convId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "desk_conversations",
+          filter: `id=eq.${convId}`,
+        },
+        (payload) => {
+          const conv = payload.new as Record<string, unknown>;
+          const store = useWidgetStore.getState();
+          if (conv.status === "resolved" && !store.csatSubmitted) {
+            store.setShowCsat(true);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [conversation?.id]);
 
   // ── Realtime: detect an operator taking over the conversation ───────────────
   // While the client waits for a human, we watch desk_conversations for the
@@ -594,7 +635,10 @@ export function ChatWidget({ settings, embedUser }: Props) {
         <>
           <ChatWidgetThread messages={messages} conversationId={conversation.id} onSend={handleSend} />
           {showCsat ? (
-            <CSATFeedback />
+            <CSATFeedback
+              conversationId={conversation.id}
+              accountUserId={embedUser?.id ?? null}
+            />
           ) : (
             <>
               {/* Transferência só acontece quando a IA decide (should_handoff) —

@@ -1,11 +1,19 @@
 import { useState } from "react";
+import { supabase } from "@/integrations/supabase/client";
 import { useWidgetStore } from "./useWidgetStore";
 
-export function CSATFeedback() {
+interface Props {
+  conversationId?: string | null;
+  /** auth user id do cliente no Supabase de produção da Cloudfy (embedUser.id) */
+  accountUserId?: string | null;
+}
+
+export function CSATFeedback({ conversationId, accountUserId }: Props) {
   const { setCsatSubmitted, setShowCsat } = useWidgetStore();
   const [selected, setSelected] = useState<number | null>(null);
   const [comment, setComment] = useState("");
   const [submitted, setSubmitted] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const emojis = [
     { value: 1, emoji: "😞", label: "Ruim" },
@@ -13,10 +21,25 @@ export function CSATFeedback() {
     { value: 3, emoji: "😊", label: "Ótimo" },
   ];
 
-  const handleSubmit = () => {
-    if (selected === null) return;
-    // TODO: save CSAT to database
-    console.log("CSAT:", { rating: selected, comment });
+  const handleSubmit = async () => {
+    if (selected === null || saving) return;
+    setSaving(true);
+
+    // account_user_id é NOT NULL no schema — usa o id do cliente na Cloudfy.
+    // Falha de gravação não bloqueia o agradecimento (UX primeiro, métrica depois).
+    if (conversationId && accountUserId) {
+      const { error } = await supabase.from("desk_csat").insert({
+        conversation_id: conversationId,
+        account_user_id: accountUserId,
+        rating: selected,
+        comment: comment.trim() || null,
+      });
+      if (error) console.warn("[CSAT] Falha ao salvar avaliação:", error.message);
+    } else {
+      console.warn("[CSAT] Sem conversationId/accountUserId — avaliação não persistida");
+    }
+
+    setSaving(false);
     setSubmitted(true);
     setCsatSubmitted(true);
     setTimeout(() => setShowCsat(false), 2000);

@@ -11,7 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { Bot, Lock, Info, CheckCircle, Send, MessageSquare, UserPlus, Clock, BookOpen, Reply, Search, Zap } from "lucide-react";
+import { Bot, Lock, Info, CheckCircle, Send, MessageSquare, UserPlus, Clock, BookOpen, Reply, Search, Zap, Sparkles, Loader2 } from "lucide-react";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
@@ -132,6 +132,8 @@ export function ConversationThread() {
   // Composer mode: "reply" (público) ou "note" (nota interna)
   const [mode, setMode]         = useState<"reply" | "note">("reply");
   const [sending, setSending]   = useState(false);
+  // Copilot: gerando rascunho de resposta com IA
+  const [suggesting, setSuggesting] = useState(false);
 
   // Snooze dropdown (also opened via keyboard shortcut Z)
   const [snoozeOpen, setSnoozeOpen] = useState(false);
@@ -559,6 +561,16 @@ export function ConversationThread() {
           ? { status: "open", updated_at: now }
           : { updated_at: now };
 
+      // Métrica de 1ª resposta: primeira resposta pública (humana) preenche
+      // first_response_at se a IA ainda não tiver respondido antes.
+      if (!isNote) {
+        await supabase
+          .from("desk_conversations")
+          .update({ first_response_at: now })
+          .eq("id", activeConversationId)
+          .is("first_response_at", null);
+      }
+
       await supabase
         .from("desk_conversations")
         .update(statusUpdate)
@@ -575,6 +587,48 @@ export function ConversationThread() {
   };
 
   sendAndResolveRef.current = () => handleSend({ resolveAfter: true });
+
+  // ── Copilot: rascunho de resposta gerado pela IA ─────────────────────────────
+  // Usa o MESMO pipeline de contexto da IA do widget (dados do cliente, infra,
+  // RAG na base de conhecimento, histórico) em modo draft — nada é enviado ao
+  // cliente; o texto cai no composer para o operador revisar e enviar.
+  const handleSuggestReply = async () => {
+    if (suggesting) return;
+
+    const lastContactMsg = [...messages].reverse().find((m) => m.sender_type === "contact");
+    if (!lastContactMsg) {
+      toast.info("Sem mensagem do cliente para responder");
+      return;
+    }
+
+    setSuggesting(true);
+    try {
+      const { data, error } = await supabase.functions.invoke<{ reply: string | null }>(
+        "desk-ai-respond",
+        {
+          body: {
+            conversation_id: activeConversationId,
+            message: lastContactMsg.content,
+            account_name: conversation.contact?.name ?? undefined,
+            account_email: conversation.contact?.email ?? conversation.user_email ?? undefined,
+            mode: "draft",
+          },
+        },
+      );
+
+      if (error) throw new Error(error.message);
+      if (!data?.reply) throw new Error("A IA não retornou sugestão");
+
+      setMode("reply");
+      setContent((prev) => (prev.trim() ? `${prev}\n\n${data.reply}` : data.reply ?? ""));
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Erro desconhecido";
+      toast.error("Não consegui gerar a sugestão", { description: msg });
+    } finally {
+      setSuggesting(false);
+    }
+  };
 
   // Detecta o trigger "/": se o texto começa com "/" (sem espaço logo após),
   // abre o picker de snippets e usa o que vem depois da "/" como busca.
@@ -857,6 +911,28 @@ export function ConversationThread() {
                 rows={1}
               />
               <div className="flex items-center gap-1 shrink-0">
+                {/* Copilot: sugerir resposta com IA (mesmo contexto do widget) */}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                      onClick={handleSuggestReply}
+                      disabled={suggesting}
+                    >
+                      {suggesting ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Sparkles className="h-4 w-4" />
+                      )}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    Sugerir resposta com IA — usa dados do cliente, infra e base de conhecimento
+                  </TooltipContent>
+                </Tooltip>
+
                 {/* Insert snippet / resposta rápida (item 5) — botão ⚡ ou "/" no composer */}
                 <Popover
                   open={snippetOpen}

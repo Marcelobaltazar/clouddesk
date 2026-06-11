@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { Inbox, Users, BookOpen, Zap, Settings, Cloud, LogOut, Moon, Sun, Circle, Bell, BellOff, LayoutGrid, PanelLeft, Flame } from "lucide-react";
+import { Inbox, Users, BookOpen, Zap, Settings, Cloud, LogOut, Moon, Sun, Circle, Bell, BellOff, LayoutGrid, PanelLeft, Flame, BarChart3 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useAuthStore } from "@/stores/authStore";
 import { useTheme } from "@/lib/theme";
@@ -53,8 +53,9 @@ const navItems = [
   { title: "Inbox",                url: "/inbox",     icon: Inbox    },
   { title: "Contatos",             url: "/contacts",  icon: Users    },
   { title: "Base de Conhecimento", url: "/knowledge", icon: BookOpen },
-  { title: "Respostas rápidas",    url: "/macros",    icon: Zap      },
-  { title: "Configurações",        url: "/settings",  icon: Settings },
+  { title: "Respostas rápidas",    url: "/macros",    icon: Zap       },
+  { title: "Relatórios",           url: "/reports",   icon: BarChart3 },
+  { title: "Configurações",        url: "/settings",  icon: Settings  },
 ];
 
 const statusColors: Record<string, string> = {

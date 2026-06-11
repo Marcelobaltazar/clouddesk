@@ -13,6 +13,7 @@ import Inbox from "./pages/Inbox";
 import Contacts from "./pages/Contacts";
 import Knowledge from "./pages/Knowledge";
 import MacrosPage from "./pages/Macros";
+import Reports from "./pages/Reports";
 import SettingsPage from "./pages/Settings";
 import NotFound from "./pages/NotFound";
 import WidgetPreview from "./pages/WidgetPreview";
@@ -121,6 +122,7 @@ function AppRoutes() {
           <Route path="/contacts" element={<Contacts />} />
           <Route path="/knowledge" element={<Knowledge />} />
           <Route path="/macros" element={<MacrosPage />} />
+          <Route path="/reports" element={<Reports />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Route>
         <Route path="*" element={<NotFound />} />
