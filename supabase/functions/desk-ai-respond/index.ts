@@ -139,10 +139,6 @@ interface SnippetMatch {
   similarity: number;
 }
 
-interface OpenAIEmbeddingResponse {
-  data: Array<{ embedding: number[] }>;
-}
-
 interface OpenAIChatResponse {
   choices: Array<{ message: { content: string } }>;
 }
@@ -210,29 +206,21 @@ Quando o cliente pedir credenciais, acesso, senha, login ou qualquer dado de ace
 
 IMPORTANTE: reenvio de credenciais NÃO é reset de senha — são os dados de acesso ORIGINAIS da infraestrutura. Nunca prometa redefinir senha; apenas reenvie as credenciais existentes.`;
 
-// ─── OpenAI helpers ───────────────────────────────────────────────────────────
+// ─── Embedding nativo do Supabase (gte-small, 384 dims) ─────────────────────────
+// Roda no runtime da Edge Function via Supabase.ai — SEM API externa. Os vetores
+// gerados aqui casam com os índices/funções match_* migrados para VECTOR(384).
 
-async function generateEmbedding(text: string, apiKey: string): Promise<number[]> {
-  if (!apiKey) throw new Error('OPENAI_API_KEY not set — RAG skipped');
-  const res = await fetch('https://api.openai.com/v1/embeddings', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'text-embedding-3-small',
-      input: text.slice(0, 8000),
-    }),
-  });
+// `Supabase` é um global do runtime de Edge Functions; tipamos pontualmente.
+declare const Supabase: {
+  ai: { Session: new (model: string) => { run(input: string, opts: { mean_pool: boolean; normalize: boolean }): Promise<number[]> } };
+};
 
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`OpenAI embedding error ${res.status}: ${err}`);
-  }
+const embeddingSession = new Supabase.ai.Session('gte-small');
 
-  const data: OpenAIEmbeddingResponse = await res.json();
-  return data.data[0].embedding;
+async function generateEmbedding(text: string): Promise<number[]> {
+  const input = text.slice(0, 2000); // gte-small ~512 tokens
+  const output = await embeddingSession.run(input, { mean_pool: true, normalize: true });
+  return output as number[];
 }
 
 // Chama o LLM via OpenRouter (suporta qualquer provider com a mesma API).
@@ -907,9 +895,7 @@ Deno.serve(async (req) => {
     const apiKey = Deno.env.get('OPENROUTER_API_KEY');
     if (!apiKey) throw new Error('Missing OPENROUTER_API_KEY secret');
 
-    // Embeddings na OpenAI (modelo text-embedding-3-small).
-    // Se OPENAI_API_KEY não estiver definida, o RAG é pulado graciosamente.
-    const openaiKey = Deno.env.get('OPENAI_API_KEY') ?? '';
+    // Embeddings nativos (gte-small via Supabase.ai) — sem chave/API externa.
 
     // ── Step 1: Conversation history + client contact info in parallel ─────────
     const accountUserId = (convRow as Record<string, unknown> | null)?.account_user_id as string | undefined;
@@ -980,7 +966,7 @@ Deno.serve(async (req) => {
     let snippetMatches: SnippetMatch[] = [];
 
     try {
-      const embedding = await generateEmbedding(message, openaiKey);
+      const embedding = await generateEmbedding(message);
       console.log('[AI] Embedding generated');
 
       const [kbRes, faqRes, snippetRes] = await Promise.all([

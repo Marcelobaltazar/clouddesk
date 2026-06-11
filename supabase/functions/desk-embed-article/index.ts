@@ -13,35 +13,23 @@ interface EmbedRequest {
   table: EmbeddableTable;
 }
 
-interface OpenAIEmbeddingResponse {
-  data: Array<{ embedding: number[] }>;
-}
+// ─── Embedding nativo do Supabase ───────────────────────────────────────────────
+// Usa o modelo `gte-small` embarcado no runtime das Edge Functions (Supabase.ai).
+// 100% local: NÃO chama nenhuma API externa (OpenAI/OpenRouter). Produz vetores de
+// 384 dimensões (ver migration 20260613000000_native_embeddings_gte_small.sql).
 
-// ─── Helper ───────────────────────────────────────────────────────────────────
+// `Supabase` é um global injetado no runtime de Edge Functions; tipamos pontualmente.
+declare const Supabase: {
+  ai: { Session: new (model: string) => { run(input: string, opts: { mean_pool: boolean; normalize: boolean }): Promise<number[]> } };
+};
+
+const embeddingSession = new Supabase.ai.Session('gte-small');
 
 async function generateEmbedding(text: string): Promise<number[]> {
-  const apiKey = Deno.env.get('OPENAI_API_KEY');
-  if (!apiKey) throw new Error('Missing OPENAI_API_KEY secret');
-
-  const res = await fetch('https://api.openai.com/v1/embeddings', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'text-embedding-3-small',
-      input: text.slice(0, 8000), // stay well within token limit
-    }),
-  });
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`OpenAI embedding error ${res.status}: ${err}`);
-  }
-
-  const data: OpenAIEmbeddingResponse = await res.json();
-  return data.data[0].embedding;
+  // gte-small aceita ~512 tokens; cortamos para caber com folga.
+  const input = text.slice(0, 2000);
+  const output = await embeddingSession.run(input, { mean_pool: true, normalize: true });
+  return output as number[];
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
