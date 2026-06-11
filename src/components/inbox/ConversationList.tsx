@@ -43,20 +43,38 @@ const channelIcon: Record<string, typeof MessageSquare> = {
 // desk_conversations.tags. Mapeamos cada plano para um rótulo + cor de badge.
 
 const PLAN_BADGES: Record<string, { label: string; cls: string }> = {
-  max:        { label: "Max",     cls: "bg-fuchsia-500/15 text-fuchsia-400 border border-fuchsia-500/30" },
-  ultra:      { label: "Ultra",   cls: "bg-violet-500/15 text-violet-400 border border-violet-500/30"   },
-  advanced:   { label: "Advanced",cls: "bg-sky-500/15 text-sky-400 border border-sky-500/30"            },
-  starter:    { label: "Starter", cls: "bg-slate-500/15 text-slate-400 border border-slate-500/30"      },
-  "sem-plano":{ label: "Sem plano",cls: "bg-muted text-muted-foreground border border-border"           },
+  max:        { label: "Max",     cls: "bg-fuchsia-100 text-fuchsia-700" },
+  ultra:      { label: "Ultra",   cls: "bg-violet-100 text-violet-700"   },
+  advanced:   { label: "Advanced",cls: "bg-sky-100 text-sky-700"         },
+  starter:    { label: "Starter", cls: "bg-muted text-muted-foreground"  },
+  "sem-plano":{ label: "Sem plano",cls: "bg-muted text-muted-foreground" },
 };
 
 // Badge de status (usado nos resultados de busca, que misturam status).
 const statusBadge: Record<string, { label: string; cls: string }> = {
-  open:     { label: "Aberta",    cls: "bg-emerald-500/10 text-emerald-500 border border-emerald-500/20" },
-  pending:  { label: "Pendente",  cls: "bg-amber-500/10 text-amber-500 border border-amber-500/20"       },
-  snoozed:  { label: "Adiada",    cls: "bg-violet-500/10 text-violet-400 border border-violet-500/20"     },
-  resolved: { label: "Resolvida", cls: "bg-muted text-muted-foreground border border-border"              },
+  open:     { label: "Aberta",    cls: "bg-emerald-100 text-emerald-700" },
+  pending:  { label: "Pendente",  cls: "bg-amber-100 text-amber-700"     },
+  snoozed:  { label: "Adiada",    cls: "bg-violet-100 text-violet-700"   },
+  resolved: { label: "Resolvida", cls: "bg-muted text-muted-foreground"  },
 };
+
+// ─── Avatar colorido determinístico (inicial + cor derivada do nome) ──────────
+
+const AVATAR_COLORS = [
+  "bg-[#F98686]", // coral
+  "bg-[#85E0D9]", // teal
+  "bg-[#9EC5FA]", // azul
+  "bg-[#B19EFA]", // lilás
+  "bg-[#F7C873]", // âmbar
+  "bg-[#9BDD8D]", // verde
+  "bg-[#F2A2D0]", // rosa
+];
+
+function avatarColorFor(name: string): string {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+  return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
+}
 
 /** Retorna a config de badge do plano a partir das tags da conversa (ou null). */
 function planBadgeFor(tags: string[] | null | undefined): { label: string; cls: string } | null {
@@ -287,25 +305,25 @@ export function ConversationList() {
   }
 
   return (
-    <div className="w-80 border-r border-border flex flex-col bg-card h-full shrink-0">
+    <div className="w-80 panel flex flex-col h-full shrink-0 overflow-hidden">
 
       {/* ── Search + filters ── */}
-      <div className="p-3 border-b border-border space-y-2">
+      <div className="p-3 space-y-2">
         <div className="relative">
           <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input
             placeholder="Buscar por nome, e-mail ou assunto..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="pl-9 h-9 bg-surface border-none text-sm"
+            className="pl-9 h-9 bg-surface border-none text-sm rounded-xl"
           />
         </div>
         <button
           onClick={() => setMineOnly((v) => !v)}
           className={cn(
-            "flex items-center gap-1.5 text-[11px] font-medium px-2 py-1 rounded-md transition-colors w-full",
+            "flex items-center gap-1.5 text-[11px] font-medium px-2 py-1 rounded-lg transition-colors w-full",
             mineOnly
-              ? "bg-primary/15 text-primary"
+              ? "bg-secondary text-foreground"
               : "text-muted-foreground hover:text-foreground hover:bg-surface"
           )}
         >
@@ -329,23 +347,21 @@ export function ConversationList() {
               key={tab.value}
               onClick={() => setActiveTab(tab.value, true)}
               className={cn(
-                "flex-1 py-2.5 text-[11px] font-medium transition-colors relative inline-flex items-center justify-center gap-1",
-                isActive ? "text-primary" : "text-muted-foreground hover:text-foreground"
+                "flex-1 py-2.5 text-[12px] font-semibold transition-colors relative inline-flex items-center justify-center gap-1",
+                isActive ? "text-foreground" : "text-muted-foreground hover:text-foreground"
               )}
             >
               {tab.label}
               {showUnread ? (
-                <Badge className="bg-primary text-primary-foreground text-[9px] px-1 py-0 h-4 min-w-4 justify-center">
+                <Badge className="bg-unread-badge text-white text-[9px] px-1 py-0 h-4 min-w-4 justify-center hover:bg-unread-badge">
                   {unreadCount}
                 </Badge>
               ) : (
                 count > 0 && (
                   <Badge
                     className={cn(
-                      "text-[9px] px-1 py-0 h-4 min-w-4 justify-center",
-                      isActive
-                        ? "bg-primary/15 text-primary"
-                        : "bg-muted text-muted-foreground"
+                      "text-[9px] px-1 py-0 h-4 min-w-4 justify-center hover:bg-muted",
+                      "bg-muted text-muted-foreground"
                     )}
                   >
                     {count}
@@ -353,7 +369,7 @@ export function ConversationList() {
                 )
               )}
               {isActive && (
-                <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-full" />
+                <span className="absolute bottom-0 left-2 right-2 h-0.5 bg-accent rounded-full" />
               )}
             </button>
           );
@@ -408,7 +424,7 @@ export function ConversationList() {
       )}
 
       {/* ── List ── */}
-      <div className="flex-1 overflow-y-auto scrollbar-thin">
+      <div className="flex-1 overflow-y-auto scrollbar-thin px-2 pb-2">
         {(isSearchMode ? isSearching : isLoading) ? (
           <LoadingSkeleton />
         ) : filtered.length === 0 ? (
@@ -422,18 +438,20 @@ export function ConversationList() {
             <EmptyState tab={activeTab} />
           )
         ) : (
-          filtered.map((conv) => (
-            <ConversationItem
-              key={conv.id}
-              conv={conv}
-              isActive={conv.id === activeConversationId}
-              isSelected={selected.has(conv.id)}
-              selectionMode={selectionMode}
-              showStatus={isSearchMode}
-              agentMap={agentMap}
-              onSelect={() => handleSelectConversation(conv)}
-              onToggle={() => toggleOne(conv.id)}
-            />
+          filtered.map((conv, i) => (
+            <div key={conv.id}>
+              {i > 0 && <div className="h-px mx-3 bg-border" />}
+              <ConversationItem
+                conv={conv}
+                isActive={conv.id === activeConversationId}
+                isSelected={selected.has(conv.id)}
+                selectionMode={selectionMode}
+                showStatus={isSearchMode}
+                agentMap={agentMap}
+                onSelect={() => handleSelectConversation(conv)}
+                onToggle={() => toggleOne(conv.id)}
+              />
+            </div>
           ))
         )}
       </div>
@@ -494,13 +512,11 @@ function ConversationItem({
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       className={cn(
-        "w-full text-left px-3 py-3 border-b border-border transition-colors cursor-pointer",
+        "w-full text-left p-3 rounded-xl transition-colors duration-100 cursor-pointer",
         isSelected
-          ? "bg-primary/15"
+          ? "bg-secondary card-selected"
           : isActive
-          ? "bg-primary/10"
-          : isUnread
-          ? "bg-primary/5 hover:bg-primary/8"
+          ? "bg-card card-selected"
           : "hover:bg-surface-hover"
       )}
     >
@@ -528,11 +544,14 @@ function ConversationItem({
           {/* Avatar (hidden when checkbox is showing) */}
           <div
             className={cn(
-              "h-8 w-8 rounded-full bg-muted flex items-center justify-center transition-opacity",
+              "h-8 w-8 rounded-full flex items-center justify-center transition-opacity",
+              avatarColorFor(name),
               showCheckbox ? "opacity-0" : "opacity-100"
             )}
           >
-            <User className="h-4 w-4 text-muted-foreground" />
+            <span className="text-[12px] font-semibold text-foreground/80 select-none">
+              {name[0]?.toUpperCase()}
+            </span>
           </div>
 
           {/* Priority dot */}
@@ -564,7 +583,7 @@ function ConversationItem({
 
           {/* Unread dot */}
           {isUnread && !isActive && (
-            <div className="absolute -top-0.5 -left-0.5 h-2.5 w-2.5 rounded-full bg-primary border-2 border-card" />
+            <div className="absolute -top-0.5 -left-0.5 h-2.5 w-2.5 rounded-full bg-unread-badge border-2 border-card" />
           )}
         </div>
 
@@ -573,19 +592,19 @@ function ConversationItem({
           <div className="flex items-center justify-between gap-1">
             <span
               className={cn(
-                "text-sm truncate",
-                isUnread && !isActive ? "font-semibold text-card-foreground" : "font-medium text-card-foreground"
+                "text-[13px] truncate text-card-foreground",
+                isUnread && !isActive ? "font-bold" : "font-semibold"
               )}
             >
               {name}
             </span>
-            <span className="text-[10px] text-muted-foreground shrink-0">{time}</span>
+            <span className="text-[11px] text-muted-foreground shrink-0">{time}</span>
           </div>
 
           <div className="flex items-center gap-1 mt-0.5">
-            {isBot && <Bot className="h-3 w-3 text-primary shrink-0" />}
+            {isBot && <Bot className="h-3 w-3 text-muted-foreground shrink-0" />}
             <ChannelIcon className="h-3 w-3 text-muted-foreground shrink-0" />
-            <p className={cn("text-xs truncate", isUnread && !isActive ? "text-foreground" : "text-muted-foreground")}>
+            <p className={cn("text-[13px] truncate", isUnread && !isActive ? "text-foreground" : "text-muted-foreground")}>
               {preview}
             </p>
           </div>
@@ -604,18 +623,18 @@ function ConversationItem({
                 </span>
               )}
               {!showStatus && conv.status === "snoozed" && (
-                <span className="inline-flex items-center gap-0.5 text-[9px] text-violet-400 bg-violet-500/10 border border-violet-500/20 px-1.5 py-0.5 rounded-full font-medium">
+                <span className="inline-flex items-center gap-0.5 text-[9px] text-violet-700 bg-violet-100 px-1.5 py-0.5 rounded-full font-medium">
                   <Clock className="h-2.5 w-2.5" /> Adiada
                   {conv.snoozed_until && ` · ${timeUntilShort(conv.snoozed_until)}`}
                 </span>
               )}
               {conv.status === "pending" && (
-                <span className="inline-flex items-center gap-0.5 text-[9px] text-amber-500 bg-amber-500/10 border border-amber-500/20 px-1.5 py-0.5 rounded-full font-medium">
+                <span className="inline-flex items-center gap-0.5 text-[9px] text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded-full font-medium">
                   <UserRound className="h-2.5 w-2.5" /> Aguardando humano
                 </span>
               )}
               {conv.ai_active && conv.status !== "resolved" && conv.status !== "pending" && (
-                <span className="inline-flex items-center gap-0.5 text-[9px] text-primary bg-primary/10 px-1.5 py-0.5 rounded-full">
+                <span className="inline-flex items-center gap-0.5 text-[9px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded-full font-medium">
                   <Bot className="h-2.5 w-2.5" /> IA ativa
                 </span>
               )}

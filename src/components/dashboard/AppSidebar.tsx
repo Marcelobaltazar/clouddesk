@@ -202,12 +202,12 @@ export function AppSidebar() {
   return (
     <TooltipProvider delayDuration={300}>
       <aside className={cn(
-        "transition-all duration-200 bg-sidebar border-r border-sidebar-border flex flex-col h-screen overflow-hidden shrink-0",
-        isOpen ? "w-[220px]" : "w-[60px]"
+        "transition-all duration-200 bg-transparent flex flex-col h-screen overflow-hidden shrink-0",
+        isOpen ? "w-[220px]" : "w-[64px]"
       )}>
 
         {/* Logo + toggle */}
-        <div className="h-14 flex items-center border-b border-sidebar-border shrink-0 px-2 gap-2">
+        <div className="h-14 flex items-center shrink-0 px-2 gap-2">
           <button
             onClick={toggleSidebar}
             className="h-8 w-8 flex items-center justify-center rounded-md hover:bg-sidebar-accent text-muted-foreground hover:text-sidebar-accent-foreground transition-colors shrink-0"
@@ -238,15 +238,15 @@ export function AppSidebar() {
                 // Volta para a inbox sem nenhum filtro (limpa prioridade e plano).
                 applyView({ status: "open" });
               } : undefined}
-              className="flex items-center gap-3 px-2 py-2 rounded-md text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors text-sm"
-              activeClassName="bg-sidebar-accent text-sidebar-accent-foreground font-medium"
+              className="flex items-center gap-3 px-2 py-2 rounded-xl text-muted-foreground hover:bg-sidebar-accent hover:text-foreground transition-colors text-sm"
+              activeClassName="bg-card card-selected text-foreground font-medium"
             >
               <item.icon className="h-5 w-5 shrink-0" />
               {isOpen && <span className="whitespace-nowrap flex-1">{item.title}</span>}
               {isOpen && item.url === "/inbox" && openCount > 0 && (
-                <Badge className="ml-auto bg-unread-badge text-primary-foreground text-[10px] px-1.5 py-0 h-5 min-w-5 flex items-center justify-center">
+                <span className="ml-auto text-xs text-muted-foreground tabular-nums">
                   {openCount}
-                </Badge>
+                </span>
               )}
             </NavLink>
           ))}
@@ -257,16 +257,16 @@ export function AppSidebar() {
               <button
                 onClick={handlePriorityClick}
                 className={cn(
-                  "w-full flex items-center gap-3 px-2 py-2 rounded-md text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors text-sm",
-                  priorityActive && "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
+                  "w-full flex items-center gap-3 px-2 py-2 rounded-xl text-muted-foreground hover:bg-sidebar-accent hover:text-foreground transition-colors text-sm",
+                  priorityActive && "bg-card card-selected text-foreground font-medium"
                 )}
               >
                 <Flame className="h-5 w-5 shrink-0 text-rose-500" />
                 {isOpen && <span className="whitespace-nowrap flex-1 text-left">Prioritários</span>}
                 {isOpen && priorityCount > 0 && (
-                  <Badge className="ml-auto bg-rose-500/15 text-rose-500 text-[10px] px-1.5 py-0 h-5 min-w-5 flex items-center justify-center">
+                  <span className="ml-auto text-xs text-muted-foreground tabular-nums">
                     {priorityCount}
-                  </Badge>
+                  </span>
                 )}
               </button>
             </TooltipTrigger>
@@ -296,8 +296,8 @@ export function AppSidebar() {
                     <button
                       onClick={() => handleViewClick(view)}
                       className={cn(
-                        "w-full flex items-center gap-3 px-2 py-2 rounded-md text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors text-sm",
-                        activeViewId === view.id && "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
+                        "w-full flex items-center gap-3 px-2 py-2 rounded-xl text-muted-foreground hover:bg-sidebar-accent hover:text-foreground transition-colors text-sm",
+                        activeViewId === view.id && "bg-card card-selected text-foreground font-medium"
                       )}
                     >
                       {/* Icon: colored dot when collapsed, emoji+dot when expanded */}
@@ -319,12 +319,9 @@ export function AppSidebar() {
                         <span className="whitespace-nowrap flex-1 text-left truncate">{view.name}</span>
                       )}
                       {isOpen && viewCounts[view.id] !== undefined && viewCounts[view.id] > 0 && (
-                        <Badge
-                          className="ml-auto text-[10px] px-1.5 py-0 h-5 min-w-5 flex items-center justify-center"
-                          style={{ backgroundColor: `${view.color}30`, color: view.color }}
-                        >
+                        <span className="ml-auto text-xs text-muted-foreground tabular-nums">
                           {viewCounts[view.id]}
-                        </Badge>
+                        </span>
                       )}
                     </button>
                   </TooltipTrigger>
@@ -341,7 +338,7 @@ export function AppSidebar() {
         </nav>
 
         {/* Footer */}
-        <div className="border-t border-sidebar-border p-2 space-y-2 shrink-0">
+        <div className="p-2 space-y-1 shrink-0">
           {/* Notifications toggle */}
           <Tooltip>
             <TooltipTrigger asChild>

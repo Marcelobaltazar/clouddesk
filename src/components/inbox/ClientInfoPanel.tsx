@@ -192,18 +192,18 @@ export function ClientInfoPanel() {
         <div className="mx-3 mt-3 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5">
           <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
           <div>
-            <p className="text-xs font-semibold text-amber-500">Deploy pendente</p>
+            <p className="text-xs font-semibold text-amber-600">Deploy pendente</p>
             {deploymentIssues[0].deployment_failure_reason ? (
-              <p className="text-[10px] text-amber-400/80 mt-0.5 leading-relaxed">
+              <p className="text-[10px] text-amber-700/80 mt-0.5 leading-relaxed">
                 {deploymentIssues[0].deployment_failure_reason}
               </p>
             ) : (
-              <p className="text-[10px] text-amber-400/80 mt-0.5">
+              <p className="text-[10px] text-amber-700/80 mt-0.5">
                 Infraestrutura aguardando provisionamento
               </p>
             )}
             {(deploymentIssues[0].deployment_retry_count ?? 0) > 0 && (
-              <p className="text-[10px] text-amber-400/60 flex items-center gap-1 mt-1">
+              <p className="text-[10px] text-amber-700/60 flex items-center gap-1 mt-1">
                 <RefreshCw className="h-2.5 w-2.5" />
                 {deploymentIssues[0].deployment_retry_count} tentativa(s)
               </p>

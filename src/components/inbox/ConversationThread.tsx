@@ -102,10 +102,10 @@ function stripMarkdown(input: string): string {
 // ─── Priority config ──────────────────────────────────────────────────────────
 
 const priorityLabels: Record<string, { label: string; cls: string }> = {
-  urgent: { label: "Urgente", cls: "bg-priority-urgent text-primary-foreground" },
-  high:   { label: "Alta",    cls: "bg-priority-high text-primary-foreground"   },
-  medium: { label: "Média",   cls: "bg-priority-medium text-primary-foreground" },
-  low:    { label: "Baixa",   cls: "bg-priority-low text-primary-foreground"    },
+  urgent: { label: "Urgente", cls: "bg-rose-100 text-rose-700 hover:bg-rose-100"    },
+  high:   { label: "Alta",    cls: "bg-orange-100 text-orange-700 hover:bg-orange-100" },
+  medium: { label: "Média",   cls: "bg-muted text-muted-foreground hover:bg-muted"  },
+  low:    { label: "Baixa",   cls: "bg-muted text-muted-foreground hover:bg-muted"  },
 };
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -411,7 +411,7 @@ export function ConversationThread() {
   // ── Empty state ─────────────────────────────────────────────────────────────
   if (!activeConversationId || !conversation) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-background">
+      <div className="flex-1 panel flex items-center justify-center min-w-0">
         <div className="text-center text-muted-foreground">
           <MessageSquare className="h-12 w-12 mx-auto mb-3 opacity-20" />
           <p className="text-sm font-medium">Selecione uma conversa</p>
@@ -650,22 +650,17 @@ export function ConversationThread() {
   };
 
   return (
-    <div className="flex-1 flex flex-col bg-background min-w-0">
+    <div className="flex-1 panel flex flex-col min-w-0 overflow-hidden">
 
       {/* ── Header ── */}
-      <div className="h-14 border-b border-border flex items-center justify-between px-4 shrink-0 bg-card">
+      <div className="h-14 border-b border-border flex items-center justify-between px-4 shrink-0">
         <div className="flex items-center gap-3 min-w-0">
-          <div className="h-8 w-8 rounded-full bg-muted flex items-center justify-center shrink-0">
-            <span className="text-xs font-semibold text-muted-foreground">
-              {contactName[0]?.toUpperCase()}
-            </span>
-          </div>
           <div className="min-w-0">
-            <h2 className="text-sm font-semibold text-card-foreground truncate">{contactName}</h2>
-            <p className="text-[10px] text-muted-foreground capitalize">
+            <h2 className="text-[15px] font-semibold text-card-foreground truncate">{contactName}</h2>
+            <p className="text-[11px] text-muted-foreground capitalize">
               {conversation.channel} · {conversation.status}
               {conversation.ai_active && (
-                <span className="ml-1 text-primary">· IA ativa</span>
+                <span className="ml-1">· IA ativa</span>
               )}
             </p>
           </div>
@@ -693,20 +688,19 @@ export function ConversationThread() {
               <>
                 {/* Assign to me / assigned badge */}
                 {conversation.assigned_agent_id === agent?.id ? (
-                  <Badge variant="outline" className="text-[10px] h-7 px-2 border-primary/40 text-primary">
+                  <Badge variant="outline" className="text-[10px] h-7 px-2 border-border text-muted-foreground">
                     Você
                   </Badge>
                 ) : (
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button
-                        size="sm"
-                        variant="outline"
+                        size="icon"
+                        variant="ghost"
                         onClick={handleAssignToMe}
-                        className="text-xs h-7 gap-1"
+                        className="h-8 w-8 rounded-lg text-foreground hover:bg-surface-hover"
                       >
-                        <UserPlus className="h-3 w-3" />
-                        Atribuir a mim
+                        <UserPlus className="h-4 w-4" />
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent>Atribuir a mim · A</TooltipContent>
@@ -719,12 +713,11 @@ export function ConversationThread() {
                     <TooltipTrigger asChild>
                       <DropdownMenuTrigger asChild>
                         <Button
-                          size="sm"
-                          variant="outline"
-                          className="text-xs h-7 gap-1"
+                          size="icon"
+                          variant="ghost"
+                          className="h-8 w-8 rounded-lg text-foreground hover:bg-surface-hover"
                         >
-                          <Clock className="h-3 w-3" />
-                          Adiar
+                          <Clock className="h-4 w-4" />
                         </Button>
                       </DropdownMenuTrigger>
                     </TooltipTrigger>
@@ -743,18 +736,15 @@ export function ConversationThread() {
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
-                      size="sm"
-                      variant="outline"
+                      size="icon"
+                      variant="ghost"
                       onClick={handleToggleAI}
                       className={cn(
-                        "text-xs h-7 gap-1",
-                        conversation.ai_active
-                          ? "border-primary/40 text-primary hover:text-primary"
-                          : "text-muted-foreground"
+                        "h-8 w-8 rounded-lg hover:bg-surface-hover",
+                        conversation.ai_active ? "text-foreground" : "text-muted-foreground"
                       )}
                     >
-                      <Bot className="h-3 w-3" />
-                      {conversation.ai_active ? "Pausar IA" : "Reativar IA"}
+                      <Bot className="h-4 w-4" />
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>
@@ -768,13 +758,11 @@ export function ConversationThread() {
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
-                      size="sm"
-                      variant="outline"
+                      size="icon"
                       onClick={handleResolve}
-                      className="text-xs h-7 gap-1"
+                      className="h-8 w-8 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90"
                     >
-                      <CheckCircle className="h-3 w-3" />
-                      Resolver
+                      <CheckCircle className="h-4 w-4" />
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>Resolver · Ctrl Enter</TooltipContent>
@@ -788,7 +776,7 @@ export function ConversationThread() {
       {/* ── Messages ── */}
       <div
         ref={scrollRef}
-        className="flex-1 overflow-y-auto scrollbar-thin p-4 space-y-3"
+        className="flex-1 overflow-y-auto scrollbar-thin p-5 space-y-3"
       >
         {isLoadingMessages ? (
           <MessagesSkeleton />
@@ -807,57 +795,54 @@ export function ConversationThread() {
       {/* ── Composer ── */}
       {conversation.status !== "resolved" && (
         <TooltipProvider delayDuration={500}>
-          <div
-            className={cn(
-              "border-t border-border p-3 shrink-0 transition-colors",
-              isNote ? "bg-bubble-note/30" : "bg-card"
-            )}
-          >
-            {/* Mode toggle (Item 1) */}
-            <div className="flex items-center gap-1 mb-2">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={() => setMode("reply")}
-                    className={cn(
-                      "inline-flex items-center gap-1 text-[11px] font-medium px-2.5 py-1 rounded-md transition-colors",
-                      !isNote
-                        ? "bg-primary text-primary-foreground"
-                        : "text-muted-foreground hover:text-foreground hover:bg-surface"
-                    )}
-                  >
-                    <Reply className="h-3 w-3" />
-                    Resposta
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent>Responder · R</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={() => setMode("note")}
-                    className={cn(
-                      "inline-flex items-center gap-1 text-[11px] font-medium px-2.5 py-1 rounded-md transition-colors",
-                      isNote
-                        ? "bg-amber-500 text-white"
-                        : "text-muted-foreground hover:text-foreground hover:bg-surface"
-                    )}
-                  >
-                    <Lock className="h-3 w-3" />
-                    Nota interna
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent>Nota interna · N</TooltipContent>
-              </Tooltip>
-            </div>
-
-            {/* Textarea — amber border in note mode (Item 1) */}
+          <div className="p-3 pt-0 shrink-0">
+            {/* Caixa do composer — cartão arredondado flutuante */}
             <div
               className={cn(
-                "flex items-end gap-2 rounded-lg border px-3 py-2 transition-colors",
-                isNote ? "border-amber-500/60 bg-bubble-note/20" : "border-border bg-surface"
+                "rounded-xl border transition-colors",
+                isNote ? "border-amber-300 bg-bubble-note/40" : "border-border bg-card shadow-sm"
               )}
             >
+              {/* Mode toggle (Item 1) */}
+              <div className="flex items-center gap-1 px-3 pt-2">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      onClick={() => setMode("reply")}
+                      className={cn(
+                        "inline-flex items-center gap-1.5 text-[13px] font-semibold px-1.5 py-1 rounded-md transition-colors",
+                        !isNote
+                          ? "text-foreground"
+                          : "text-muted-foreground hover:text-foreground"
+                      )}
+                    >
+                      <Reply className="h-3.5 w-3.5" />
+                      Responder
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>Responder · R</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      onClick={() => setMode("note")}
+                      className={cn(
+                        "inline-flex items-center gap-1.5 text-[13px] font-semibold px-1.5 py-1 rounded-md transition-colors",
+                        isNote
+                          ? "text-bubble-note-foreground"
+                          : "text-muted-foreground hover:text-foreground"
+                      )}
+                    >
+                      <Lock className="h-3.5 w-3.5" />
+                      Nota
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>Nota interna · N</TooltipContent>
+                </Tooltip>
+              </div>
+
+            {/* Textarea */}
+            <div className="flex items-end gap-2 px-3 py-2">
               <Textarea
                 ref={textareaRef}
                 value={content}
@@ -1017,21 +1002,23 @@ export function ConversationThread() {
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
-                      size="icon"
-                      className="h-8 w-8"
+                      size="sm"
+                      className="h-8 px-3 rounded-lg text-[13px] font-semibold gap-1.5"
                       onClick={handleSend}
                       disabled={!content.trim() || sending}
                     >
-                      <Send className="h-4 w-4" />
+                      {isNote ? "Salvar" : "Enviar"}
+                      <Send className="h-3.5 w-3.5" />
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>{isNote ? "Salvar nota" : "Enviar"} · Enter</TooltipContent>
                 </Tooltip>
               </div>
             </div>
+            </div>
 
             {isNote && (
-              <p className="text-[10px] text-amber-500 mt-1 flex items-center gap-1">
+              <p className="text-[10px] text-bubble-note-foreground mt-1.5 px-1 flex items-center gap-1">
                 <Lock className="h-2.5 w-2.5" />
                 Nota interna — visível apenas para operadores
               </p>
@@ -1068,14 +1055,14 @@ function MessageBubble({
   // Private note — amber full-width
   if (message.is_private_note) {
     return (
-      <div className="max-w-[75%] ml-auto animate-fade-in">
-        <div className="bg-bubble-note text-bubble-note-foreground rounded-lg px-3 py-2">
+      <div className="max-w-[65%] ml-auto animate-fade-in">
+        <div className="bg-bubble-note text-bubble-note-foreground rounded-xl px-4 py-3">
           <div className="flex items-center gap-1 mb-1">
             <Lock className="h-3 w-3" />
             <span className="text-[10px] font-medium">Nota interna</span>
           </div>
-          <p className="text-sm whitespace-pre-wrap">{message.content}</p>
-          <span className="text-[10px] opacity-60 mt-1 block">{time}</span>
+          <p className="text-sm leading-[21px] whitespace-pre-wrap">{message.content}</p>
+          <span className="text-[11px] opacity-60 mt-1 block text-right">{time}</span>
         </div>
       </div>
     );
@@ -1088,22 +1075,20 @@ function MessageBubble({
     <div className={cn("flex animate-fade-in", isContact ? "justify-start" : "justify-end")}>
       <div
         className={cn(
-          "max-w-[75%] rounded-lg px-3 py-2",
+          "max-w-[65%] rounded-xl px-4 py-3",
           isContact
             ? "bg-bubble-contact text-bubble-contact-foreground"
-            : isBot
-            ? "bg-bubble-bot text-bubble-bot-foreground"
             : "bg-bubble-agent text-bubble-agent-foreground"
         )}
       >
         {isBot && (
-          <div className="flex items-center gap-1 mb-1 opacity-80">
+          <div className="flex items-center gap-1 mb-1 text-muted-foreground">
             <Bot className="h-3 w-3" />
             <span className="text-[10px] font-medium">IA</span>
           </div>
         )}
-        <p className="text-sm whitespace-pre-wrap">{message.content}</p>
-        <span className="text-[10px] opacity-60 mt-1 block">{time}</span>
+        <p className="text-sm leading-[21px] whitespace-pre-wrap">{message.content}</p>
+        <span className="text-[11px] text-muted-foreground mt-1 block text-right">{time}</span>
       </div>
     </div>
   );

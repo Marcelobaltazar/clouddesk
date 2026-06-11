@@ -6,57 +6,58 @@
 
 @layer base {
   :root {
-    --background: 230 25% 95%;
-    --foreground: 230 25% 10%;
+    /* Paleta clara — fundo cinza-quente, painéis brancos, texto quase-preto */
+    --background: 72 14% 93%;
+    --foreground: 0 0% 10%;
     --card: 0 0% 100%;
-    --card-foreground: 230 25% 10%;
+    --card-foreground: 0 0% 10%;
     --popover: 0 0% 100%;
-    --popover-foreground: 230 25% 10%;
-    --primary: 238 70% 60%;
+    --popover-foreground: 0 0% 10%;
+    --primary: 0 0% 10%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 230 20% 90%;
-    --secondary-foreground: 230 25% 15%;
-    --muted: 230 15% 92%;
-    --muted-foreground: 230 10% 45%;
-    --accent: 238 70% 60%;
+    --secondary: 60 7% 97%;
+    --secondary-foreground: 0 0% 10%;
+    --muted: 75 8% 94%;
+    --muted-foreground: 60 1% 39%;
+    --accent: 20 85% 52%;
     --accent-foreground: 0 0% 100%;
-    --destructive: 0 72% 55%;
+    --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
-    --border: 230 15% 88%;
-    --input: 230 15% 88%;
-    --ring: 238 70% 60%;
-    --radius: 0.5rem;
-    
-    --sidebar-background: 0 0% 100%;
-    --sidebar-foreground: 230 15% 30%;
-    --sidebar-primary: 238 70% 60%;
+    --border: 75 8% 91%;
+    --input: 75 8% 88%;
+    --ring: 0 0% 10%;
+    --radius: 0.75rem;
+
+    --sidebar-background: 72 14% 93%;
+    --sidebar-foreground: 0 0% 10%;
+    --sidebar-primary: 0 0% 10%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 238 60% 96%;
-    --sidebar-accent-foreground: 238 70% 50%;
-    --sidebar-border: 230 15% 90%;
-    --sidebar-ring: 238 70% 60%;
+    --sidebar-accent: 72 8% 88%;
+    --sidebar-accent-foreground: 0 0% 10%;
+    --sidebar-border: 72 14% 93%;
+    --sidebar-ring: 0 0% 10%;
 
     /* CloudDesk custom tokens */
-    --surface: 230 20% 97%;
-    --surface-hover: 230 20% 94%;
-    --bubble-contact: 230 15% 92%;
-    --bubble-contact-foreground: 230 25% 15%;
-    --bubble-agent: 238 70% 60%;
-    --bubble-agent-foreground: 0 0% 100%;
-    --bubble-bot: 260 50% 55%;
-    --bubble-bot-foreground: 0 0% 100%;
-    --bubble-note: 45 90% 92%;
-    --bubble-note-foreground: 40 40% 25%;
-    --bubble-system: 230 15% 85%;
-    --bubble-system-foreground: 230 10% 40%;
-    --online: 142 70% 45%;
-    --away: 38 92% 55%;
-    --offline: 230 10% 60%;
-    --urgent: 0 72% 55%;
-    --high: 25 95% 55%;
-    --medium: 38 92% 55%;
-    --low: 200 60% 50%;
-    --unread-badge: 238 70% 60%;
+    --surface: 60 7% 97%;
+    --surface-hover: 75 8% 94%;
+    --bubble-contact: 60 7% 97%;
+    --bubble-contact-foreground: 0 0% 10%;
+    --bubble-agent: 215 95% 92%;
+    --bubble-agent-foreground: 0 0% 10%;
+    --bubble-bot: 215 95% 92%;
+    --bubble-bot-foreground: 0 0% 10%;
+    --bubble-note: 48 100% 90%;
+    --bubble-note-foreground: 40 45% 22%;
+    --bubble-system: 75 8% 94%;
+    --bubble-system-foreground: 60 1% 39%;
+    --online: 145 63% 42%;
+    --away: 38 92% 50%;
+    --offline: 60 1% 60%;
+    --urgent: 0 72% 51%;
+    --high: 25 95% 50%;
+    --medium: 38 92% 47%;
+    --low: 200 60% 45%;
+    --unread-badge: 215 90% 55%;
   }
 
   .dark {
@@ -119,6 +120,18 @@
   body {
     @apply bg-background text-foreground font-sans antialiased;
     font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+}
+
+/* Painéis flutuantes (colunas como cartões sobre o fundo) */
+@layer utilities {
+  .panel {
+    @apply bg-card rounded-2xl;
+    box-shadow: 0 0 0 1px hsl(var(--border)), 0 1px 4px 0 rgba(20, 20, 20, 0.1);
+  }
+  /* Card de conversa selecionado: ring + sombra suave */
+  .card-selected {
+    box-shadow: 0 0 0 1px hsl(var(--border)), 0 1px 4px 0 rgba(20, 20, 20, 0.15);
   }
 }
 

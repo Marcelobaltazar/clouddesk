@@ -7,7 +7,7 @@ export default function Inbox() {
   const activeId = useInboxStore((s) => s.activeConversationId);
 
   return (
-    <div className="flex h-full w-full overflow-hidden">
+    <div className="flex h-full w-full overflow-hidden gap-2">
       {/* Col 1 — Conversation list (320px, 4 tabs) */}
       <ConversationList />
 

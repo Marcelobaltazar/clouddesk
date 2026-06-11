@@ -58,24 +58,24 @@ export function ConversationDetails() {
   if (!activeConversationId) return null;
 
   return (
-    <aside className="w-72 border-l border-border bg-card h-full flex flex-col shrink-0">
+    <aside className="w-[300px] panel h-full flex flex-col shrink-0 overflow-hidden">
 
       {/* Tab bar */}
-      <div className="flex border-b border-border shrink-0">
+      <div className="flex gap-4 px-4 border-b border-border shrink-0">
         {TABS.map((tab) => (
           <button
             key={tab.value}
             onClick={() => setActiveTab(tab.value)}
             className={cn(
-              "flex-1 py-3 text-xs font-medium transition-colors relative",
+              "py-3 text-sm font-semibold transition-colors relative",
               activeTab === tab.value
-                ? "text-primary"
+                ? "text-foreground"
                 : "text-muted-foreground hover:text-foreground"
             )}
           >
             {tab.label}
             {activeTab === tab.value && (
-              <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-full" />
+              <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent rounded-full" />
             )}
           </button>
         ))}
