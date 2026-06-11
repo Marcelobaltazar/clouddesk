@@ -3,7 +3,9 @@ import { corsHeaders } from '../_shared/cors.ts';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type EmbeddableTable = 'desk_knowledge_base' | 'desk_faq';
+type EmbeddableTable = 'desk_knowledge_base' | 'desk_faq' | 'desk_ai_snippets';
+
+const EMBEDDABLE_TABLES: EmbeddableTable[] = ['desk_knowledge_base', 'desk_faq', 'desk_ai_snippets'];
 
 interface EmbedRequest {
   id: string;
@@ -60,9 +62,9 @@ Deno.serve(async (req) => {
       );
     }
 
-    if (table !== 'desk_knowledge_base' && table !== 'desk_faq') {
+    if (!EMBEDDABLE_TABLES.includes(table)) {
       return new Response(
-        JSON.stringify({ error: 'table must be desk_knowledge_base or desk_faq' }),
+        JSON.stringify({ error: `table must be one of: ${EMBEDDABLE_TABLES.join(', ')}` }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
     }

@@ -60,7 +60,6 @@ interface Snippet {
   category: string | null;
   created_at: string;
   embedding: unknown;
-  shortcut: string | null;
 }
 
 type FilterStatus = "all" | "published" | "draft";
@@ -78,6 +77,9 @@ export default function Knowledge() {
   const [search, setSearch]               = useState("");
   const [filterStatus, setFilterStatus]   = useState<FilterStatus>("all");
   const [filterCategory, setFilterCategory] = useState("");
+  const [page, setPage]                   = useState(1);
+  const [pageSize, setPageSize]           = useState(10);
+  const [totalCount, setTotalCount]       = useState(0);
   const [sheetOpen, setSheetOpen]         = useState(false);
   const [editing, setEditing]             = useState<Article | null>(null);
   const [saving, setSaving]               = useState(false);
@@ -94,32 +96,47 @@ export default function Knowledge() {
   const [editingSnippet, setEditingSnippet] = useState<Snippet | null>(null);
   const [savingSnippet, setSavingSnippet] = useState(false);
   const [embeddingSnippet, setEmbeddingSnippet] = useState(false);
-  const [snippetForm, setSnippetForm]     = useState({ title: "", content: "", category: "", shortcut: "" });
+  const [snippetForm, setSnippetForm]     = useState({ title: "", content: "", category: "" });
   const [deleteSnippetTarget, setDeleteSnippetTarget] = useState<Snippet | null>(null);
   const [deletingSnippet, setDeletingSnippet] = useState(false);
 
-  // ── Load articles ────────────────────────────────────────────────────────────
+  // ── Load articles (paginação real no servidor via .range) ─────────────────────
+  // Busca, filtros e paginação são aplicados na própria query: nunca carregamos a
+  // base inteira em memória. `count: 'exact'` devolve o total para o paginador.
   const loadArticles = useCallback(async () => {
     setIsLoading(true);
-    const { data, error } = await supabase
+
+    let query = supabase
       .from("desk_knowledge_base")
-      .select("id, title, content, category, tags, is_published, created_at, updated_at, embedding")
+      .select("id, title, content, category, tags, is_published, created_at, updated_at, embedding", { count: "exact" })
       .order("updated_at", { ascending: false });
+
+    const q = search.trim();
+    if (q) query = query.or(`title.ilike.%${q}%,content.ilike.%${q}%`);
+    if (filterStatus === "published") query = query.eq("is_published", true);
+    if (filterStatus === "draft") query = query.eq("is_published", false);
+    if (filterCategory) query = query.eq("category", filterCategory);
+
+    const from = (page - 1) * pageSize;
+    query = query.range(from, from + pageSize - 1);
+
+    const { data, error, count } = await query;
 
     if (error) {
       toast.error("Erro ao carregar artigos", { description: error.message });
     } else {
       setArticles((data ?? []) as Article[]);
+      setTotalCount(count ?? 0);
     }
     setIsLoading(false);
-  }, []);
+  }, [search, filterStatus, filterCategory, page, pageSize]);
 
   // ── Load snippets ────────────────────────────────────────────────────────────
   const loadSnippets = useCallback(async () => {
     setSnippetsLoading(true);
     const { data, error } = await supabase
-      .from("desk_snippets")
-      .select("id, title, content, category, created_at, embedding, shortcut")
+      .from("desk_ai_snippets")
+      .select("id, title, content, category, created_at, embedding")
       .order("created_at", { ascending: false });
 
     if (error) {
@@ -133,26 +150,37 @@ export default function Knowledge() {
   useEffect(() => { loadArticles(); }, [loadArticles]);
   useEffect(() => { loadSnippets(); }, [loadSnippets]);
 
-  // ── Derived: filtered articles ───────────────────────────────────────────────
-  const categories = [...new Set(articles.map((a) => a.category).filter(Boolean))] as string[];
-  const filtered = articles.filter((a) => {
-    const q = search.toLowerCase();
-    const matchSearch = !q || a.title.toLowerCase().includes(q) || a.content.toLowerCase().includes(q);
-    const matchStatus =
-      filterStatus === "all" ||
-      (filterStatus === "published" && a.is_published) ||
-      (filterStatus === "draft" && !a.is_published);
-    const matchCategory = !filterCategory || a.category === filterCategory;
-    return matchSearch && matchStatus && matchCategory;
-  });
+  // Qualquer mudança em busca/filtro volta para a primeira página.
+  // (loadArticles roda no efeito acima ao mudar `page`/`pageSize`/filtros.)
+  useEffect(() => { setPage(1); }, [search, filterStatus, filterCategory, pageSize]);
+
+  // ── Stats globais + categorias (independem da página atual) ───────────────────
+  const [categories, setCategories] = useState<string[]>([]);
+  const [publishedCount, setPublishedCount] = useState(0);
+  const [draftCount, setDraftCount] = useState(0);
+
+  const loadStats = useCallback(async () => {
+    const [{ data: cats }, { count: pub }, { count: draft }] = await Promise.all([
+      supabase.from("desk_knowledge_base").select("category").not("category", "is", null),
+      supabase.from("desk_knowledge_base").select("id", { count: "exact", head: true }).eq("is_published", true),
+      supabase.from("desk_knowledge_base").select("id", { count: "exact", head: true }).eq("is_published", false),
+    ]);
+    const unique = [...new Set((cats ?? []).map((r) => (r as { category: string | null }).category).filter(Boolean))] as string[];
+    setCategories(unique.sort());
+    setPublishedCount(pub ?? 0);
+    setDraftCount(draft ?? 0);
+  }, []);
+
+  useEffect(() => { loadStats(); }, [loadStats]);
+
+  // Lista exibida = página atual já filtrada no servidor.
+  const filtered = articles;
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
 
   const filteredSnippets = snippets.filter((s) => {
     const q = snippetSearch.toLowerCase();
     return !q || s.title.toLowerCase().includes(q) || s.content.toLowerCase().includes(q);
   });
-
-  const publishedCount = articles.filter((a) => a.is_published).length;
-  const draftCount     = articles.filter((a) => !a.is_published).length;
 
   // ── Article sheet helpers ────────────────────────────────────────────────────
   const openNew = () => {
@@ -203,6 +231,7 @@ export default function Knowledge() {
     setSaving(false);
     setSheetOpen(false);
     loadArticles();
+    loadStats();
 
     if (savedId) generateArticleEmbedding(savedId, `${payload.title}\n\n${payload.content}`);
   };
@@ -230,6 +259,7 @@ export default function Knowledge() {
     } else {
       toast.success(next ? "Artigo publicado" : "Artigo despublicado");
       setArticles((prev) => prev.map((a) => (a.id === article.id ? { ...a, is_published: next } : a)));
+      loadStats();
     }
   };
 
@@ -242,6 +272,8 @@ export default function Knowledge() {
     } else {
       toast.success("Artigo excluído");
       setArticles((prev) => prev.filter((a) => a.id !== deleteTarget.id));
+      setTotalCount((c) => Math.max(0, c - 1));
+      loadStats();
     }
     setDeleting(false);
     setDeleteTarget(null);
@@ -250,13 +282,13 @@ export default function Knowledge() {
   // ── Snippet sheet helpers ────────────────────────────────────────────────────
   const openNewSnippet = () => {
     setEditingSnippet(null);
-    setSnippetForm({ title: "", content: "", category: "", shortcut: "" });
+    setSnippetForm({ title: "", content: "", category: "" });
     setSnippetSheetOpen(true);
   };
 
   const openEditSnippet = (s: Snippet) => {
     setEditingSnippet(s);
-    setSnippetForm({ title: s.title, content: s.content, category: s.category ?? "", shortcut: s.shortcut ?? "" });
+    setSnippetForm({ title: s.title, content: s.content, category: s.category ?? "" });
     setSnippetSheetOpen(true);
   };
 
@@ -269,17 +301,17 @@ export default function Knowledge() {
       title:    snippetForm.title.trim(),
       content:  snippetForm.content.trim(),
       category: snippetForm.category.trim() || null,
-      shortcut: snippetForm.shortcut.trim() || null,
+      updated_at: new Date().toISOString(),
     };
 
     let savedId: string | null = editingSnippet?.id ?? null;
     let saveError: unknown = null;
 
     if (editingSnippet) {
-      const { error } = await supabase.from("desk_snippets").update(payload).eq("id", editingSnippet.id);
+      const { error } = await supabase.from("desk_ai_snippets").update(payload).eq("id", editingSnippet.id);
       saveError = error;
     } else {
-      const { data, error } = await supabase.from("desk_snippets").insert(payload).select("id").single();
+      const { data, error } = await supabase.from("desk_ai_snippets").insert(payload).select("id").single();
       saveError = error;
       if (data) savedId = data.id;
     }
@@ -303,7 +335,7 @@ export default function Knowledge() {
     setEmbeddingSnippet(true);
     try {
       const { error: fnErr } = await supabase.functions.invoke("desk-embed-article", {
-        body: { id, content, table: "desk_snippets" },
+        body: { id, content, table: "desk_ai_snippets" },
       });
       if (fnErr) console.warn("[Snippets] Embedding failed (non-fatal):", fnErr.message);
     } catch (err) {
@@ -316,7 +348,7 @@ export default function Knowledge() {
   const handleDeleteSnippet = async () => {
     if (!deleteSnippetTarget) return;
     setDeletingSnippet(true);
-    const { error } = await supabase.from("desk_snippets").delete().eq("id", deleteSnippetTarget.id);
+    const { error } = await supabase.from("desk_ai_snippets").delete().eq("id", deleteSnippetTarget.id);
     if (error) {
       toast.error("Erro ao excluir snippet", { description: error.message });
     } else {
@@ -357,7 +389,7 @@ export default function Knowledge() {
         {/* Stats row (articles only) */}
         {activeTab === "articles" && (
           <div className="px-6 pb-3 flex items-center gap-6">
-            <StatPill label="Total" value={articles.length} />
+            <StatPill label="Total" value={totalCount} />
             <StatPill label="Publicados" value={publishedCount} variant="published" />
             <StatPill label="Rascunhos" value={draftCount} variant="draft" />
           </div>
@@ -468,6 +500,18 @@ export default function Knowledge() {
               </div>
             )}
           </div>
+
+          {/* Paginação */}
+          {!isLoading && totalCount > 0 && (
+            <PaginationBar
+              page={page}
+              totalPages={totalPages}
+              totalCount={totalCount}
+              pageSize={pageSize}
+              onPageChange={setPage}
+              onPageSizeChange={setPageSize}
+            />
+          )}
         </>
       )}
 
@@ -770,6 +814,73 @@ function StatPill({ label, value, variant = "default" }: { label: string; value:
     <div className="flex items-center gap-1.5">
       <span className={cn("text-sm font-bold", cls)}>{value}</span>
       <span className="text-xs text-muted-foreground">{label}</span>
+    </div>
+  );
+}
+
+function PaginationBar({
+  page,
+  totalPages,
+  totalCount,
+  pageSize,
+  onPageChange,
+  onPageSizeChange,
+}: {
+  page: number;
+  totalPages: number;
+  totalCount: number;
+  pageSize: number;
+  onPageChange: (p: number) => void;
+  onPageSizeChange: (n: number) => void;
+}) {
+  const from = (page - 1) * pageSize + 1;
+  const to = Math.min(page * pageSize, totalCount);
+
+  return (
+    <div className="px-6 py-3 border-t border-border bg-card shrink-0 flex items-center justify-between gap-4 flex-wrap">
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <span>{from}–{to} de {totalCount}</span>
+        <span className="opacity-40">•</span>
+        <span>Por página:</span>
+        <div className="flex items-center gap-0.5 bg-surface rounded-md p-0.5">
+          {[10, 50, 100].map((n) => (
+            <button
+              key={n}
+              onClick={() => onPageSizeChange(n)}
+              className={cn(
+                "px-2 py-0.5 rounded text-xs font-medium transition-colors",
+                pageSize === n ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {n}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 px-3"
+          disabled={page <= 1}
+          onClick={() => onPageChange(page - 1)}
+        >
+          Anterior
+        </Button>
+        <span className="text-xs text-muted-foreground tabular-nums">
+          Página {page} de {totalPages}
+        </span>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 px-3"
+          disabled={page >= totalPages}
+          onClick={() => onPageChange(page + 1)}
+        >
+          Próxima
+        </Button>
+      </div>
     </div>
   );
 }

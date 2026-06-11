@@ -275,39 +275,11 @@ export function ClientInfoPanel() {
         )}
       </div>
 
-      {/* ── Assinaturas (CRM Cloudfy via get-contact-info) ── */}
-      {contactInfo && contactInfo.subscriptions.length > 0 && (
+      {/* ── Assinaturas + Infraestruturas (CRM Cloudfy via get-contact-info) ── */}
+      {contactInfo && (contactInfo.subscriptions.length > 0 || contactInfo.infras.length > 0) && (
         <>
           <Separator />
-          <div className="px-4 py-3 space-y-2.5">
-            <SectionHeader icon={Building2} title="Assinaturas" count={contactInfo.subscriptions.length} />
-            <div className="space-y-2">
-              {contactInfo.subscriptions.map((sub, i) => (
-                <SubscriptionCard key={sub.subscription_id || i} sub={sub} />
-              ))}
-            </div>
-          </div>
-        </>
-      )}
-
-      {/* ── Infraestruturas (CRM Cloudfy via get-contact-info) ── */}
-      {contactInfo && contactInfo.infras.length > 0 && (
-        <>
-          <Separator />
-          <div className="px-4 py-3 space-y-2.5">
-            <SectionHeader icon={Server} title="Infraestruturas" count={contactInfo.infras.length} />
-            <div className="space-y-2">
-              {contactInfo.infras.map((infra, i) => (
-                <InfraCard
-                  key={infra.infra_id || i}
-                  infra={infra}
-                  onCopyDomain={() =>
-                    infra.default_domain && copyToClipboard(infra.default_domain, "Domínio")
-                  }
-                />
-              ))}
-            </div>
-          </div>
+          <GroupedResources contactInfo={contactInfo} onCopyDomain={(d) => copyToClipboard(d, "Domínio")} />
         </>
       )}
 
@@ -591,27 +563,71 @@ function formatDateShortBR(iso: string | null | undefined): string {
   return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
 
+// ─── GroupedResources ──────────────────────────────────────────────────────────
+// Agrupa Assinaturas e Infraestruturas em um único bloco compacto e organizado,
+// cada um com seu cabeçalho e contador. Mantém os dois grupos visualmente unidos
+// (mesma seção, sem separador grosso entre eles) conforme a referência do print.
+
+function GroupedResources({
+  contactInfo,
+  onCopyDomain,
+}: {
+  contactInfo: ContactInfo;
+  onCopyDomain: (domain: string) => void;
+}) {
+  return (
+    <div className="px-4 py-3 space-y-4">
+      {contactInfo.subscriptions.length > 0 && (
+        <div className="space-y-1.5">
+          <SectionHeader icon={Building2} title="Assinaturas" count={contactInfo.subscriptions.length} />
+          <div className="space-y-1.5">
+            {contactInfo.subscriptions.map((sub, i) => (
+              <SubscriptionCard key={sub.subscription_id || i} sub={sub} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {contactInfo.infras.length > 0 && (
+        <div className="space-y-1.5">
+          <SectionHeader icon={Server} title="Infraestruturas" count={contactInfo.infras.length} />
+          <div className="space-y-1.5">
+            {contactInfo.infras.map((infra, i) => (
+              <InfraCard
+                key={infra.infra_id || i}
+                infra={infra}
+                onCopyDomain={() => infra.default_domain && onCopyDomain(infra.default_domain)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SubscriptionCard({ sub }: { sub: ContactSubscription }) {
   const style = deploymentStatusStyle(sub.infra_status);
   const plan = planLabel(sub) ?? sub.product ?? "Assinatura";
 
   return (
-    <div className="rounded-lg border border-border bg-surface p-2.5 space-y-1.5">
-      <div className="flex items-start justify-between gap-1.5">
-        <p className="text-xs font-medium text-card-foreground leading-tight">{plan}</p>
-        <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0 h-4 shrink-0 border", style.cls)}>
-          <span className={cn("h-1.5 w-1.5 rounded-full mr-1", style.dotCls)} />
-          {style.label}
-        </Badge>
+    <div className="rounded-md border border-border bg-surface px-2.5 py-2 flex items-center justify-between gap-2">
+      <div className="min-w-0">
+        <p className="text-xs font-medium text-card-foreground leading-tight truncate">{plan}</p>
+        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground mt-0.5">
+          <span>Desde {formatDateShortBR(sub.created_at)}</span>
+          {sub.mrr > 0 && (
+            <>
+              <span className="opacity-40">·</span>
+              <span className="font-medium text-card-foreground">{formatCurrency(sub.mrr, "BRL")}</span>
+            </>
+          )}
+        </div>
       </div>
-      <div className="flex items-center justify-between text-[10px] text-muted-foreground">
-        <span>Desde {formatDateShortBR(sub.created_at)}</span>
-        {sub.mrr > 0 && (
-          <span className="font-medium text-card-foreground">
-            {formatCurrency(sub.mrr, "BRL")}
-          </span>
-        )}
-      </div>
+      <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0 h-4 shrink-0 border", style.cls)}>
+        <span className={cn("h-1.5 w-1.5 rounded-full mr-1", style.dotCls)} />
+        {style.label}
+      </Badge>
     </div>
   );
 }
@@ -621,31 +637,24 @@ function InfraCard({ infra, onCopyDomain }: { infra: ContactInfra; onCopyDomain:
   const name = infra.default_domain || infra.purchase_code || "Infraestrutura";
 
   return (
-    <div className="rounded-lg border border-border bg-surface p-2.5 space-y-1.5">
-      <div className="flex items-start justify-between gap-1.5">
-        <div className="flex items-center gap-1.5 min-w-0 group">
-          <Server className="h-3 w-3 text-muted-foreground shrink-0" />
-          <p className="text-xs font-medium text-card-foreground truncate">{name}</p>
-          {infra.default_domain && (
-            <button
-              onClick={onCopyDomain}
-              className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-muted shrink-0"
-              title="Copiar domínio"
-            >
-              <Copy className="h-3 w-3 text-muted-foreground" />
-            </button>
-          )}
-        </div>
-        <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0 h-4 shrink-0 border", style.cls)}>
-          <span className={cn("h-1.5 w-1.5 rounded-full mr-1", style.dotCls)} />
-          {style.label}
-        </Badge>
+    <div className="rounded-md border border-border bg-surface px-2.5 py-2 flex items-center justify-between gap-2 group">
+      <div className="flex items-center gap-1.5 min-w-0">
+        <Server className="h-3 w-3 text-muted-foreground shrink-0" />
+        <p className="text-xs font-medium text-card-foreground truncate">{name}</p>
+        {infra.default_domain && (
+          <button
+            onClick={onCopyDomain}
+            className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-muted shrink-0"
+            title="Copiar domínio"
+          >
+            <Copy className="h-3 w-3 text-muted-foreground" />
+          </button>
+        )}
       </div>
-      {infra.purchase_code && infra.purchase_code !== infra.default_domain && (
-        <p className="text-[10px] font-mono text-muted-foreground opacity-60 truncate">
-          {infra.purchase_code}
-        </p>
-      )}
+      <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0 h-4 shrink-0 border", style.cls)}>
+        <span className={cn("h-1.5 w-1.5 rounded-full mr-1", style.dotCls)} />
+        {style.label}
+      </Badge>
     </div>
   );
 }
@@ -690,39 +699,11 @@ function UnknownContactPanel({
         </div>
       )}
 
-      {/* Assinaturas do CRM */}
-      {contactInfo && contactInfo.subscriptions.length > 0 && (
+      {/* Assinaturas + Infraestruturas do CRM */}
+      {contactInfo && (contactInfo.subscriptions.length > 0 || contactInfo.infras.length > 0) && (
         <>
           <Separator />
-          <div className="px-4 py-3 space-y-2.5">
-            <SectionHeader icon={Building2} title="Assinaturas" count={contactInfo.subscriptions.length} />
-            <div className="space-y-2">
-              {contactInfo.subscriptions.map((sub, i) => (
-                <SubscriptionCard key={sub.subscription_id || i} sub={sub} />
-              ))}
-            </div>
-          </div>
-        </>
-      )}
-
-      {/* Infraestruturas do CRM */}
-      {contactInfo && contactInfo.infras.length > 0 && (
-        <>
-          <Separator />
-          <div className="px-4 py-3 space-y-2.5">
-            <SectionHeader icon={Server} title="Infraestruturas" count={contactInfo.infras.length} />
-            <div className="space-y-2">
-              {contactInfo.infras.map((infra, i) => (
-                <InfraCard
-                  key={infra.infra_id || i}
-                  infra={infra}
-                  onCopyDomain={() =>
-                    infra.default_domain && copyToClipboard(infra.default_domain, "Domínio")
-                  }
-                />
-              ))}
-            </div>
-          </div>
+          <GroupedResources contactInfo={contactInfo} onCopyDomain={(d) => copyToClipboard(d, "Domínio")} />
         </>
       )}
 

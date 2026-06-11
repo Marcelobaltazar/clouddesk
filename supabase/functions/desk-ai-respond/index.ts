@@ -131,6 +131,14 @@ interface FAQMatch {
   similarity: number;
 }
 
+interface SnippetMatch {
+  id: string;
+  title: string;
+  content: string;
+  category: string | null;
+  similarity: number;
+}
+
 interface OpenAIEmbeddingResponse {
   data: Array<{ embedding: number[] }>;
 }
@@ -349,6 +357,7 @@ function isStarterOnlyClient(contactInfo?: ContactInfoResult | null): boolean {
 function buildSystemPrompt(
   kbMatches: KBMatch[],
   faqMatches: FAQMatch[],
+  snippetMatches: SnippetMatch[],
   clientName?: string,
   contactInfo?: ContactInfoResult | null,
   isFirstMessage?: boolean,
@@ -357,12 +366,21 @@ function buildSystemPrompt(
     ? `\n[CLIENTE]\nVocê está atendendo: ${clientName}. Cumprimente-o pelo nome na primeira mensagem.\n`
     : '';
 
-  // Build KB section — show title + full content for each relevant article
+  // Build KB section — show title + full content for each relevant article.
+  // Snippets de IA têm PRIORIDADE: respostas curtas e canônicas, listadas primeiro.
   let contextSection: string;
-  if (kbMatches.length === 0 && faqMatches.length === 0) {
+  if (kbMatches.length === 0 && faqMatches.length === 0 && snippetMatches.length === 0) {
     contextSection = 'Nenhum conteúdo relevante encontrado na base de conhecimento para esta pergunta.';
   } else {
     const parts: string[] = [];
+
+    if (snippetMatches.length > 0) {
+      parts.push('[SNIPPETS — REFERÊNCIA RÁPIDA PRIORITÁRIA]');
+      parts.push('Use estes snippets como fonte PREFERENCIAL. São respostas curtas e canônicas validadas pela equipe — prefira-os ao conteúdo dos artigos quando houver sobreposição.');
+      for (const sn of snippetMatches) {
+        parts.push(`Snippet: ${sn.title}${sn.category ? ` (${sn.category})` : ''}\nConteúdo: ${sn.content}`);
+      }
+    }
 
     if (kbMatches.length > 0) {
       parts.push('[ARTIGOS RELEVANTES]');
@@ -606,6 +624,7 @@ async function logInteraction(
     analysis: MessageAnalysis | null;
     kbIds: string[];
     faqIds: string[];
+    snippetIds: string[];
     draft: boolean;
   },
 ): Promise<void> {
@@ -622,6 +641,7 @@ async function logInteraction(
       context_sources: {
         kb: params.kbIds,
         faq: params.faqIds,
+        snippets: params.snippetIds,
         intent: params.analysis?.intent ?? null,
         sentiment: params.analysis?.sentiment ?? null,
         urgency: params.analysis?.urgency ?? null,
@@ -887,7 +907,7 @@ Deno.serve(async (req) => {
     const apiKey = Deno.env.get('OPENROUTER_API_KEY');
     if (!apiKey) throw new Error('Missing OPENROUTER_API_KEY secret');
 
-    // Embeddings continuam na OpenAI (modelo text-embedding-3-small).
+    // Embeddings na OpenAI (modelo text-embedding-3-small).
     // Se OPENAI_API_KEY não estiver definida, o RAG é pulado graciosamente.
     const openaiKey = Deno.env.get('OPENAI_API_KEY') ?? '';
 
@@ -957,18 +977,24 @@ Deno.serve(async (req) => {
     // Falls back gracefully: if embedding fails, the AI responds without KB context.
     let kbMatches: KBMatch[] = [];
     let faqMatches: FAQMatch[] = [];
+    let snippetMatches: SnippetMatch[] = [];
 
     try {
       const embedding = await generateEmbedding(message, openaiKey);
       console.log('[AI] Embedding generated');
 
-      const [kbRes, faqRes] = await Promise.all([
+      const [kbRes, faqRes, snippetRes] = await Promise.all([
         supabase.rpc('match_knowledge_base', {
           query_embedding: embedding,
           match_threshold: 0.5,
           match_count: 5,
         }),
         supabase.rpc('match_faq', {
+          query_embedding: embedding,
+          match_threshold: 0.5,
+          match_count: 3,
+        }),
+        supabase.rpc('match_ai_snippets', {
           query_embedding: embedding,
           match_threshold: 0.5,
           match_count: 3,
@@ -987,14 +1013,20 @@ Deno.serve(async (req) => {
         faqMatches = (faqRes.data ?? []) as FAQMatch[];
       }
 
-      console.log(`[AI] RAG: ${kbMatches.length} KB articles, ${faqMatches.length} FAQs`);
+      if (snippetRes.error) {
+        console.warn('[AI] Snippet search failed:', snippetRes.error.message);
+      } else {
+        snippetMatches = (snippetRes.data ?? []) as SnippetMatch[];
+      }
+
+      console.log(`[AI] RAG: ${snippetMatches.length} snippets, ${kbMatches.length} KB articles, ${faqMatches.length} FAQs`);
     } catch (embedErr) {
       // Non-fatal: AI will respond without KB context rather than failing entirely
       console.warn('[AI] Embedding/search failed — responding without KB context:', embedErr);
     }
 
     // ── Step 3: Build prompt + call OpenAI ────────────────────────────────────
-    let systemPrompt = buildSystemPrompt(kbMatches, faqMatches, account_name, contactInfo, isFirstMessage);
+    let systemPrompt = buildSystemPrompt(kbMatches, faqMatches, snippetMatches, account_name, contactInfo, isFirstMessage);
     systemPrompt += `\n${META_INSTRUCTION}`;
 
     if (isDraft) {
@@ -1045,6 +1077,7 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
       analysis,
       kbIds: kbMatches.map((k) => k.id),
       faqIds: faqMatches.map((f) => f.id),
+      snippetIds: snippetMatches.map((s) => s.id),
       draft: isDraft,
     });
 
