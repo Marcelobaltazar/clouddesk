@@ -34,3 +34,6 @@ supabase/functions/.env
 *.sw?
 .env
 .tmp-analysis/
+
+# Claude Code agent memory (local)
+/memory/

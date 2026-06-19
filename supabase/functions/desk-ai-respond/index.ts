@@ -131,8 +131,12 @@ interface FAQMatch {
   similarity: number;
 }
 
-interface OpenAIEmbeddingResponse {
-  data: Array<{ embedding: number[] }>;
+interface SnippetMatch {
+  id: string;
+  title: string;
+  content: string;
+  category: string | null;
+  similarity: number;
 }
 
 interface OpenAIChatResponse {
@@ -202,29 +206,21 @@ Quando o cliente pedir credenciais, acesso, senha, login ou qualquer dado de ace
 
 IMPORTANTE: reenvio de credenciais NÃO é reset de senha — são os dados de acesso ORIGINAIS da infraestrutura. Nunca prometa redefinir senha; apenas reenvie as credenciais existentes.`;
 
-// ─── OpenAI helpers ───────────────────────────────────────────────────────────
+// ─── Embedding nativo do Supabase (gte-small, 384 dims) ─────────────────────────
+// Roda no runtime da Edge Function via Supabase.ai — SEM API externa. Os vetores
+// gerados aqui casam com os índices/funções match_* migrados para VECTOR(384).
 
-async function generateEmbedding(text: string, apiKey: string): Promise<number[]> {
-  if (!apiKey) throw new Error('OPENAI_API_KEY not set — RAG skipped');
-  const res = await fetch('https://api.openai.com/v1/embeddings', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'text-embedding-3-small',
-      input: text.slice(0, 8000),
-    }),
-  });
+// `Supabase` é um global do runtime de Edge Functions; tipamos pontualmente.
+declare const Supabase: {
+  ai: { Session: new (model: string) => { run(input: string, opts: { mean_pool: boolean; normalize: boolean }): Promise<number[]> } };
+};
 
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`OpenAI embedding error ${res.status}: ${err}`);
-  }
+const embeddingSession = new Supabase.ai.Session('gte-small');
 
-  const data: OpenAIEmbeddingResponse = await res.json();
-  return data.data[0].embedding;
+async function generateEmbedding(text: string): Promise<number[]> {
+  const input = text.slice(0, 2000); // gte-small ~512 tokens
+  const output = await embeddingSession.run(input, { mean_pool: true, normalize: true });
+  return output as number[];
 }
 
 // Chama o LLM via OpenRouter (suporta qualquer provider com a mesma API).
@@ -349,6 +345,7 @@ function isStarterOnlyClient(contactInfo?: ContactInfoResult | null): boolean {
 function buildSystemPrompt(
   kbMatches: KBMatch[],
   faqMatches: FAQMatch[],
+  snippetMatches: SnippetMatch[],
   clientName?: string,
   contactInfo?: ContactInfoResult | null,
   isFirstMessage?: boolean,
@@ -357,12 +354,21 @@ function buildSystemPrompt(
     ? `\n[CLIENTE]\nVocê está atendendo: ${clientName}. Cumprimente-o pelo nome na primeira mensagem.\n`
     : '';
 
-  // Build KB section — show title + full content for each relevant article
+  // Build KB section — show title + full content for each relevant article.
+  // Snippets de IA têm PRIORIDADE: respostas curtas e canônicas, listadas primeiro.
   let contextSection: string;
-  if (kbMatches.length === 0 && faqMatches.length === 0) {
+  if (kbMatches.length === 0 && faqMatches.length === 0 && snippetMatches.length === 0) {
     contextSection = 'Nenhum conteúdo relevante encontrado na base de conhecimento para esta pergunta.';
   } else {
     const parts: string[] = [];
+
+    if (snippetMatches.length > 0) {
+      parts.push('[SNIPPETS — REFERÊNCIA RÁPIDA PRIORITÁRIA]');
+      parts.push('Use estes snippets como fonte PREFERENCIAL. São respostas curtas e canônicas validadas pela equipe — prefira-os ao conteúdo dos artigos quando houver sobreposição.');
+      for (const sn of snippetMatches) {
+        parts.push(`Snippet: ${sn.title}${sn.category ? ` (${sn.category})` : ''}\nConteúdo: ${sn.content}`);
+      }
+    }
 
     if (kbMatches.length > 0) {
       parts.push('[ARTIGOS RELEVANTES]');
@@ -606,6 +612,7 @@ async function logInteraction(
     analysis: MessageAnalysis | null;
     kbIds: string[];
     faqIds: string[];
+    snippetIds: string[];
     draft: boolean;
   },
 ): Promise<void> {
@@ -622,6 +629,7 @@ async function logInteraction(
       context_sources: {
         kb: params.kbIds,
         faq: params.faqIds,
+        snippets: params.snippetIds,
         intent: params.analysis?.intent ?? null,
         sentiment: params.analysis?.sentiment ?? null,
         urgency: params.analysis?.urgency ?? null,
@@ -887,9 +895,7 @@ Deno.serve(async (req) => {
     const apiKey = Deno.env.get('OPENROUTER_API_KEY');
     if (!apiKey) throw new Error('Missing OPENROUTER_API_KEY secret');
 
-    // Embeddings continuam na OpenAI (modelo text-embedding-3-small).
-    // Se OPENAI_API_KEY não estiver definida, o RAG é pulado graciosamente.
-    const openaiKey = Deno.env.get('OPENAI_API_KEY') ?? '';
+    // Embeddings nativos (gte-small via Supabase.ai) — sem chave/API externa.
 
     // ── Step 1: Conversation history + client contact info in parallel ─────────
     const accountUserId = (convRow as Record<string, unknown> | null)?.account_user_id as string | undefined;
@@ -957,18 +963,24 @@ Deno.serve(async (req) => {
     // Falls back gracefully: if embedding fails, the AI responds without KB context.
     let kbMatches: KBMatch[] = [];
     let faqMatches: FAQMatch[] = [];
+    let snippetMatches: SnippetMatch[] = [];
 
     try {
-      const embedding = await generateEmbedding(message, openaiKey);
+      const embedding = await generateEmbedding(message);
       console.log('[AI] Embedding generated');
 
-      const [kbRes, faqRes] = await Promise.all([
+      const [kbRes, faqRes, snippetRes] = await Promise.all([
         supabase.rpc('match_knowledge_base', {
           query_embedding: embedding,
           match_threshold: 0.5,
           match_count: 5,
         }),
         supabase.rpc('match_faq', {
+          query_embedding: embedding,
+          match_threshold: 0.5,
+          match_count: 3,
+        }),
+        supabase.rpc('match_ai_snippets', {
           query_embedding: embedding,
           match_threshold: 0.5,
           match_count: 3,
@@ -987,14 +999,20 @@ Deno.serve(async (req) => {
         faqMatches = (faqRes.data ?? []) as FAQMatch[];
       }
 
-      console.log(`[AI] RAG: ${kbMatches.length} KB articles, ${faqMatches.length} FAQs`);
+      if (snippetRes.error) {
+        console.warn('[AI] Snippet search failed:', snippetRes.error.message);
+      } else {
+        snippetMatches = (snippetRes.data ?? []) as SnippetMatch[];
+      }
+
+      console.log(`[AI] RAG: ${snippetMatches.length} snippets, ${kbMatches.length} KB articles, ${faqMatches.length} FAQs`);
     } catch (embedErr) {
       // Non-fatal: AI will respond without KB context rather than failing entirely
       console.warn('[AI] Embedding/search failed — responding without KB context:', embedErr);
     }
 
     // ── Step 3: Build prompt + call OpenAI ────────────────────────────────────
-    let systemPrompt = buildSystemPrompt(kbMatches, faqMatches, account_name, contactInfo, isFirstMessage);
+    let systemPrompt = buildSystemPrompt(kbMatches, faqMatches, snippetMatches, account_name, contactInfo, isFirstMessage);
     systemPrompt += `\n${META_INSTRUCTION}`;
 
     if (isDraft) {
@@ -1045,6 +1063,7 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
       analysis,
       kbIds: kbMatches.map((k) => k.id),
       faqIds: faqMatches.map((f) => f.id),
+      snippetIds: snippetMatches.map((s) => s.id),
       draft: isDraft,
     });
 
