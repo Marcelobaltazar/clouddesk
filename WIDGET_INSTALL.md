@@ -2,7 +2,9 @@
 
 ## Como funciona
 
-O widget verifica automaticamente se o usuário logado tem **exclusivamente o plano Cloud Starter** via Airtable. Se sim, aparece no canto inferior direito. Se não (Advanced, Ultra, Max), fica invisível e o Intercom continua normalmente.
+O widget aparece para **todos os clientes logados**, em todos os planos (Starter, Advanced, Ultra, Max). A separação por plano acontece dentro do CloudDesk: cada conversa cai automaticamente na view do plano correspondente na inbox. Starter é atendido apenas pela IA; os demais planos têm atendimento humano.
+
+> O Intercom foi descontinuado — o CloudDesk é o único widget na área logada.
 
 ---
 
@@ -36,12 +38,10 @@ Inserir no `<head>` ou antes do `</body>`, **depois do login** e **antes do scri
 1. Script carrega → lê `window.CloudfyUser`
 2. Se não há usuário logado → para aqui (sem erros, sem efeitos)
 3. Chama Edge Function `check-widget-eligibility` com o email
-4. Edge Function consulta Airtable: todos os registros desse email
-   - Nenhum registro → `eligible: false`
-   - Todos com `Products = "Cloud Starter"` → `eligible: true`
-   - Qualquer outro plano → `eligible: false`
-5. Se `eligible: false` → para aqui (Intercom continua)
-6. Se `eligible: true` → monta o widget React no canto inferior direito
+4. Edge Function retorna `eligible: true` para qualquer email logado
+   - Sem email → `eligible: false` (não renderiza)
+   - Este ponto existe para permitir bloquear usuários no futuro, se preciso
+5. Se `eligible: true` → monta o widget React no canto inferior direito
 
 ---
 
@@ -61,8 +61,9 @@ Substituir `{{ user.* }}` pelos valores reais do sistema de templates do cloudfy
 
 - **NÃO incluir** em páginas públicas (landing page, `/login`, `/signup`)
 - **Incluir APENAS** em páginas autenticadas (dashboard, infraestrutura, configurações)
-- O script é seguro para incluir sempre — verifica o plano internamente antes de renderizar qualquer coisa
+- O script é seguro para incluir sempre — só renderiza quando há um usuário logado em `window.CloudfyUser`
 - Não polui o namespace global além de `window.CloudDeskWidget` (usado apenas para `destroy()` de emergência)
+- **Remover as tags do Intercom** das páginas autenticadas — o CloudDesk passa a ser o único widget
 
 ---
 
@@ -84,25 +85,27 @@ npm run build:widget
 
 ## Secrets necessários na Edge Function
 
-Configurar no Supabase Dashboard (Settings → Edge Functions → Secrets):
+A `check-widget-eligibility` **não precisa mais de secrets** — não consulta mais o Airtable.
+
+Os dados de cliente/plano usados dentro do widget vêm da `get-contact-info`, que lê o Supabase de produção da Cloudfy e exige:
 
 ```
-AIRTABLE_API_KEY   = pat_xxxxxxxxxxxx
-AIRTABLE_BASE_ID   = appXXXXXXXXXXXXXX
-AIRTABLE_TABLE_NAME = Purchases          # ou o nome real da tabela
+CLOUDFY_SUPABASE_URL              = https://xxxx.supabase.co
+CLOUDFY_SUPABASE_SERVICE_ROLE_KEY = eyJxxxx
 ```
 
 ---
 
 ## Troubleshooting
 
-**Widget não aparece para usuário Starter:**
-- Verificar se `window.CloudfyUser` está definido antes do script carregar
-- Verificar se o campo `Products` no Airtable é exatamente `"Cloud Starter"` (case-sensitive)
-- Abrir DevTools → Network → filtrar por `check-widget-eligibility` para ver a resposta
+**Widget não aparece para o cliente:**
+- Verificar se `window.CloudfyUser` está definido (com `id` e `email`) antes do script carregar
+- Abrir DevTools → Network → filtrar por `check-widget-eligibility` — deve retornar `{ eligible: true }`
+- Confirmar que o `id` enviado é o UUID do Supabase Auth (não o ID interno do cloudfy.space)
 
-**Widget aparece para usuário não-Starter:**
-- Verificar se algum registro no Airtable ainda tem `Products = "Cloud Starter"` junto com outros planos
+**Dados do cliente/plano não carregam:**
+- Verificar os secrets `CLOUDFY_SUPABASE_*` na função `get-contact-info`
+- Filtrar por `get-contact-info` no Network para ver a resposta
 
 **Erro de CORS:**
 - A Edge Function já tem `Access-Control-Allow-Origin: *` — verificar se a URL da função está correta no `.env`
