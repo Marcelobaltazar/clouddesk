@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && npm run build:widget && node -e \"require('fs').copyFileSync('dist-widget/widget.js','dist/widget.js')\"",
-    "build:widget": "vite build --mode widget",
+    "build": "vite build",
+    "build:widget": "vite build --mode widget && node -e \"require('fs').copyFileSync('dist-widget/widget.js','public/widget.js')\"",
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
     "preview": "vite preview",
