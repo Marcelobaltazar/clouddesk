@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Bot, User } from "lucide-react";
+import { Bot, User, KeyRound, Loader2, Check } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import { supabase } from "@/integrations/supabase/client";
 import type { WidgetMessage } from "./types";
@@ -9,6 +9,9 @@ interface Props {
   messages: WidgetMessage[];
   conversationId: string;
   onSend: (message: string) => void;
+  // Dispara o reenvio de credenciais de uma infra (clique do cliente no botão).
+  // Resolve para true em caso de sucesso. A IA NUNCA chama isto.
+  onResendCredentials: (infraId: string) => Promise<boolean>;
 }
 
 // ── Markdown rendering for bot bubbles ────────────────────────────────────────
@@ -64,12 +67,28 @@ function BotMarkdown({ content }: { content: string }) {
   );
 }
 
-export function ChatWidgetThread({ messages, conversationId, onSend }: Props) {
+export function ChatWidgetThread({ messages, conversationId, onSend, onResendCredentials }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const { isTyping, isAiResponding } = useWidgetStore();
 
   // Track which quick-reply groups have been used (one-time use, by message id).
   const [usedQuickReplies, setUsedQuickReplies] = useState<Set<string>>(new Set());
+
+  // Estado dos botões de credenciais, por infra_id: "loading" enquanto envia,
+  // "done" após sucesso (some o botão e vira confirmação inline).
+  const [credentialState, setCredentialState] = useState<Record<string, "loading" | "done">>({});
+
+  const handleResendClick = async (infraId: string) => {
+    if (credentialState[infraId]) return; // já em andamento ou concluído
+    setCredentialState((prev) => ({ ...prev, [infraId]: "loading" }));
+    const ok = await onResendCredentials(infraId);
+    setCredentialState((prev) => {
+      if (ok) return { ...prev, [infraId]: "done" };
+      const next = { ...prev };
+      delete next[infraId]; // falhou — permite tentar de novo
+      return next;
+    });
+  };
 
   // ── Auto-scroll ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -152,6 +171,10 @@ export function ChatWidgetThread({ messages, conversationId, onSend }: Props) {
           const quickReplies = msg.metadata?.quick_replies ?? [];
           const showQuickReplies = quickReplies.length > 0 && !usedQuickReplies.has(msg.id);
 
+          // Botões de reenvio de credenciais — um por infra ATIVA (já filtradas
+          // no backend). Renderizados em lista vertical, com fundo accent suave.
+          const credentialActions = msg.metadata?.credential_actions ?? [];
+
           return (
             <div
               key={msg.id}
@@ -209,6 +232,42 @@ export function ChatWidgetThread({ messages, conversationId, onSend }: Props) {
                         {option}
                       </button>
                     ))}
+                  </div>
+                )}
+
+                {/* Botões de reenvio de credenciais — um por infra ativa, em
+                    lista vertical, fundo accent suave e cantos arredondados.
+                    O disparo só acontece no clique do cliente. */}
+                {credentialActions.length > 0 && (
+                  <div className="flex flex-col gap-1.5 mt-2">
+                    {credentialActions.map((action) => {
+                      const state = credentialState[action.infra_id];
+                      const isDone = state === "done";
+                      const isLoading = state === "loading";
+                      return (
+                        <button
+                          key={`${msg.id}-cred-${action.infra_id}`}
+                          onClick={() => handleResendClick(action.infra_id)}
+                          disabled={isLoading || isDone}
+                          className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-left transition-colors disabled:cursor-default ${
+                            isDone
+                              ? "bg-emerald-500/15 text-emerald-600 border border-emerald-500/30"
+                              : "bg-primary/10 text-primary border border-primary/25 hover:bg-primary/20"
+                          }`}
+                        >
+                          {isDone
+                            ? <Check className="h-4 w-4 shrink-0" />
+                            : isLoading
+                            ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                            : <KeyRound className="h-4 w-4 shrink-0" />}
+                          <span className="flex-1">
+                            {isDone
+                              ? `Credenciais enviadas — ${action.label}`
+                              : `Reenviar minhas credenciais — ${action.label}`}
+                          </span>
+                        </button>
+                      );
+                    })}
                   </div>
                 )}
 

@@ -16,8 +16,16 @@ export interface WidgetConversation {
   subject: string | null;
 }
 
+export interface CredentialAction {
+  infra_id: string;
+  label: string;
+}
+
 export interface WidgetMessageMetadata {
   quick_replies?: string[];
+  // Botões de reenvio de credenciais — um por infraestrutura ATIVA. O disparo só
+  // acontece quando o cliente clica; a IA nunca reenvia por conta própria.
+  credential_actions?: CredentialAction[];
 }
 
 export interface WidgetMessage {

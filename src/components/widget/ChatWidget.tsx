@@ -361,6 +361,65 @@ export function ChatWidget({ settings, embedUser }: Props) {
     [account, embedUser, conversation, addMessage, setIsAiResponding, setIsWaitingForHuman, startConversation]
   );
 
+  // ── Reenvio de credenciais (disparado pelo CLIENTE ao clicar no botão) ────────
+  // A IA NUNCA dispara isto. O botão só aparece quando o cliente pede de forma
+  // clara (ver desk-ai-respond → [OFERECER_CREDENCIAIS]). Aqui exigimos um cliente
+  // identificado (e-mail conhecido) e o backend revalida a posse da infra antes
+  // de enviar. A confirmação de envio só aparece APÓS sucesso real.
+  const handleResendCredentials = useCallback(
+    async (infraId: string): Promise<boolean> => {
+      if (!conversation) return false;
+
+      const email = embedUser?.email ?? account?.email;
+      if (!email) {
+        // Cliente não identificado — não há como validar posse nem enviar.
+        const msg = await insertMessage(
+          conversation.id,
+          "system",
+          "Não foi possível confirmar sua identidade para reenviar as credenciais. Faça login novamente e tente de novo.",
+        );
+        if (msg) addMessage(msg);
+        return false;
+      }
+
+      try {
+        const { data, error } = await supabase.functions.invoke<{ success?: boolean; error?: string }>(
+          "desk-resend-credentials",
+          { body: { infra_id: infraId, email } },
+        );
+
+        if (error || !data?.success) {
+          const reason = data?.error ?? error?.message ?? "Tente novamente em instantes.";
+          const msg = await insertMessage(
+            conversation.id,
+            "system",
+            `Não consegui reenviar suas credenciais agora. ${reason}`,
+          );
+          if (msg) addMessage(msg);
+          return false;
+        }
+
+        const ok = await insertMessage(
+          conversation.id,
+          "system",
+          "✅ Credenciais reenviadas! Confira seu e-mail e me avise se chegou tudo certinho. 📬",
+        );
+        if (ok) addMessage(ok);
+        return true;
+      } catch (err) {
+        console.error("[Widget] Erro ao reenviar credenciais:", err);
+        const msg = await insertMessage(
+          conversation.id,
+          "system",
+          "Tive um problema ao reenviar suas credenciais. Tente novamente em instantes.",
+        );
+        if (msg) addMessage(msg);
+        return false;
+      }
+    },
+    [account, embedUser, conversation, addMessage]
+  );
+
   // ── Welcome message: fires once when the widget opens with no existing conversation ──
   // Calls get-contact-info, builds the greeting in code (no OpenAI), creates the
   // conversation record and inserts a bot message immediately.
@@ -633,7 +692,12 @@ export function ChatWidget({ settings, embedUser }: Props) {
         </>
       ) : (
         <>
-          <ChatWidgetThread messages={messages} conversationId={conversation.id} onSend={handleSend} />
+          <ChatWidgetThread
+            messages={messages}
+            conversationId={conversation.id}
+            onSend={handleSend}
+            onResendCredentials={handleResendCredentials}
+          />
           {showCsat ? (
             <CSATFeedback
               conversationId={conversation.id}

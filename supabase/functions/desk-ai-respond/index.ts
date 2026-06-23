@@ -16,8 +16,17 @@ interface AIRespondRequest {
   mode?: 'draft';
 }
 
+interface CredentialAction {
+  infra_id: string;
+  label: string;
+}
+
 interface MessageMetadata {
   quick_replies?: string[];
+  // Botões de ação de reenvio de credenciais. Um por infraestrutura ATIVA.
+  // Disparar só acontece quando o CLIENTE clica no botão no widget — a IA nunca
+  // reenvia nada por conta própria.
+  credential_actions?: CredentialAction[];
 }
 
 interface AIRespondResult {
@@ -190,21 +199,24 @@ Ao final, pergunte se o cliente precisa de mais ajuda.
 [OPÇÕES CLICÁVEIS]
 Quando quiser oferecer opções ao usuário, use o formato [OPCOES: Opção 1 | Opção 2 | Opção 3] no final da sua mensagem.
 
-[REENVIO DE CREDENCIAIS DE ACESSO]
-Quando o cliente pedir credenciais, acesso, senha, login ou qualquer dado de acesso à infraestrutura:
+[REENVIO DE CREDENCIAIS DE ACESSO — REGRAS RÍGIDAS]
+Seu papel é conversar, tirar dúvidas e dar suporte. Você NUNCA reenvia credenciais por conta própria e NUNCA afirma que enviou ou reenviou credenciais. Quem dispara o reenvio é o PRÓPRIO CLIENTE, clicando em um botão.
 
-1. Primeiro tente resolver com os artigos da base de conhecimento.
-2. Se não resolver, ofereça o reenvio das credenciais. Liste APENAS as infraestruturas ATIVAS do cliente (aquelas com Deploy DEPLOYED ou status ativo no bloco DADOS DO CLIENTE) como opções clicáveis. Use exatamente este formato:
+Só existe UMA forma de oferecer o reenvio: incluir o marcador [OFERECER_CREDENCIAIS] na sua resposta. Esse marcador faz o sistema mostrar um botão "Reenviar minhas credenciais" para o cliente clicar. Use-o APENAS quando TODAS as condições abaixo forem verdadeiras:
 
-'Posso reenviar suas credenciais de acesso. Sobre qual infraestrutura você quer receber?
-[OPCOES: {nome da infra ativa 1} | {nome da infra ativa 2}]'
+1. O cliente pediu o reenvio das credenciais de forma EXPLÍCITA e INEQUÍVOCA. Exemplos que CONTAM como pedido claro: "quero minhas credenciais", "me reenvia o acesso", "perdi meu login e senha, pode mandar de novo?", "não recebi as credenciais da minha infra".
+2. Não é uma simples dúvida, dificuldade de login, "como faço para...", reclamação, ou menção indireta. Nesses casos, AJUDE com a base de conhecimento e NÃO use o marcador.
+3. O cliente tem ao menos uma infraestrutura ATIVA (Deploy DEPLOYED no bloco DADOS DO CLIENTE).
 
-   Use os nomes das infraestruturas exatamente como aparecem no bloco DADOS DO CLIENTE. Se o cliente tiver apenas uma infra ativa, ofereça-a mesmo assim como opção única.
-3. Quando o cliente selecionar a infraestrutura (a próxima mensagem dele será o nome de uma infra), inclua o marcador [ACTION: resend_credentials] na sua resposta e diga exatamente:
+Quando em dúvida se o pedido é claro o suficiente: NÃO inclua o marcador. Em vez disso, pergunte. Ex: "Você gostaria que eu te ajudasse a reenviar as credenciais de acesso da sua infraestrutura?". Só depois de um "sim" claro é que você inclui [OFERECER_CREDENCIAIS].
 
-'Credenciais reenviadas! Dá uma olhadinha no seu e-mail e me fala se chegou tudo certinho? 📬'
+Ao usar [OFERECER_CREDENCIAIS], escreva uma frase curta convidando o clique, SEM afirmar que algo foi enviado. Exemplo:
+'Claro! É só clicar no botão abaixo para reenviar suas credenciais de acesso. Elas chegarão no seu e-mail. 📩
+[OFERECER_CREDENCIAIS]'
 
-IMPORTANTE: reenvio de credenciais NÃO é reset de senha — são os dados de acesso ORIGINAIS da infraestrutura. Nunca prometa redefinir senha; apenas reenvie as credenciais existentes.`;
+NUNCA escreva "Credenciais reenviadas", "já enviei", "acabei de mandar" ou qualquer confirmação de envio — você não envia nada. A confirmação aparece sozinha quando o cliente clica no botão.
+
+IMPORTANTE: reenvio de credenciais NÃO é reset de senha — são os dados de acesso ORIGINAIS da infraestrutura. Nunca prometa redefinir senha.`;
 
 // ─── Embedding nativo do Supabase (gte-small, 384 dims) ─────────────────────────
 // Roda no runtime da Edge Function via Supabase.ai — SEM API externa. Os vetores
@@ -460,13 +472,15 @@ ${contextSection}`;
 
 // ─── Reply marker parsing ───────────────────────────────────────────────────
 // The model can embed two markers in its reply:
-//   [OPCOES: A | B | C]          → clickable quick-reply chips
-//   [ACTION: resend_credentials] → triggers the credential-resend flow server-side
-// Both are stripped from the visible text; OPCOES is lifted into metadata and
-// the resend action is flagged so the handler can fire desk-resend-credentials.
+//   [OPCOES: A | B | C]      → clickable quick-reply chips
+//   [OFERECER_CREDENCIAIS]   → render credential-resend BUTTONS (one per active
+//                              infra). The model NEVER triggers the resend; the
+//                              client does, by clicking a button in the widget.
+// Both are stripped from the visible text; OPCOES + credential buttons are lifted
+// into metadata.
 
 const OPCOES_RE = /\[OPCOES:\s*([^\]]+)\]/i;
-const RESEND_ACTION_RE = /\[ACTION:\s*resend_credentials\s*\]/i;
+const OFFER_CREDENTIALS_RE = /\[OFERECER_CREDENCIAIS\s*\]/i;
 
 // ─── Análise de intenção / sentimento / urgência ─────────────────────────────
 // O modelo anexa um bloco [META: ...] no FINAL de toda resposta (instrução no
@@ -643,7 +657,8 @@ async function logInteraction(
 
 function parseReplyMarkers(
   raw: string,
-): { text: string; metadata: MessageMetadata | null; resendCredentials: boolean } {
+  activeInfras: ContactInfra[],
+): { text: string; metadata: MessageMetadata | null } {
   let text = raw;
   const metadata: MessageMetadata = {};
 
@@ -657,84 +672,33 @@ function parseReplyMarkers(
     text = text.replace(OPCOES_RE, '');
   }
 
-  const resendCredentials = RESEND_ACTION_RE.test(text);
-  if (resendCredentials) text = text.replace(RESEND_ACTION_RE, '');
+  // [OFERECER_CREDENCIAIS] → anexa um botão por infra ATIVA com o infra_id já
+  // resolvido no servidor. O texto NUNCA confirma envio — só convida ao clique.
+  // Se o modelo emitiu o marcador mas o cliente não tem infra ativa, o marcador
+  // é descartado silenciosamente (sem botões), evitando ofertas vazias.
+  if (OFFER_CREDENTIALS_RE.test(text)) {
+    text = text.replace(OFFER_CREDENTIALS_RE, '');
+    const actions: CredentialAction[] = activeInfras
+      .filter((i) => i.infra_id)
+      .map((i) => ({
+        infra_id: i.infra_id,
+        label: i.default_domain || i.purchase_code || 'Minha infraestrutura',
+      }));
+    if (actions.length > 0) metadata.credential_actions = actions;
+  }
 
   text = text.replace(/\n{3,}/g, '\n\n').trim();
 
-  const hasMetadata = !!metadata.quick_replies;
-  return { text, metadata: hasMetadata ? metadata : null, resendCredentials };
+  const hasMetadata = !!metadata.quick_replies || !!metadata.credential_actions;
+  return { text, metadata: hasMetadata ? metadata : null };
 }
 
-// ─── Credential resend (server-side) ──────────────────────────────────────────
-// True only for an infra the client can actually receive credentials for.
+// ─── Credential resend (eligibility) ──────────────────────────────────────────
+// A IA NÃO dispara o reenvio. Ela só marca quais infras estão ATIVAS para que o
+// widget mostre um botão por infra. O disparo é feito pelo CLIENTE, clicando no
+// botão → chama a Edge Function desk-resend-credentials com o infra_id.
 function isActiveInfra(infra: ContactInfra): boolean {
   return String(infra.status ?? '').toUpperCase() === 'DEPLOYED';
-}
-
-// Normaliza para casar nomes de infra contra o texto livre do cliente.
-function normalizeName(s: string): string {
-  return s
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')
-    .replace(/[^a-z0-9]/g, '');
-}
-
-// Cruza o nome da infra mencionado pelo cliente com as infras ATIVAS do contato.
-// Retorna o infra_id correspondente, ou null se não houver um match seguro.
-function resolveInfraId(mentionText: string, infras: ContactInfra[]): string | null {
-  const active = infras.filter(isActiveInfra).filter((i) => i.infra_id);
-  if (active.length === 0) return null;
-
-  const haystack = normalizeName(mentionText);
-
-  // Match por nome (default_domain ou purchase_code) contido na mensagem.
-  for (const infra of active) {
-    const candidates = [infra.default_domain, infra.purchase_code]
-      .filter(Boolean)
-      .map(normalizeName)
-      .filter((c) => c.length >= 3);
-    if (candidates.some((c) => haystack.includes(c))) return infra.infra_id;
-  }
-
-  // Se há apenas uma infra ativa, assume que é ela (cliente clicou na única opção).
-  if (active.length === 1) return active[0].infra_id;
-
-  return null;
-}
-
-// Aciona o reenvio de credenciais chamando a API de parceiros da Cloudfy
-// DIRETAMENTE (inline), igual ao fetchContactInfo. Não fazemos function-to-function
-// HTTP para desk-resend-credentials porque o gateway de Edge Functions rejeita a
-// autenticação interna (UNAUTHORIZED_INVALID_JWT_FORMAT) — mesma razão pela qual
-// get-contact-info foi inlined aqui. A Cloudfy envia o e-mail; só disparamos.
-const CLOUDFY_PARTNER_BASE = 'https://partner.cloudfy.space';
-
-async function triggerResendCredentials(infraId: string): Promise<boolean> {
-  const partnerKey = Deno.env.get('CLOUDFY_PARTNER_KEY');
-  if (!partnerKey) {
-    console.error('[AI] triggerResendCredentials: CLOUDFY_PARTNER_KEY missing');
-    return false;
-  }
-
-  try {
-    const url = `${CLOUDFY_PARTNER_BASE}/api/partners/infrastructure/${encodeURIComponent(infraId)}/resend-credentials`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'X-Partner-Key': partnerKey,
-        'Content-Type': 'application/json',
-      },
-    });
-    const data = await res.json().catch(() => null) as { success?: boolean } | null;
-    const ok = res.ok && data?.success !== false;
-    if (!ok) console.error(`[AI] resend-credentials failed: ${res.status}`, JSON.stringify(data));
-    return ok;
-  } catch (e) {
-    console.error('[AI] triggerResendCredentials failed:', e instanceof Error ? e.message : e);
-    return false;
-  }
 }
 
 // ─── Contact info (inlined from get-contact-info) ─────────────────────────────
@@ -1067,11 +1031,15 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
       draft: isDraft,
     });
 
-    // Strip the [OPCOES] / [ACTION] markers. On handoff the reply is just the
-    // transfer keyword, so there is nothing to parse.
-    let { text: reply, metadata, resendCredentials } = should_handoff
-      ? { text: rawReply, metadata: null, resendCredentials: false }
-      : parseReplyMarkers(rawReply);
+    // Strip the [OPCOES] / [OFERECER_CREDENCIAIS] markers and lift them into
+    // metadata. On handoff the reply is just the transfer keyword, so there is
+    // nothing to parse. Credential buttons are built from the client's ACTIVE
+    // infras only — the resend itself is triggered by the client's click, never
+    // here.
+    const activeInfras = (contactInfo?.infras ?? []).filter(isActiveInfra);
+    let { text: reply, metadata } = should_handoff
+      ? { text: rawReply, metadata: null }
+      : parseReplyMarkers(rawReply, activeInfras);
 
     // Modo draft: nunca executa ações nem transfere — apenas devolve o texto
     // limpo para o operador revisar.
@@ -1086,26 +1054,6 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
         JSON.stringify(draftResult),
         { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
-    }
-
-    // [ACTION: resend_credentials] — resolve a infra ATIVA escolhida pelo cliente
-    // (cruza o nome citado na mensagem com contactInfo.infras) e dispara o reenvio.
-    // A IA já confirmou o reenvio no texto; aqui executamos de fato.
-    if (resendCredentials) {
-      const infraId = resolveInfraId(message, contactInfo?.infras ?? []);
-      if (infraId) {
-        const ok = await triggerResendCredentials(infraId);
-        if (!ok) {
-          reply = 'Tive um problema ao reenviar suas credenciais agora. Pode tentar de novo em instantes ou descrever o que precisa que eu te ajudo por aqui.';
-          metadata = null;
-        }
-        console.log(`[AI] resend_credentials infra=${infraId} ok=${ok}`);
-      } else {
-        // Nenhuma infra ativa identificada — não confirme um reenvio que não houve.
-        reply = 'Não consegui identificar uma infraestrutura ativa para reenviar as credenciais. Pode me dizer qual infraestrutura você quer acessar?';
-        metadata = null;
-        console.log('[AI] resend_credentials: no active infra resolved');
-      }
     }
 
     // Starter: se o modelo tentou transferir mesmo proibido, troca o "[TRANSFERIR]"
