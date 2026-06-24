@@ -37,3 +37,6 @@ supabase/functions/.env
 
 # Claude Code agent memory (local)
 /memory/
+
+# Supabase CLI local state (muda sozinho a cada comando — não versionar)
+supabase/.temp/
