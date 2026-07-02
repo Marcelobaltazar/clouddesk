@@ -14,6 +14,12 @@ interface AIRespondRequest {
    * (reenvio de credenciais), SEM transferir e ignorando o guard de ai_active.
    */
   mode?: 'draft';
+  /**
+   * Origem da mensagem no widget. 'quick_reply' = clique em botão/chip (seleção
+   * intermediária, ex.: "qual infraestrutura?") — NUNCA encerra a conversa
+   * neste turno, mesmo que o modelo sinalize resolved=sim.
+   */
+  source?: 'quick_reply' | 'text';
 }
 
 interface CredentialAction {
@@ -102,8 +108,9 @@ async function applyPlanTag(
 }
 
 // Base pública da Central de Ajuda própria do CloudDesk (rota /ajuda do app).
-// Configurável via env HELP_CENTER_URL — sem barra final. Default: produção.
-const HELP_CENTER_URL = (Deno.env.get('HELP_CENTER_URL') ?? 'https://ajuda.cloudfy.cloud').replace(/\/+$/, '');
+// Configurável via env HELP_CENTER_URL — sem barra final. Default: o domínio de
+// produção do app (ajuda.cloudfy.cloud responde 403 — não usar até ser liberado).
+const HELP_CENTER_URL = (Deno.env.get('HELP_CENTER_URL') ?? 'https://clouddesk.apps.cloudfy.cloud').replace(/\/+$/, '');
 
 // Gera o slug do título igual ao usado no frontend (HelpCenter.articlePath).
 function slugifyTitle(title: string): string {
@@ -825,8 +832,9 @@ Deno.serve(async (req) => {
 
   try {
     const body: AIRespondRequest = await req.json();
-    const { conversation_id, message, account_name, account_email, mode } = body;
+    const { conversation_id, message, account_name, account_email, mode, source } = body;
     const isDraft = mode === 'draft';
+    const isButtonClick = source === 'quick_reply';
 
     if (!conversation_id || !message) {
       return new Response(
@@ -948,7 +956,14 @@ Deno.serve(async (req) => {
 
     const history = ((historyRows ?? []) as MessageRow[]).reverse();
     const isFirstMessage = history.length === 0;
-    console.log(`[AI] History: ${history.length} messages, firstMessage=${isFirstMessage}`);
+    // O widget insere a mensagem do cliente ANTES de chamar esta function, então
+    // o histórico já a contém — history.length===0 quase nunca ocorre nesse
+    // caminho. Para o auto-resolve, o critério é por turnos do CLIENTE: só se
+    // permite fechar a partir do 2º turno (ele precisa ter tido a chance de
+    // reagir a uma resposta da IA; fechar na primeira resposta é prematuro).
+    const contactTurns = history.filter((m) => m.sender_type === 'contact').length;
+    const isFirstClientTurn = contactTurns <= 1;
+    console.log(`[AI] History: ${history.length} messages, firstMessage=${isFirstMessage}, contactTurns=${contactTurns}`);
 
     // Tag automática por plano (item 2). Fire-and-forget: não bloqueia a resposta.
     // Mantém desk_conversations.tags com a tag do plano mais alto do cliente.
@@ -1108,9 +1123,30 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
     if (!isDraft && analysis) {
       void applyAnalysis(supabase, conversation_id, analysis);
       // Auto-resolve: Advanced/Ultra/Max quando IA sinaliza resolved=sim (via META).
-      // NUNCA quando há botões de credenciais aguardando o clique do cliente —
-      // fechar aqui mataria a conversa antes da ação acontecer.
-      if (!should_handoff && !metadata?.credential_actions) {
+      // Regras por tipo de interação — NUNCA auto-resolver quando:
+      //   • houve handoff;
+      //   • há botões de credenciais aguardando o clique do cliente;
+      //   • a própria resposta faz uma pergunta com opções (quick_replies) —
+      //     uma pergunta não é uma resolução;
+      //   • a mensagem do cliente veio de um clique em botão/chip (source=
+      //     'quick_reply') — seleção intermediária nunca encerra o chamado;
+      //   • é o PRIMEIRO turno do cliente na conversa — fechar na primeira
+      //     resposta (antes de ele poder reagir) é prematuro por definição.
+      const skipAutoResolve =
+        should_handoff ||
+        !!metadata?.credential_actions ||
+        !!metadata?.quick_replies ||
+        isButtonClick ||
+        isFirstClientTurn;
+      if (skipAutoResolve) {
+        if (analysis.resolved) {
+          console.log(
+            `[AI] Auto-resolve skipped (credential_actions=${!!metadata?.credential_actions} ` +
+            `quick_replies=${!!metadata?.quick_replies} buttonClick=${isButtonClick} ` +
+            `firstClientTurn=${isFirstClientTurn} handoff=${should_handoff})`,
+          );
+        }
+      } else {
         void maybeAutoResolve(supabase, conversation_id, analysis, contactInfo);
       }
     }
