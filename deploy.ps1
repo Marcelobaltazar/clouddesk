@@ -3,12 +3,17 @@
 
 $PROJECT_REF = "tgjvjgvbqckoqjtgbjqx"
 
+# IMPORTANTE: manter em sincronia com supabase/functions/*.
+# desk-resend-credentials faltava aqui — a versao com validacao de posse ficou
+# semanas sem deploy enquanto a versao antiga (sem gate) rodava em producao.
+# desk-generate-embedding foi removida: nao existe source no repo (funcao legada
+# ainda deployada; scripts/generate-kb-embeddings.ts depende dela).
 $functions = @(
     "desk-ai-respond",
     "get-contact-info",
-    "desk-generate-embedding",
     "desk-embed-article",
-    "check-widget-eligibility"
+    "check-widget-eligibility",
+    "desk-resend-credentials"
 )
 
 Write-Host ""
