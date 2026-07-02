@@ -1080,7 +1080,7 @@ export function ConversationThread() {
                     <Button
                       size="sm"
                       className="h-8 px-3 rounded-lg text-[13px] font-semibold gap-1.5"
-                      onClick={handleSend}
+                      onClick={() => handleSend()}
                       disabled={!content.trim() || sending}
                     >
                       {isNote ? "Salvar" : "Enviar"}

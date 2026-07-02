@@ -16,17 +16,20 @@ export interface WidgetConversation {
   subject: string | null;
 }
 
-export interface CredentialAction {
+// Type alias (não interface) para ser atribuível a Json — ver WidgetMessageMetadata.
+export type CredentialAction = {
   infra_id: string;
   label: string;
-}
+};
 
-export interface WidgetMessageMetadata {
+// Type alias (não interface): aliases ganham index signature implícita, o que
+// permite passar o metadata direto ao INSERT tipado (coluna Json) sem cast.
+export type WidgetMessageMetadata = {
   quick_replies?: string[];
   // Botões de reenvio de credenciais — um por infraestrutura ATIVA. O disparo só
   // acontece quando o cliente clica; a IA nunca reenvia por conta própria.
   credential_actions?: CredentialAction[];
-}
+};
 
 export interface WidgetMessage {
   id: string;

@@ -332,7 +332,8 @@ function ContactDrawer({
             setIsLoadingConvs(false);
           });
       })
-      .catch(() => setIsLoadingConvs(false));
+      // Builders do supabase-js são PromiseLike (sem .catch) — usa o onRejected do then
+      .then(undefined, () => setIsLoadingConvs(false));
   }, [email]);
 
   if (!info) return null;

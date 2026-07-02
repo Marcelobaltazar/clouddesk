@@ -51,11 +51,13 @@ interface DeskView {
   is_active: boolean;
 }
 
-interface ViewFilters {
+// Type alias (não interface): ganha index signature implícita e entra direto na
+// coluna Json de desk_views sem cast.
+type ViewFilters = {
   plan_product?: string;
   status?: string;
   priority?: string;
-}
+};
 
 interface SlaPolicy {
   id: string;
