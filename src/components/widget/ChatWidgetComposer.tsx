@@ -1,5 +1,5 @@
 import { useState, useRef, type KeyboardEvent } from "react";
-import { Send, Paperclip } from "lucide-react";
+import { Send } from "lucide-react";
 
 interface Props {
   onSend: (message: string) => void;
@@ -29,12 +29,8 @@ export function ChatWidgetComposer({ onSend, disabled, placeholder }: Props) {
   return (
     <div className="px-3 py-2 border-t border-border bg-card">
       <div className="flex items-end gap-2">
-        <button
-          className="h-8 w-8 rounded-md flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
-          aria-label="Anexar arquivo"
-        >
-          <Paperclip className="h-4 w-4" />
-        </button>
+        {/* Botão de anexo removido: era um no-op (sem handler nem file input).
+            Reintroduzir apenas junto com o fluxo real de upload (Storage). */}
         <textarea
           ref={inputRef}
           value={text}

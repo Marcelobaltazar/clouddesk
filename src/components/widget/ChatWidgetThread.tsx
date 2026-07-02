@@ -8,7 +8,9 @@ import { useWidgetStore } from "./useWidgetStore";
 interface Props {
   messages: WidgetMessage[];
   conversationId: string;
-  onSend: (message: string) => void;
+  // source 'quick_reply' = clique em chip/botão — o servidor nunca auto-resolve
+  // nesses turnos (seleção intermediária não encerra o chamado).
+  onSend: (message: string, source?: "quick_reply" | "text") => void;
   // Dispara o reenvio de credenciais de uma infra (clique do cliente no botão).
   // Resolve para true em caso de sucesso. A IA NUNCA chama isto.
   onResendCredentials: (infraId: string) => Promise<boolean>;
@@ -144,7 +146,7 @@ export function ChatWidgetThread({ messages, conversationId, onSend, onResendCre
 
   const handleQuickReply = (msgId: string, text: string) => {
     setUsedQuickReplies((prev) => new Set(prev).add(msgId));
-    onSend(text);
+    onSend(text, "quick_reply");
   };
 
   return (

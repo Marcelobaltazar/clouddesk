@@ -104,6 +104,7 @@ async function callAiEdgeFunction(
   message: string,
   accountName?: string | null,
   accountEmail?: string | null,
+  source: "quick_reply" | "text" = "text",
 ): Promise<AIRespondResult> {
   const { data, error } = await supabase.functions.invoke<AIRespondResult>(
     "desk-ai-respond",
@@ -113,6 +114,9 @@ async function callAiEdgeFunction(
         message,
         account_name:  accountName  ?? undefined,
         account_email: accountEmail ?? undefined,
+        // 'quick_reply' = clique em botão/chip. O servidor NUNCA auto-resolve
+        // nesses turnos (seleção intermediária não encerra chamado).
+        source,
       },
     },
   );
@@ -132,7 +136,7 @@ const HANDOFF_MESSAGE = `Vou encaminhar sua solicitação para nossa equipe.
 - Resposta em até 12 horas úteis
 - Fora do horário: fila para próximo dia útil
 
-📚 Central de ajuda: https://ajuda.cloudfy.cloud/pt-BR/
+📚 Central de ajuda: https://clouddesk.apps.cloudfy.cloud/ajuda
 💬 Discord: https://discord.gg/uDftSRtfKe`;
 
 async function handleHandoff(conversationId: string): Promise<WidgetMessage | null> {
@@ -208,7 +212,7 @@ export function ChatWidget({ settings, embedUser }: Props) {
   const welcomeSentRef = useRef(false);
 
   const startConversation = useCallback(
-    async (firstMessage: string) => {
+    async (firstMessage: string, source: "quick_reply" | "text" = "text") => {
       setIsAiResponding(true);
       // Nova conversa começa limpa (sem estado de espera/atendente herdado)
       setIsWaitingForHuman(false);
@@ -264,6 +268,7 @@ export function ChatWidget({ settings, embedUser }: Props) {
           firstMessage,
           embedUser?.name  ?? account?.name,
           embedUser?.email ?? account?.email,
+          source,
         );
 
         if (aiResult.blocked) {
@@ -298,9 +303,9 @@ export function ChatWidget({ settings, embedUser }: Props) {
   );
 
   const handleSend = useCallback(
-    async (text: string) => {
+    async (text: string, source: "quick_reply" | "text" = "text") => {
       if (!conversation) {
-        await startConversation(text);
+        await startConversation(text, source);
         return;
       }
 
@@ -317,6 +322,7 @@ export function ChatWidget({ settings, embedUser }: Props) {
           text,
           embedUser?.name  ?? account?.name,
           embedUser?.email ?? account?.email,
+          source,
         );
 
         if (aiResult.blocked) {
@@ -430,6 +436,35 @@ export function ChatWidget({ settings, embedUser }: Props) {
       // Identificação por email (cliente vive no Supabase de produção da Cloudfy,
       // sem auth.uid() aqui). O guard de `email` já foi feito acima.
       try {
+        // 0. Retomar conversa existente: o store não sobrevive a reload da página.
+        // Sem isto, cada "sair e voltar" criava uma conversa nova e o cliente
+        // perdia o histórico. Buscamos a conversa não-resolvida mais recente do
+        // email e reutilizamos (as mensagens são carregadas pelo ChatWidgetThread).
+        const { data: existing, error: existingErr } = await supabase
+          .from("desk_conversations")
+          .select("id, status, created_at, subject")
+          .eq("user_email", email)
+          .neq("status", "resolved")
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (existingErr) {
+          console.warn("[Widget] Busca de conversa existente falhou:", existingErr.message);
+        }
+
+        if (existing) {
+          setConversation({
+            id: existing.id,
+            status: existing.status,
+            created_at: existing.created_at,
+            subject: existing.subject,
+          });
+          // Conversa aguardando humano → restaura o estado de espera do composer
+          if (existing.status === "pending") setIsWaitingForHuman(true);
+          return; // sem nova mensagem de boas-vindas — o thread já tem histórico
+        }
+
         // 1. Fetch contact info — no OpenAI, just CRM (Supabase de produção)
         const { data: contactData } = await supabase.functions.invoke<ContactInfo>(
           "get-contact-info",
@@ -674,7 +709,7 @@ export function ChatWidget({ settings, embedUser }: Props) {
             greeting={settings.greeting}
             accountName={embedUser?.name ?? account?.name ?? null}
             quickActions={settings.quick_actions}
-            onQuickAction={startConversation}
+            onQuickAction={(action) => startConversation(action, "quick_reply")}
             onSendMessage={startConversation}
           />
           <ChatWidgetComposer onSend={startConversation} disabled={isAiResponding} />
