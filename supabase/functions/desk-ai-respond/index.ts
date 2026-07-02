@@ -214,7 +214,9 @@ Ao usar [OFERECER_CREDENCIAIS], escreva uma frase curta convidando o clique, SEM
 'Claro! É só clicar no botão abaixo para reenviar suas credenciais de acesso. Elas chegarão no seu e-mail. 📩
 [OFERECER_CREDENCIAIS]'
 
-NUNCA escreva "Credenciais reenviadas", "já enviei", "acabei de mandar" ou qualquer confirmação de envio — você não envia nada. A confirmação aparece sozinha quando o cliente clica no botão.
+Se o cliente tem MAIS DE UMA infraestrutura ativa, NÃO pergunte "qual infraestrutura?" e NÃO use [OPCOES] para listar infraestruturas — o sistema mostra um botão POR infraestrutura ativa e o cliente escolhe clicando no botão certo. Basta usar [OFERECER_CREDENCIAIS].
+
+NUNCA escreva "Credenciais reenviadas", "já enviei", "acabei de mandar" ou qualquer confirmação de envio — você não envia nada. A confirmação aparece sozinha quando o cliente clica no botão. Enquanto o cliente não clicar, o pedido dele NÃO está resolvido (resolved=nao no bloco META).
 
 IMPORTANTE: reenvio de credenciais NÃO é reset de senha — são os dados de acesso ORIGINAIS da infraestrutura. Nunca prometa redefinir senha.`;
 
@@ -482,6 +484,14 @@ ${contextSection}`;
 const OPCOES_RE = /\[OPCOES:\s*([^\]]+)\]/i;
 const OFFER_CREDENTIALS_RE = /\[OFERECER_CREDENCIAIS\s*\]/i;
 
+// O modelo NUNCA envia credenciais — qualquer afirmação de envio vinda do bot é
+// falsa por definição (o envio real só acontece no clique do cliente, via
+// desk-resend-credentials). Este regex detecta a alucinação para corrigi-la
+// server-side: o texto é trocado por um convite honesto ao clique e os botões
+// reais são anexados.
+const FALSE_SENT_CLAIM_RE =
+  /credenciais\s+(?:re)?enviad|(?:re)?enviei\s+(?:suas?\s+|as\s+)?credenciais|acabei\s+de\s+(?:re)?enviar/i;
+
 // ─── Análise de intenção / sentimento / urgência ─────────────────────────────
 // O modelo anexa um bloco [META: ...] no FINAL de toda resposta (instrução no
 // system prompt). Isso dá classificação estruturada na MESMA chamada — zero
@@ -496,6 +506,7 @@ No FINAL de TODA resposta (inclusive quando responder apenas ${TRANSFER_KEYWORD}
 - sentiment: positivo | neutro | negativo | irritado
 - urgency: baixa | media | alta | critica
 - resolved: sim (se você acredita que resolveu o problema do cliente nesta resposta) | nao (se ainda há algo pendente)
+- resolved=nao SEMPRE que uma ação do cliente ainda estiver pendente — por exemplo, quando você ofereceu o botão de reenvio de credenciais e ele ainda não clicou/confirmou o recebimento.
 
 Critérios de urgency:
 - critica: produção fora do ar, cliente perdendo dinheiro/clientes agora
@@ -843,12 +854,38 @@ Deno.serve(async (req) => {
       console.warn('[AI] Failed to fetch conversation state:', convErr.message);
     }
 
+    // ── Reabertura: cliente respondeu numa conversa resolvida ──────────────────
+    // Sem isto a mensagem cai num buraco negro: a IA é bloqueada pelo guard e a
+    // conversa não volta para a aba "Abertas" do painel. Reabrimos ANTES do guard
+    // (service role — o widget anon não tem policy de UPDATE).
+    if (!isDraft && convRow?.status === 'resolved') {
+      const { error: reopenErr } = await supabase
+        .from('desk_conversations')
+        .update({ status: 'open', resolved_at: null })
+        .eq('id', conversation_id);
+      if (reopenErr) {
+        console.error('[AI] Failed to reopen resolved conversation:', reopenErr.message);
+      } else {
+        console.log(`[AI] Reopened resolved conversation ${conversation_id} (client replied)`);
+        convRow.status = 'open';
+      }
+    }
+
     if (
       !isDraft &&
       convRow &&
       (!convRow.ai_active || convRow.status === 'pending' || convRow.status === 'resolved')
     ) {
       console.log(`[AI] Blocked — ai_active=${convRow.ai_active} status=${convRow.status}`);
+      // Mesmo sem resposta da IA, a conversa precisa "subir" no inbox e disparar
+      // o Realtime de desk_conversations para os operadores verem a mensagem nova.
+      // (Nada mais atualiza a conversa neste caminho — o widget anon não pode.)
+      const { error: bumpErr } = await supabase
+        .from('desk_conversations')
+        .update({ updated_at: new Date().toISOString() })
+        .eq('id', conversation_id);
+      if (bumpErr) console.warn('[AI] Failed to bump updated_at on blocked path:', bumpErr.message);
+
       const blocked: AIRespondResult = { reply: null, should_handoff: false, blocked: true };
       return new Response(
         JSON.stringify(blocked),
@@ -1008,13 +1045,72 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
     const isStarterClient = isStarterOnlyClient(contactInfo);
     const should_handoff = !isDraft && !isStarterClient && rawReply.includes(TRANSFER_KEYWORD);
 
+    // Strip the [OPCOES] / [OFERECER_CREDENCIAIS] markers and lift them into
+    // metadata. On handoff the reply is just the transfer keyword, so there is
+    // nothing to parse. Credential buttons are built from the client's ACTIVE
+    // infras only — the resend itself is triggered by the client's click, never
+    // here.
+    const activeInfras = (contactInfo?.infras ?? []).filter(isActiveInfra);
+    let { text: reply, metadata } = should_handoff
+      ? { text: rawReply, metadata: null as MessageMetadata | null }
+      : parseReplyMarkers(rawReply, activeInfras);
+
+    // ── Guard determinístico do fluxo de credenciais ────────────────────────────
+    // O modelo às vezes ignora o [OFERECER_CREDENCIAIS] (pergunta "qual infra?" via
+    // chips) ou alucina "Credenciais reenviadas!" sem que nada tenha sido enviado.
+    // Correção server-side, independente do modelo:
+    //   1. intent=credenciais (classificação do próprio modelo) sem botões → anexa
+    //      os botões reais (um por infra ativa; o backend revalida posse no clique).
+    //   2. Afirmação falsa de envio → texto substituído por convite honesto ao clique.
+    if (!isDraft && !should_handoff) {
+      const falseClaim = FALSE_SENT_CLAIM_RE.test(reply);
+      const wantsCredentials = analysis?.intent === 'credenciais';
+
+      if ((falseClaim || wantsCredentials) && !metadata?.credential_actions) {
+        const actions: CredentialAction[] = activeInfras
+          .filter((i) => i.infra_id)
+          .map((i) => ({
+            infra_id: i.infra_id,
+            label: i.default_domain || i.purchase_code || 'Minha infraestrutura',
+          }));
+        if (actions.length > 0) {
+          metadata = { ...(metadata ?? {}), credential_actions: actions };
+          console.log(`[AI] Credential guard: attached ${actions.length} button(s) (falseClaim=${falseClaim})`);
+        }
+      }
+
+      if (falseClaim) {
+        reply = metadata?.credential_actions?.length
+          ? 'Para receber suas credenciais de acesso, é só clicar no botão abaixo — elas chegam no seu e-mail cadastrado. 📩'
+          : 'Não encontrei uma infraestrutura ativa na sua conta para reenviar credenciais. Se você acredita que isso é um erro, me avise que eu verifico com a equipe.';
+        console.warn('[AI] Credential guard: false "sent" claim scrubbed from reply');
+      }
+    }
+
+    // ── Handoff decidido pela IA → persistir server-side ────────────────────────
+    // O widget roda como anon e NÃO tem policy de UPDATE em desk_conversations
+    // (o update dele é um no-op silencioso). Sem isto, a conversa nunca vira
+    // 'pending' e a IA continua respondendo depois de "transferir".
+    if (should_handoff) {
+      const { error: handoffErr } = await supabase
+        .from('desk_conversations')
+        .update({ status: 'pending', ai_active: false })
+        .eq('id', conversation_id);
+      if (handoffErr) {
+        console.error('[AI] Failed to persist handoff:', handoffErr.message);
+      } else {
+        console.log(`[AI] Handoff persisted — conversation ${conversation_id} → pending, ai_active=false`);
+      }
+    }
+
     // Inteligência aplicada à conversa (prioridade + tag de intenção), auto-resolve
     // e log de analytics — fire-and-forget, nunca bloqueia a resposta ao cliente.
     if (!isDraft && analysis) {
       void applyAnalysis(supabase, conversation_id, analysis);
       // Auto-resolve: Advanced/Ultra/Max quando IA sinaliza resolved=sim (via META).
-      // Ocorre DEPOIS da resposta ser salva para não criar race condition.
-      if (!should_handoff) {
+      // NUNCA quando há botões de credenciais aguardando o clique do cliente —
+      // fechar aqui mataria a conversa antes da ação acontecer.
+      if (!should_handoff && !metadata?.credential_actions) {
         void maybeAutoResolve(supabase, conversation_id, analysis, contactInfo);
       }
     }
@@ -1030,16 +1126,6 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
       snippetIds: snippetMatches.map((s) => s.id),
       draft: isDraft,
     });
-
-    // Strip the [OPCOES] / [OFERECER_CREDENCIAIS] markers and lift them into
-    // metadata. On handoff the reply is just the transfer keyword, so there is
-    // nothing to parse. Credential buttons are built from the client's ACTIVE
-    // infras only — the resend itself is triggered by the client's click, never
-    // here.
-    const activeInfras = (contactInfo?.infras ?? []).filter(isActiveInfra);
-    let { text: reply, metadata } = should_handoff
-      ? { text: rawReply, metadata: null }
-      : parseReplyMarkers(rawReply, activeInfras);
 
     // Modo draft: nunca executa ações nem transfere — apenas devolve o texto
     // limpo para o operador revisar.

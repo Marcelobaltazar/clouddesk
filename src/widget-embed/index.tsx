@@ -32,10 +32,14 @@ async function checkEligibility(email: string): Promise<boolean> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email }),
     });
-    if (!res.ok) return false;
+    if (!res.ok) {
+      console.warn(`[CloudDesk] check-widget-eligibility HTTP ${res.status} — widget não renderiza`);
+      return false;
+    }
     const json = (await res.json()) as { eligible: boolean };
     return json.eligible === true;
-  } catch {
+  } catch (err) {
+    console.warn("[CloudDesk] check-widget-eligibility falhou — widget não renderiza:", err);
     return false;
   }
 }

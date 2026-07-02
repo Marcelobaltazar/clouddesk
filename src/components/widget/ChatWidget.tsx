@@ -136,21 +136,10 @@ const HANDOFF_MESSAGE = `Vou encaminhar sua solicitação para nossa equipe.
 💬 Discord: https://discord.gg/uDftSRtfKe`;
 
 async function handleHandoff(conversationId: string): Promise<WidgetMessage | null> {
-  // 1. Mark conversation as pending (waiting for human)
-  const { error: updateError } = await supabase
-    .from("desk_conversations")
-    .update({
-      status:    "pending",
-      ai_active: false,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", conversationId);
-
-  if (updateError) {
-    console.error("[Widget] Handoff UPDATE error:", updateError.message);
-  }
-
-  // 2. Insert visible system message for the client
+  // O status 'pending' + ai_active=false são persistidos SERVER-SIDE pela própria
+  // desk-ai-respond quando decide o handoff (service role). O widget roda como
+  // anon e não tem policy de UPDATE em desk_conversations — um update daqui seria
+  // um no-op silencioso. Aqui só inserimos a mensagem de sistema visível.
   return insertMessage(conversationId, "system", HANDOFF_MESSAGE);
 }
 
