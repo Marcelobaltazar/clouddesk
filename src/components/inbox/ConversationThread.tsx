@@ -11,7 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { Bot, Lock, Info, CheckCircle, Send, MessageSquare, UserPlus, Clock, BookOpen, Reply, Search, Zap, Sparkles, Loader2 } from "lucide-react";
+import { Bot, Lock, Info, CheckCircle, Send, MessageSquare, UserPlus, Clock, BookOpen, Reply, Search, Zap, Sparkles, Loader2, RotateCcw } from "lucide-react";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
@@ -454,6 +454,24 @@ export function ConversationThread() {
     if (error) toast.error("Erro ao resolver conversa");
   };
 
+  // Reabre uma conversa resolvida (o cliente também reabre implicitamente ao
+  // mandar mensagem nova — via desk-ai-respond; aqui é o caminho manual do operador).
+  const handleReopen = async () => {
+    const { error } = await supabase
+      .from("desk_conversations")
+      .update({ status: "open", resolved_at: null, updated_at: new Date().toISOString() })
+      .eq("id", activeConversationId);
+
+    if (error) { toast.error("Erro ao reabrir conversa"); return; }
+
+    await supabase.from("desk_messages").insert({
+      conversation_id: activeConversationId,
+      sender_type: "system",
+      content: "Conversa reaberta pelo atendimento",
+    });
+    toast.success("Conversa reaberta");
+  };
+
   // Pausar / reativar a IA na conversa (handoff humano ↔ IA — CLAUDE.md §7.7).
   const handleToggleAI = async () => {
     if (!conversation) return;
@@ -553,13 +571,18 @@ export function ConversationThread() {
       //  - Ctrl+Enter (resolveAfter) on a public reply → resolve the conversation
       //  - replying to a pending conversation → move it back to open
       //  - otherwise just bump updated_at so Realtime propagates to ConversationList
+      // Handoff humano (CLAUDE.md §7.7): a primeira resposta PÚBLICA do operador
+      // pausa a IA (ai_active=false) — sem isto a IA continuava respondendo em
+      // paralelo com o atendente. Reativação é manual (botão "Reativar IA").
       const now = new Date().toISOString();
-      const statusUpdate =
+      const pauseAI = !isNote && conversation.ai_active;
+      const statusUpdate: Record<string, unknown> =
         resolveAfter && !isNote
           ? { status: "resolved", resolved_at: now, updated_at: now }
           : !isNote && conversation.status === "pending"
           ? { status: "open", updated_at: now }
           : { updated_at: now };
+      if (pauseAI) statusUpdate.ai_active = false;
 
       // Métrica de 1ª resposta: primeira resposta pública (humana) preenche
       // first_response_at se a IA ainda não tiver respondido antes.
@@ -575,6 +598,16 @@ export function ConversationThread() {
         .from("desk_conversations")
         .update(statusUpdate)
         .eq("id", activeConversationId);
+
+      // Mensagem de sistema visível ao cliente marcando o handoff (só quando a IA
+      // acabou de ser pausada — evita spam a cada resposta).
+      if (pauseAI) {
+        await supabase.from("desk_messages").insert({
+          conversation_id: activeConversationId,
+          sender_type: "system",
+          content: "IA pausada — atendimento humano assumiu",
+        });
+      }
 
       setContent("");
       setMode("reply");
@@ -822,6 +855,24 @@ export function ConversationThread() {
                   <TooltipContent>Resolver · Ctrl Enter</TooltipContent>
                 </Tooltip>
               </>
+            )}
+
+            {/* Reabrir conversa resolvida */}
+            {conversation.status === "resolved" && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleReopen}
+                    className="h-8 px-3 rounded-lg text-[12px] gap-1.5"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    Reabrir
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Reabrir esta conversa</TooltipContent>
+              </Tooltip>
             )}
           </div>
         </TooltipProvider>
