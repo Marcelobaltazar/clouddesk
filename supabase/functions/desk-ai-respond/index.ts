@@ -866,16 +866,24 @@ Deno.serve(async (req) => {
     // Sem isto a mensagem cai num buraco negro: a IA é bloqueada pelo guard e a
     // conversa não volta para a aba "Abertas" do painel. Reabrimos ANTES do guard
     // (service role — o widget anon não tem policy de UPDATE).
+    //
+    // REATIVAR A IA no reopen: uma conversa RESOLVIDA que o cliente reabre é uma
+    // nova rodada de autoatendimento. Se ela tinha sido pausada por um humano
+    // antes de resolver (ai_active=false), reabrir sem reativar deixava a IA
+    // bloqueada para sempre e o cliente no vácuo — nem IA nem humano respondiam.
+    // Ao reabrir, a IA volta a atender; se um operador quiser assumir de novo,
+    // ele repausa manualmente na thread.
     if (!isDraft && convRow?.status === 'resolved') {
       const { error: reopenErr } = await supabase
         .from('desk_conversations')
-        .update({ status: 'open', resolved_at: null })
+        .update({ status: 'open', resolved_at: null, ai_active: true })
         .eq('id', conversation_id);
       if (reopenErr) {
         console.error('[AI] Failed to reopen resolved conversation:', reopenErr.message);
       } else {
-        console.log(`[AI] Reopened resolved conversation ${conversation_id} (client replied)`);
+        console.log(`[AI] Reopened resolved conversation ${conversation_id} (client replied) — IA reactivated`);
         convRow.status = 'open';
+        convRow.ai_active = true;
       }
     }
 
