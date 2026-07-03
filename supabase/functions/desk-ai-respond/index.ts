@@ -499,6 +499,19 @@ const OFFER_CREDENTIALS_RE = /\[OFERECER_CREDENCIAIS\s*\]/i;
 const FALSE_SENT_CLAIM_RE =
   /credenciais\s+(?:re)?enviad|(?:re)?enviei\s+(?:suas?\s+|as\s+)?credenciais|acabei\s+de\s+(?:re)?enviar/i;
 
+// O auto-resolve só pode fechar a conversa quando o CLIENTE confirma o
+// encerramento com as próprias palavras. O modelo marca resolved=sim assim que
+// acha que respondeu bem — inclusive terminando com "precisa de mais alguma
+// ajuda?" — e fechava a conversa "do nada" na cara do cliente. O sinal do
+// modelo vira apenas condição NECESSÁRIA; a suficiente é o cliente sinalizar
+// que acabou. Mensagens com "?" nunca contam (pergunta = conversa continua).
+const CLIENT_CLOSURE_RE =
+  /(obrigad[oa]?|valeu|vlw|resolvid[oa]|resolveu|era s[oó] isso|s[oó] isso mesmo|pode (encerrar|fechar)|tudo certo|deu certo|funcionou|consegui( aqui)?|perfeito)/i;
+
+function clientConfirmedClosure(message: string): boolean {
+  return CLIENT_CLOSURE_RE.test(message) && !message.includes('?');
+}
+
 // ─── Análise de intenção / sentimento / urgência ─────────────────────────────
 // O modelo anexa um bloco [META: ...] no FINAL de toda resposta (instrução no
 // system prompt). Isso dá classificação estruturada na MESMA chamada — zero
@@ -1139,19 +1152,26 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
       //   • a mensagem do cliente veio de um clique em botão/chip (source=
       //     'quick_reply') — seleção intermediária nunca encerra o chamado;
       //   • é o PRIMEIRO turno do cliente na conversa — fechar na primeira
-      //     resposta (antes de ele poder reagir) é prematuro por definição.
+      //     resposta (antes de ele poder reagir) é prematuro por definição;
+      //   • o CLIENTE não confirmou o encerramento ("obrigado", "resolveu",
+      //     "era só isso"...) — o resolved=sim do modelo sozinho não basta:
+      //     ele marca resolvido logo após responder uma pergunta informativa
+      //     e a conversa fechava "do nada" na cara do cliente.
+      const closureConfirmed = clientConfirmedClosure(message);
       const skipAutoResolve =
         should_handoff ||
         !!metadata?.credential_actions ||
         !!metadata?.quick_replies ||
         isButtonClick ||
-        isFirstClientTurn;
+        isFirstClientTurn ||
+        !closureConfirmed;
       if (skipAutoResolve) {
         if (analysis.resolved) {
           console.log(
             `[AI] Auto-resolve skipped (credential_actions=${!!metadata?.credential_actions} ` +
             `quick_replies=${!!metadata?.quick_replies} buttonClick=${isButtonClick} ` +
-            `firstClientTurn=${isFirstClientTurn} handoff=${should_handoff})`,
+            `firstClientTurn=${isFirstClientTurn} closureConfirmed=${closureConfirmed} ` +
+            `handoff=${should_handoff})`,
           );
         }
       } else {
