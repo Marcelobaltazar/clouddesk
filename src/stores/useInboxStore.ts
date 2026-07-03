@@ -100,14 +100,23 @@ async function enrichConversations(
 ): Promise<Conversation[]> {
   if (rows.length === 0) return [];
 
-  const accountIds = [...new Set(rows.map((r) => r.account_user_id as string))];
+  // Conversas do widget têm account_user_id = null (cliente não vive no Supabase
+  // do CloudDesk). Um `null` no filtro .in("user_id", …) faz o PostgREST retornar
+  // 400 "invalid input syntax for type uuid: null" e o enrich inteiro falhava —
+  // nenhuma conversa carregava dados de contato. Filtramos os nulls e só
+  // consultamos account quando há pelo menos um id válido.
+  const accountIds = [...new Set(
+    rows.map((r) => r.account_user_id as string | null).filter((id): id is string => !!id)
+  )];
   const convIds    = rows.map((r) => r.id as string);
 
   const [accountsRes, msgsRes] = await Promise.all([
-    supabase
-      .from("account")
-      .select("user_id, name, email, phone")
-      .in("user_id", accountIds),
+    accountIds.length > 0
+      ? supabase
+          .from("account")
+          .select("user_id, name, email, phone")
+          .in("user_id", accountIds)
+      : Promise.resolve({ data: [] as ConversationContact[] }),
     supabase
       .from("desk_messages")
       .select("conversation_id, content, created_at, sender_type")
@@ -140,12 +149,17 @@ async function enrichConversations(
 }
 
 async function enrichOne(raw: Record<string, unknown>): Promise<Conversation> {
+  // account_user_id pode ser null (conversa do widget) — .eq("user_id", null)
+  // vira 400 no PostgREST. Só consulta account quando há id válido.
+  const accountUserId = (raw.account_user_id as string | null) ?? null;
   const [accRes, msgRes] = await Promise.all([
-    supabase
-      .from("account")
-      .select("user_id, name, email, phone")
-      .eq("user_id", raw.account_user_id as string)
-      .maybeSingle(),
+    accountUserId
+      ? supabase
+          .from("account")
+          .select("user_id, name, email, phone")
+          .eq("user_id", accountUserId)
+          .maybeSingle()
+      : Promise.resolve({ data: null }),
     supabase
       .from("desk_messages")
       .select("content, created_at, sender_type")

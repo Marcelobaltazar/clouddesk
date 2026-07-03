@@ -326,7 +326,7 @@ function ConversationHistory({
   accountUserId,
   currentConversationId,
 }: {
-  accountUserId: string;
+  accountUserId: string | null;
   currentConversationId: string;
 }) {
   const setActiveConversationId = useInboxStore((s) => s.setActiveConversationId);
@@ -335,6 +335,15 @@ function ConversationHistory({
 
   useEffect(() => {
     let cancelled = false;
+    // Conversas do widget não têm account_user_id (cliente não vive no Supabase
+    // do CloudDesk). Sem este guard, .eq("account_user_id", null) retornava 400
+    // "invalid input syntax for type uuid: null" e poluía o console. Sem vínculo
+    // de account não há histórico "por cliente" para listar aqui.
+    if (!accountUserId) {
+      setItems([]);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     supabase
       .from("desk_conversations")
