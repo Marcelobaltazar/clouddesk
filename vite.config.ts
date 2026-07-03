@@ -18,6 +18,14 @@ export default defineConfig(({ mode }) => ({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  // No build de biblioteca (widget IIFE) o Vite NÃO injeta process.env.NODE_ENV
+  // automaticamente como faz no build de app. Dependências (React e afins) leem
+  // `process.env.NODE_ENV`, e no navegador `process` não existe → o widget
+  // estourava com "ReferenceError: process is not defined" antes de montar a
+  // bolha. Substituímos a expressão em tempo de build para o widget.
+  define: mode === "widget"
+    ? { "process.env.NODE_ENV": JSON.stringify("production") }
+    : {},
   build: mode === "widget"
     ? {
         // ── Widget embed build ────────────────────────────────────────────────

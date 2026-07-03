@@ -1,0 +1,12 @@
+/* Folha de estilo do WIDGET embedado.
+ *
+ * O bundle IIFE do widget é injetado no cloudfy.space, que não tem o CSS do app.
+ * Sem este arquivo importado no entry, o Vite não gera nem injeta os estilos
+ * Tailwind e o widget aparece SEM estilo nenhum. É importado com `?inline` em
+ * widget-embed/index.tsx e o texto resultante é injetado num <style> no bootstrap.
+ *
+ * Reaproveita a MESMA fonte do app (index.css) — Tailwind base/components/utilities
+ * + todas as variáveis de tema (--primary, --bubble-bot, etc.), que as classes do
+ * widget usam via hsl(var(--...)). Mantém uma única fonte de verdade de tema.
+ */
+@import "../index.css";

@@ -4,6 +4,10 @@ import { ChatWidget, type EmbedUser } from "@/components/widget/ChatWidget";
 import { ChatBubbleButton } from "@/components/widget/ChatBubbleButton";
 import { useWidgetStore } from "@/components/widget/useWidgetStore";
 import { DEFAULT_SETTINGS } from "@/components/widget/types";
+// CSS do widget como STRING (?inline): o Vite não emite/injeta CSS no build de
+// biblioteca (IIFE). Injetamos manualmente no bootstrap para o widget ter estilo
+// no site host (que não tem o CSS do app). Ver widget.css.
+import widgetCss from "./widget.css?inline";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -73,6 +77,15 @@ function EmbedRoot({ embedUser }: { embedUser: EmbedUser }) {
     email: raw.email,
     name:  raw.name ?? raw.email,
   };
+
+  // Injeta o CSS do widget uma única vez. Sem isto o widget renderiza sem estilo
+  // (o site host não tem o CSS do app). Guard por id evita duplicar em re-init.
+  if (!document.getElementById("clouddesk-widget-style")) {
+    const style = document.createElement("style");
+    style.id = "clouddesk-widget-style";
+    style.textContent = widgetCss;
+    document.head.appendChild(style);
+  }
 
   const container = document.createElement("div");
   container.id = "clouddesk-widget-root";
