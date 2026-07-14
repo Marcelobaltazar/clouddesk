@@ -33,13 +33,16 @@ CREATE POLICY "agents_read_ai_interactions"
   ON public.desk_ai_interactions FOR SELECT
   USING (public.is_desk_agent());
 
--- ── 3. Funções RPC de busca semântica: revogar EXECUTE de anon ──────────────────
--- match_* são SECURITY INVOKER mas leem FAQ/snippets internos; por padrão o
--- Postgres concede EXECUTE a PUBLIC. Só operadores (authenticated) e o service
--- role precisam delas.
-REVOKE EXECUTE ON FUNCTION public.match_knowledge_base(vector, double precision, integer) FROM anon;
-REVOKE EXECUTE ON FUNCTION public.match_faq(vector, double precision, integer) FROM anon;
-REVOKE EXECUTE ON FUNCTION public.match_ai_snippets(vector, double precision, integer) FROM anon;
+-- ── 3. Funções RPC de busca semântica: fechar EXECUTE para anon ─────────────────
+-- match_* leem FAQ/snippets internos; por padrão o Postgres concede EXECUTE a
+-- PUBLIC (e revogar só de `anon` seria inócuo — ele herdaria via PUBLIC).
+-- Revoga de PUBLIC e concede explicitamente a operadores + service role.
+REVOKE EXECUTE ON FUNCTION public.match_knowledge_base(vector, double precision, integer) FROM PUBLIC, anon;
+REVOKE EXECUTE ON FUNCTION public.match_faq(vector, double precision, integer) FROM PUBLIC, anon;
+REVOKE EXECUTE ON FUNCTION public.match_ai_snippets(vector, double precision, integer) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.match_knowledge_base(vector, double precision, integer) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.match_faq(vector, double precision, integer) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.match_ai_snippets(vector, double precision, integer) TO authenticated, service_role;
 
 -- ── 4. Rate limiting persistente (janela fixa) ──────────────────────────────────
 -- Usado pelas Edge Functions (service role) para limitar chamadas por e-mail:
@@ -89,7 +92,7 @@ BEGIN
 END;
 $$;
 
--- Apenas o service role pode consultar o rate limit
-REVOKE EXECUTE ON FUNCTION public.desk_rate_limit_hit(text, integer, integer) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.desk_rate_limit_hit(text, integer, integer) FROM anon;
-REVOKE EXECUTE ON FUNCTION public.desk_rate_limit_hit(text, integer, integer) FROM authenticated;
+-- Apenas o service role pode consultar o rate limit (revogar PUBLIC sem
+-- conceder a service_role deixaria a própria Edge Function sem acesso)
+REVOKE EXECUTE ON FUNCTION public.desk_rate_limit_hit(text, integer, integer) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.desk_rate_limit_hit(text, integer, integer) TO service_role;

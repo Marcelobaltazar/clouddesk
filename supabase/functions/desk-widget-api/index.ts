@@ -135,10 +135,13 @@ async function findOpenConversation(
   service: ServiceClient,
   email: string,
 ): Promise<ConversationRow | null> {
+  // ilike é usado só para case-insensitivity em dados legados — escapa os
+  // wildcards do LIKE para o e-mail nunca virar padrão de busca.
+  const emailPattern = email.replace(/([%_\\])/g, '\\$1');
   const { data, error } = await service
     .from('desk_conversations')
     .select(CONV_SELECT)
-    .ilike('user_email', email)
+    .ilike('user_email', emailPattern)
     .neq('status', 'resolved')
     .order('created_at', { ascending: false })
     .limit(1)
