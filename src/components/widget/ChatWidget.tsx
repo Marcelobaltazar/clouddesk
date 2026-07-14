@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useWidgetStore } from "./useWidgetStore";
 import { ChatWidgetHeader } from "./ChatWidgetHeader";
@@ -6,11 +6,20 @@ import { ChatWidgetWelcome } from "./ChatWidgetWelcome";
 import { ChatWidgetThread } from "./ChatWidgetThread";
 import { ChatWidgetComposer } from "./ChatWidgetComposer";
 import { CSATFeedback } from "./CSATFeedback";
-import type { CloudDeskSettings, WidgetMessage, WidgetMessageMetadata } from "./types";
+import { configureWidgetApi, widgetApi, WidgetApiError, type TurnResult } from "@/lib/widget-api";
+import type { CloudDeskSettings, WidgetMessage } from "./types";
 import type { ContactInfo } from "@/lib/contact-info";
-import { computeSlaDeadline, markFirstResponse } from "@/lib/sla";
 
-// ── Welcome message builder ────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// SEGURANÇA: este componente NÃO acessa nenhuma tabela desk_* diretamente.
+// Toda leitura/escrita passa pela Edge Function desk-widget-api, que verifica a
+// identidade do cliente (user_hash HMAC vindo do backend do site host, ou sessão
+// de operador no preview). O único uso do client Supabase aqui é o canal de
+// broadcast Realtime `conv-live:{id}` — capability: só quem conhece o UUID da
+// conversa (o dono e os operadores) escuta.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Welcome message builder (efêmera — não persiste até o cliente falar) ──────
 
 const NUMBER_EMOJIS = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"];
 
@@ -47,8 +56,6 @@ function buildWelcomeMessage(info: ContactInfo): string | null {
     return `Olá, ${name}! 👋\n\nComo posso te ajudar hoje?`;
   }
 
-  // Build one line per subscription:
-  // {num_emoji} {product} · {interval} — {status_icon} {status} | 🖥️ {purchase_code} | 📅 {date}
   const subLines = subs.map((sub, idx) => {
     const num      = NUMBER_EMOJIS[idx] ?? `${idx + 1}.`;
     const interval = intervalPt(sub.interval);
@@ -88,103 +95,49 @@ function buildWelcomeMessage(info: ContactInfo): string | null {
   ].join("\n");
 }
 
-// ── Edge Function call ────────────────────────────────────────────────────────
-// Uses supabase.functions.invoke() so the client handles auth headers correctly
-// regardless of whether the key is a JWT (eyJ...) or publishable key (sb_publishable_...).
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-interface AIRespondResult {
-  reply: string | null;
-  should_handoff: boolean;
-  blocked?: boolean;
-  metadata?: WidgetMessageMetadata | null;
-}
-
-async function callAiEdgeFunction(
-  conversationId: string,
-  message: string,
-  accountName?: string | null,
-  accountEmail?: string | null,
-  source: "quick_reply" | "text" = "text",
-): Promise<AIRespondResult> {
-  const { data, error } = await supabase.functions.invoke<AIRespondResult>(
-    "desk-ai-respond",
-    {
-      body: {
-        conversation_id: conversationId,
-        message,
-        account_name:  accountName  ?? undefined,
-        account_email: accountEmail ?? undefined,
-        // 'quick_reply' = clique em botão/chip. O servidor NUNCA auto-resolve
-        // nesses turnos (seleção intermediária não encerra chamado).
-        source,
-      },
-    },
-  );
-
-  if (error) throw new Error(`Edge Function error: ${error.message}`);
-  if (!data) throw new Error("Edge Function returned no data");
-
-  return data;
-}
-
-// ── Handoff: escalate conversation to human ───────────────────────────────────
-
-const HANDOFF_MESSAGE = `Vou encaminhar sua solicitação para nossa equipe.
-
-⏰ Nosso SLA:
-- Seg a Sex, 9h às 19h
-- Resposta em até 12 horas úteis
-- Fora do horário: fila para próximo dia útil
-
-📚 Central de ajuda: https://clouddesk.apps.cloudfy.cloud/ajuda
-💬 Discord: https://discord.gg/uDftSRtfKe`;
-
-async function handleHandoff(conversationId: string): Promise<WidgetMessage | null> {
-  // O status 'pending' + ai_active=false são persistidos SERVER-SIDE pela própria
-  // desk-ai-respond quando decide o handoff (service role). O widget roda como
-  // anon e não tem policy de UPDATE em desk_conversations — um update daqui seria
-  // um no-op silencioso. Aqui só inserimos a mensagem de sistema visível.
-  return insertMessage(conversationId, "system", HANDOFF_MESSAGE);
-}
-
-async function insertMessage(
-  conversationId: string,
-  senderType: "contact" | "bot" | "system",
+/** Mensagem local (não persistida) — usada para welcome efêmera e erros de rede. */
+function localMessage(
+  senderType: WidgetMessage["sender_type"],
   content: string,
-  aiGenerated = false,
-  metadata?: WidgetMessageMetadata | null,
-): Promise<WidgetMessage | null> {
-  const { data, error } = await supabase
-    .from("desk_messages")
-    .insert({
-      conversation_id: conversationId,
-      sender_type: senderType,
-      content,
-      ai_generated: aiGenerated,
-      content_type: "text",
-      is_private_note: false,
-      metadata: metadata ?? {},
-    })
-    .select("id, conversation_id, sender_type, content, created_at, ai_generated, is_private_note, metadata")
-    .single();
+): WidgetMessage {
+  return {
+    id: `local-${crypto.randomUUID()}`,
+    conversation_id: "local",
+    sender_type: senderType,
+    content,
+    created_at: new Date().toISOString(),
+    ai_generated: false,
+    is_private_note: false,
+  };
+}
 
-  if (error) {
-    console.error("[Widget] Erro ao inserir mensagem:", error.message);
-    return null;
+function mergeMessages(current: WidgetMessage[], incoming: WidgetMessage[]): WidgetMessage[] {
+  const seen = new Set(current.map((m) => m.id));
+  const merged = [...current];
+  for (const msg of incoming) {
+    if (!seen.has(msg.id)) {
+      merged.push(msg);
+      seen.add(msg.id);
+    }
   }
-
-  return data as WidgetMessage;
+  return merged.sort(
+    (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+  );
 }
 
 export interface EmbedUser {
   id: string;
   email: string;
   name: string;
+  /** HMAC do e-mail calculado pelo backend do site host (identidade verificada) */
+  hash?: string;
 }
 
 interface Props {
   settings: CloudDeskSettings;
-  /** Populated when running as embedded widget on cloudfy.space */
+  /** Preenchido quando roda como widget embedado no cloudfy.space */
   embedUser?: EmbedUser;
 }
 
@@ -194,112 +147,88 @@ export function ChatWidget({ settings, embedUser }: Props) {
     account,
     conversation,
     messages,
-    infras,
     showCsat,
     isAiResponding,
     isWaitingForHuman,
     agentConnected,
     setConversation,
     addMessage,
+    setMessages,
     setInfras,
     setIsAiResponding,
     setIsWaitingForHuman,
     setAgentConnected,
   } = useWidgetStore();
-  // `messages` is used only for rendering — passed down to ChatWidgetThread
 
-  // Guard: welcome message triggered at most once per widget open session
-  const welcomeSentRef = useRef(false);
+  // Identidade efetiva: embed real (com hash) ou conta simulada do preview
+  // (sem hash — o gateway aceita via sessão de operador logado no painel).
+  const identityEmail = embedUser?.email ?? account?.email ?? null;
+  const identityName  = embedUser?.name  ?? account?.name  ?? undefined;
+
+  useMemo(() => {
+    configureWidgetApi(
+      identityEmail
+        ? {
+            email: identityEmail,
+            name: identityName,
+            userHash: embedUser?.hash,
+            accountUserId: embedUser?.id ?? account?.user_id,
+          }
+        : null,
+    );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [identityEmail, identityName, embedUser?.hash]);
+
+  const bootstrapInFlight = useRef(false);
+
+  // Aplica o resultado de um turno (start/send) ao estado do widget
+  const applyTurn = useCallback((result: TurnResult) => {
+    if (result.conversation) setConversation(result.conversation);
+
+    const store = useWidgetStore.getState();
+    store.setMessages(mergeMessages(store.messages, result.messages ?? []));
+
+    if (result.waiting_for_human) {
+      setIsWaitingForHuman(true);
+    }
+    if (result.auto_resolved && !store.csatSubmitted) {
+      store.setShowCsat(true);
+    }
+    if (result.ai_error) {
+      store.setMessages([
+        ...useWidgetStore.getState().messages,
+        localMessage(
+          "system",
+          "Tive um problema técnico agora, mas sua mensagem foi registrada — nossa equipe vai ver. 🙏",
+        ),
+      ]);
+    }
+  }, [setConversation, setIsWaitingForHuman]);
+
+  const handleTurnError = useCallback((err: unknown) => {
+    console.error("[Widget] Erro no fluxo:", err);
+    const content = err instanceof WidgetApiError && err.code === "rate_limited"
+      ? err.message
+      : "Desculpe, tive um problema ao processar sua mensagem. Tente novamente.";
+    addMessage(localMessage("bot", content));
+  }, [addMessage]);
 
   const startConversation = useCallback(
     async (firstMessage: string, source: "quick_reply" | "text" = "text") => {
       setIsAiResponding(true);
-      // Nova conversa começa limpa (sem estado de espera/atendente herdado)
       setIsWaitingForHuman(false);
       setAgentConnected(false);
 
       try {
-        // 1. Create conversation record in desk_conversations
-        // O cliente vive no Supabase de PRODUÇÃO da Cloudfy, não no do CloudDesk —
-        // logo não tem auth.uid() aqui. Identificamos a conversa por user_email.
-        // account_user_id fica null (a RLS do widget valida por email).
-        const userEmail = embedUser?.email ?? account?.email ?? null;
-        if (!userEmail) {
-          throw new Error("Email do cliente ausente — widget não pode criar conversa");
-        }
-
-        // SLA calculado já no INSERT (anon não tem policy de UPDATE) — o trigger
-        // do banco cobre o fallback quando a migration estiver aplicada.
-        const slaDeadline = await computeSlaDeadline("medium").catch(() => null);
-
-        const { data: convData, error: convError } = await supabase
-          .from("desk_conversations")
-          .insert({
-            account_user_id: null,
-            user_email: userEmail,
-            channel: "chat",
-            status: "open",
-            priority: "medium",
-            subject: firstMessage.slice(0, 60),
-            ai_active: true,
-            sla_deadline: slaDeadline,
-          })
-          .select("id, status, created_at, subject")
-          .single();
-
-        if (convError || !convData) {
-          throw new Error(`Erro ao criar conversa: ${convError?.message ?? "sem dados"}`);
-        }
-
-        setConversation({
-          id: convData.id,
-          status: convData.status,
-          created_at: convData.created_at,
-          subject: convData.subject,
-        });
-
-        // 2. Insert contact message
-        const contactMsg = await insertMessage(convData.id, "contact", firstMessage);
-        if (contactMsg) addMessage(contactMsg);
-
-        // 3. Call Edge Function (server-side OpenAI — no CORS, no key in bundle)
-        const aiResult = await callAiEdgeFunction(
-          convData.id,
-          firstMessage,
-          embedUser?.name  ?? account?.name,
-          embedUser?.email ?? account?.email,
-          source,
-        );
-
-        if (aiResult.blocked) {
-          // AI is disabled for this conversation — do nothing
-        } else if (aiResult.should_handoff) {
-          // Auto-handoff: trava o composer e mostra "aguardando atendente"
-          setIsWaitingForHuman(true);
-          const handoffMsg = await handleHandoff(convData.id);
-          if (handoffMsg) addMessage(handoffMsg);
-        } else if (aiResult.reply) {
-          const botMsg = await insertMessage(convData.id, "bot", aiResult.reply, true, aiResult.metadata);
-          if (botMsg) addMessage(botMsg);
-          // Primeira resposta da IA ao cliente → métrica de tempo de 1ª resposta
-          void markFirstResponse(convData.id);
-        }
+        const result = await widgetApi.start(firstMessage, source);
+        applyTurn(result);
       } catch (err) {
-        console.error("[Widget] Erro no fluxo de IA:", err);
-        addMessage({
-          id: crypto.randomUUID(),
-          conversation_id: "error",
-          sender_type: "bot",
-          content: "Desculpe, tive um problema ao processar sua mensagem. Tente novamente.",
-          created_at: new Date().toISOString(),
-          ai_generated: false,
-          is_private_note: false,
-        });
+        handleTurnError(err);
       } finally {
         setIsAiResponding(false);
       }
     },
-    [account, embedUser, addMessage, setConversation, setIsAiResponding, setIsWaitingForHuman, setAgentConnected]
+    [applyTurn, handleTurnError, setIsAiResponding, setIsWaitingForHuman, setAgentConnected]
   );
 
   const handleSend = useCallback(
@@ -310,310 +239,95 @@ export function ChatWidget({ settings, embedUser }: Props) {
       }
 
       setIsAiResponding(true);
-
       try {
-        // 1. Insert contact message
-        const contactMsg = await insertMessage(conversation.id, "contact", text);
-        if (contactMsg) addMessage(contactMsg);
-
-        // 2. Call Edge Function (server-side OpenAI — no CORS, no key in bundle)
-        const aiResult = await callAiEdgeFunction(
-          conversation.id,
-          text,
-          embedUser?.name  ?? account?.name,
-          embedUser?.email ?? account?.email,
-          source,
-        );
-
-        if (aiResult.blocked) {
-          // AI is disabled for this conversation — do nothing
-        } else if (aiResult.should_handoff) {
-          // Auto-handoff: trava o composer e mostra "aguardando atendente"
-          setIsWaitingForHuman(true);
-          const handoffMsg = await handleHandoff(conversation.id);
-          if (handoffMsg) addMessage(handoffMsg);
-        } else if (aiResult.reply) {
-          const botMsg = await insertMessage(conversation.id, "bot", aiResult.reply, true, aiResult.metadata);
-          if (botMsg) addMessage(botMsg);
-          void markFirstResponse(conversation.id);
-        }
+        const result = await widgetApi.send(conversation.id, text, source);
+        applyTurn(result);
       } catch (err) {
-        console.error("[Widget] Erro no fluxo de IA:", err);
-        const fallback: WidgetMessage = {
-          id: crypto.randomUUID(),
-          conversation_id: conversation.id,
-          sender_type: "bot",
-          content: "Desculpe, tive um problema ao processar sua mensagem. Tente novamente.",
-          created_at: new Date().toISOString(),
-          ai_generated: false,
-          is_private_note: false,
-        };
-        addMessage(fallback);
+        handleTurnError(err);
       } finally {
         setIsAiResponding(false);
       }
     },
-    [account, embedUser, conversation, addMessage, setIsAiResponding, setIsWaitingForHuman, startConversation]
+    [conversation, startConversation, applyTurn, handleTurnError, setIsAiResponding]
   );
 
-  // ── Reenvio de credenciais (disparado pelo CLIENTE ao clicar no botão) ────────
-  // A IA NUNCA dispara isto. O botão só aparece quando o cliente pede de forma
-  // clara (ver desk-ai-respond → [OFERECER_CREDENCIAIS]). Aqui exigimos um cliente
-  // identificado (e-mail conhecido) e o backend revalida a posse da infra antes
-  // de enviar. A confirmação de envio só aparece APÓS sucesso real.
+  // ── Reenvio de credenciais (disparado pelo CLIENTE ao clicar no botão) ───────
+  // A IA NUNCA dispara isto. O backend valida a posse da infra (e-mail verificado
+  // → infra pertence a ele → deploy ativo) ANTES de enviar. A confirmação de
+  // envio é a mensagem de sistema criada server-side após sucesso real.
   const handleResendCredentials = useCallback(
     async (infraId: string): Promise<boolean> => {
       if (!conversation) return false;
 
-      const email = embedUser?.email ?? account?.email;
-      if (!email) {
-        // Cliente não identificado — não há como validar posse nem enviar.
-        const msg = await insertMessage(
-          conversation.id,
-          "system",
-          "Não foi possível confirmar sua identidade para reenviar as credenciais. Faça login novamente e tente de novo.",
-        );
-        if (msg) addMessage(msg);
-        return false;
-      }
-
       try {
-        const { data, error } = await supabase.functions.invoke<{ success?: boolean; error?: string }>(
-          "desk-resend-credentials",
-          { body: { infra_id: infraId, email } },
-        );
-
-        if (error || !data?.success) {
-          const reason = data?.error ?? error?.message ?? "Tente novamente em instantes.";
-          const msg = await insertMessage(
-            conversation.id,
-            "system",
-            `Não consegui reenviar suas credenciais agora. ${reason}`,
-          );
-          if (msg) addMessage(msg);
-          return false;
+        const result = await widgetApi.resendCredentials(conversation.id, infraId);
+        if (result.success) {
+          if (result.message) addMessage(result.message);
+          return true;
         }
-
-        const ok = await insertMessage(
-          conversation.id,
-          "system",
-          "✅ Credenciais reenviadas! Confira seu e-mail e me avise se chegou tudo certinho. 📬",
-        );
-        if (ok) addMessage(ok);
-        return true;
+        addMessage(localMessage("system", `Não consegui reenviar suas credenciais agora. ${result.error ?? "Tente novamente em instantes."}`));
+        return false;
       } catch (err) {
-        console.error("[Widget] Erro ao reenviar credenciais:", err);
-        const msg = await insertMessage(
-          conversation.id,
-          "system",
-          "Tive um problema ao reenviar suas credenciais. Tente novamente em instantes.",
-        );
-        if (msg) addMessage(msg);
+        const reason = err instanceof WidgetApiError ? err.message : "Tente novamente em instantes.";
+        addMessage(localMessage("system", `Não consegui reenviar suas credenciais agora. ${reason}`));
         return false;
       }
     },
-    [account, embedUser, conversation, addMessage]
+    [conversation, addMessage]
   );
 
-  // ── Welcome message: fires once when the widget opens with no existing conversation ──
-  // Calls get-contact-info, builds the greeting in code (no OpenAI), creates the
-  // conversation record and inserts a bot message immediately.
-  useEffect(() => {
-    if (!isOpen) {
-      // Reset guard when widget is closed so it fires again next open
-      welcomeSentRef.current = false;
-      return;
-    }
-    if (conversation) return;           // already has a conversation — skip
-    if (welcomeSentRef.current) return; // already ran this open session
-
-    const email = embedUser?.email ?? account?.email;
-    if (!email) return; // no user — skip (anonymous)
-
-    welcomeSentRef.current = true;
-
-    (async () => {
-      // Identificação por email (cliente vive no Supabase de produção da Cloudfy,
-      // sem auth.uid() aqui). O guard de `email` já foi feito acima.
-      try {
-        // 0. Retomar conversa existente: o store não sobrevive a reload da página.
-        // Sem isto, cada "sair e voltar" criava uma conversa nova e o cliente
-        // perdia o histórico. Buscamos a conversa não-resolvida mais recente do
-        // email e reutilizamos (as mensagens são carregadas pelo ChatWidgetThread).
-        const { data: existing, error: existingErr } = await supabase
-          .from("desk_conversations")
-          .select("id, status, created_at, subject")
-          .eq("user_email", email)
-          .neq("status", "resolved")
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        if (existingErr) {
-          console.warn("[Widget] Busca de conversa existente falhou:", existingErr.message);
-        }
-
-        if (existing) {
-          setConversation({
-            id: existing.id,
-            status: existing.status,
-            created_at: existing.created_at,
-            subject: existing.subject,
-          });
-          // Conversa aguardando humano → restaura o estado de espera do composer
-          if (existing.status === "pending") setIsWaitingForHuman(true);
-          return; // sem nova mensagem de boas-vindas — o thread já tem histórico
-        }
-
-        // 1. Fetch contact info — no OpenAI, just CRM (Supabase de produção)
-        const { data: contactData } = await supabase.functions.invoke<ContactInfo>(
-          "get-contact-info",
-          { body: { email } },
-        );
-
-        if (contactData?.infras) setInfras(contactData.infras);
-
-        const welcomeText = contactData ? buildWelcomeMessage(contactData) : null;
-        if (!welcomeText) return;
-
-        // 2. Create conversation record (account_user_id null — RLS valida por email)
-        const slaDeadline = await computeSlaDeadline("medium").catch(() => null);
-        const { data: convData, error: convError } = await supabase
-          .from("desk_conversations")
-          .insert({
-            account_user_id: null,
-            user_email: email,
-            channel: "chat",
-            status: "open",
-            priority: "medium",
-            subject: "Atendimento via widget",
-            ai_active: true,
-            sla_deadline: slaDeadline,
-          })
-          .select("id, status, created_at, subject")
-          .single();
-
-        if (convError || !convData) return;
-
-        setConversation({
-          id: convData.id,
-          status: convData.status,
-          created_at: convData.created_at,
-          subject: convData.subject,
-        });
-
-        // 3. Insert welcome bot message (ai_generated = false — built by code, not OpenAI)
-        const botMsg = await insertMessage(convData.id, "bot", welcomeText, false);
-        if (botMsg) addMessage(botMsg);
-      } catch (err) {
-        console.error("[Widget] Welcome message error:", err);
-      }
-    })();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen]);
-
-  // ── Load infras into the store ──────────────────────────────────────────────
-  // Independent of the welcome flow (which only runs for brand-new conversations).
-  // Guarantees the client's infra list is available whenever the widget is open
-  // with a known email — used to map an infra name chosen via quick-reply chip
-  // back to its infra_id (credential-resend flow, see ChatWidgetThread).
+  // ── Bootstrap: retoma conversa aberta OU mostra welcome efêmera ──────────────
+  // Roda quando o widget abre sem conversa carregada. A conversa só é CRIADA
+  // quando o cliente envia a primeira mensagem (nada de conversas vazias na inbox).
   useEffect(() => {
     if (!isOpen) return;
-    if (infras.length > 0) return; // already loaded this session
+    if (conversation) return;
+    if (!identityEmail) return;
+    if (bootstrapInFlight.current) return;
 
-    const email = embedUser?.email ?? account?.email;
-    if (!email) return;
+    const store = useWidgetStore.getState();
+    if (store.messages.length > 0) return; // welcome já exibida nesta sessão
 
-    let cancelled = false;
+    bootstrapInFlight.current = true;
+
     (async () => {
       try {
-        const { data } = await supabase.functions.invoke<ContactInfo>(
-          "get-contact-info",
-          { body: { email } },
-        );
-        if (!cancelled && data?.infras) setInfras(data.infras);
+        const boot = await widgetApi.bootstrap();
+
+        if (boot.contact?.infras) setInfras(boot.contact.infras);
+
+        if (boot.conversation) {
+          setConversation(boot.conversation);
+          setMessages(boot.messages ?? []);
+          if (boot.conversation.status === "pending") {
+            if (boot.conversation.assigned_agent_id) setAgentConnected(true);
+            else setIsWaitingForHuman(true);
+          }
+          return;
+        }
+
+        // Sem conversa aberta → saudação personalizada local (efêmera)
+        const welcomeText = boot.contact ? buildWelcomeMessage(boot.contact) : null;
+        if (welcomeText) {
+          setMessages([{ ...localMessage("bot", welcomeText), id: "local-welcome" }]);
+        }
       } catch (err) {
-        console.error("[Widget] Falha ao carregar infras:", err);
+        console.error("[Widget] Bootstrap falhou:", err);
+      } finally {
+        bootstrapInFlight.current = false;
       }
     })();
-
-    return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, embedUser?.email, account?.email]);
+  }, [isOpen, conversation?.id, identityEmail]);
 
-  // ── Realtime: CSAT quando a conversa é resolvida ─────────────────────────────
-  // Sempre ativo enquanto há conversa. Quando status vira 'resolved' e o cliente
-  // ainda não avaliou, mostra o formulário de CSAT (😞😐😊) no lugar do composer.
+  // ── Realtime: canal de broadcast único conv-live:{id} ────────────────────────
+  // Mantido vivo enquanto há conversa (mesmo minimizado). Eventos:
+  //   new_message  → mensagens do operador (o painel publica após INSERT)
+  //   conv_updated → mudanças de status/atribuição (painel e servidor publicam)
   useEffect(() => {
     const convId = conversation?.id;
     if (!convId) return;
 
-    const channel = supabase
-      .channel(`widget-csat:${convId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "desk_conversations",
-          filter: `id=eq.${convId}`,
-        },
-        (payload) => {
-          const conv = payload.new as Record<string, unknown>;
-          const store = useWidgetStore.getState();
-          if (conv.status === "resolved" && !store.csatSubmitted) {
-            store.setShowCsat(true);
-          }
-        }
-      )
-      .subscribe();
-
-    return () => { supabase.removeChannel(channel); };
-  }, [conversation?.id]);
-
-  // ── Realtime: detect an operator taking over the conversation ───────────────
-  // While the client waits for a human, we watch desk_conversations for the
-  // moment an operator assumes it: assigned_agent_id becomes non-null (usually
-  // alongside status going back to 'open'). When that happens we surface a
-  // "✅ Atendente conectado" banner and unlock the composer.
-  useEffect(() => {
-    const convId = conversation?.id;
-    if (!convId || !isWaitingForHuman) return;
-
-    const channel = supabase
-      .channel(`widget-agent-takeover:${convId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "desk_conversations",
-          filter: `id=eq.${convId}`,
-        },
-        (payload) => {
-          const conv = payload.new as Record<string, unknown>;
-          const assigned = conv.assigned_agent_id;
-          // Operator assumed the conversation
-          if (assigned !== null && assigned !== undefined && assigned !== "") {
-            setAgentConnected(true);
-            setIsWaitingForHuman(false);
-          }
-        }
-      )
-      .subscribe();
-
-    return () => { supabase.removeChannel(channel); };
-  }, [conversation?.id, isWaitingForHuman, setIsWaitingForHuman, setAgentConnected]);
-
-  // ── Realtime: subscribe at the ChatWidget level (NOT inside ChatWidgetThread)
-  // This runs before any isOpen/conversation guard, so the subscription stays alive
-  // even when the widget is minimised. Keyed on conversation.id so it re-subscribes
-  // if the conversation ever changes.
-  useEffect(() => {
-    const convId = conversation?.id;
-    if (!convId) return;
-
-    // Helper: safely add a message to the store
     const addToStore = (raw: Record<string, unknown>) => {
       try {
         if (!raw.id || !raw.created_at) return;
@@ -634,12 +348,9 @@ export function ChatWidget({ settings, embedUser }: Props) {
         const current = Array.isArray(store.messages) ? store.messages : [];
         if (current.some((m) => m.id === newMsg.id)) return;
 
-        console.log(`[Widget] new message — sender: ${newMsg.sender_type}`);
-        store.setMessages([...current, newMsg]);
+        store.setMessages(mergeMessages(current, [newMsg]));
 
         // Destrava o composer assim que um operador humano responde.
-        // Caminho mais confiável que o UPDATE de desk_conversations (que pode ser
-        // bloqueado por RLS): desk_messages já tem Realtime + broadcast escutados aqui.
         if (newMsg.sender_type === "agent" && store.isWaitingForHuman) {
           store.setIsWaitingForHuman(false);
           store.setAgentConnected(true);
@@ -649,50 +360,77 @@ export function ChatWidget({ settings, embedUser }: Props) {
       }
     };
 
-    // Channel 1: postgres_changes (fires when Realtime is enabled on the table)
-    const pgChannel = supabase
-      .channel(`widget-conv:${convId}`)
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "desk_messages" },
-        (payload) => {
-          try {
-            if (!payload?.new || typeof payload.new !== "object") return;
-            console.log("PAYLOAD RECEBIDO NO WIDGET (postgres):", payload.new);
-            const raw = payload.new as Record<string, unknown>;
-            if (raw.conversation_id !== convId) return;
-            addToStore(raw);
-          } catch (err) {
-            console.error("[Widget] postgres_changes callback error:", err);
-          }
-        }
-      )
-      .subscribe((status) => {
-        console.log(`[Widget] postgres_changes → ${status}`);
-      });
+    const handleConvUpdated = (payload: Record<string, unknown>) => {
+      const store = useWidgetStore.getState();
+      const status = typeof payload.status === "string" ? payload.status : null;
+      const assigned = payload.assigned_agent_id;
 
-    // Channel 2: broadcast (sent by ConversationThread after agent INSERT)
-    // This is the reliable fallback path that doesn't depend on publication settings.
-    const broadcastChannel = supabase
+      if (status) {
+        const conv = store.conversation;
+        if (conv) store.setConversation({ ...conv, status });
+
+        if (status === "resolved") {
+          store.setIsWaitingForHuman(false);
+          if (!store.csatSubmitted) store.setShowCsat(true);
+        } else if (status === "pending") {
+          if (!store.agentConnected) store.setIsWaitingForHuman(true);
+        } else if (status === "open") {
+          store.setShowCsat(false);
+        }
+      }
+
+      if (assigned !== null && assigned !== undefined && assigned !== "") {
+        store.setAgentConnected(true);
+        store.setIsWaitingForHuman(false);
+      }
+    };
+
+    const channel = supabase
       .channel(`conv-live:${convId}`)
       .on("broadcast", { event: "new_message" }, ({ payload }) => {
-        try {
-          if (!payload || !payload.id) return;
-          console.log("PAYLOAD RECEBIDO NO WIDGET (broadcast):", payload);
-          addToStore(payload as Record<string, unknown>);
-        } catch (err) {
-          console.error("[Widget] broadcast callback error:", err);
-        }
+        if (payload?.id) addToStore(payload as Record<string, unknown>);
+      })
+      .on("broadcast", { event: "conv_updated" }, ({ payload }) => {
+        if (payload) handleConvUpdated(payload as Record<string, unknown>);
       })
       .subscribe((status) => {
-        console.log(`[Widget] broadcast channel conv-live:${convId} → ${status}`);
+        console.log(`[Widget] broadcast conv-live:${convId} → ${status}`);
       });
 
     return () => {
-      supabase.removeChannel(pgChannel);
-      supabase.removeChannel(broadcastChannel);
+      supabase.removeChannel(channel);
     };
-  }, [conversation?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [conversation?.id]);
+
+  // ── Re-sync ao voltar o foco para a aba (recupera eventos perdidos) ──────────
+  useEffect(() => {
+    const convId = conversation?.id;
+    if (!convId) return;
+
+    let syncing = false;
+    const onVisible = async () => {
+      if (document.visibilityState !== "visible" || syncing) return;
+      syncing = true;
+      try {
+        const result = await widgetApi.messages(convId);
+        const store = useWidgetStore.getState();
+        store.setMessages(mergeMessages(store.messages, result.messages ?? []));
+        if (result.conversation) {
+          store.setConversation(result.conversation);
+          if (result.conversation.status === "resolved" && !store.csatSubmitted) {
+            store.setShowCsat(true);
+          }
+        }
+      } catch {
+        // silencioso — próximo foco tenta de novo
+      } finally {
+        syncing = false;
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [conversation?.id]);
 
   if (!isOpen) return null;
 
@@ -703,11 +441,11 @@ export function ChatWidget({ settings, embedUser }: Props) {
         onlineAgents={2}
       />
 
-      {!conversation ? (
+      {!conversation && messages.length === 0 ? (
         <>
           <ChatWidgetWelcome
             greeting={settings.greeting}
-            accountName={embedUser?.name ?? account?.name ?? null}
+            accountName={identityName ?? null}
             quickActions={settings.quick_actions}
             onQuickAction={(action) => startConversation(action, "quick_reply")}
             onSendMessage={startConversation}
@@ -718,19 +456,16 @@ export function ChatWidget({ settings, embedUser }: Props) {
         <>
           <ChatWidgetThread
             messages={messages}
-            conversationId={conversation.id}
+            conversationId={conversation?.id ?? "local"}
             onSend={handleSend}
             onResendCredentials={handleResendCredentials}
           />
-          {showCsat ? (
-            <CSATFeedback
-              conversationId={conversation.id}
-              accountUserId={embedUser?.id ?? null}
-            />
+          {showCsat && conversation ? (
+            <CSATFeedback conversationId={conversation.id} />
           ) : (
             <>
               {/* Transferência só acontece quando a IA decide (should_handoff) —
-                  não há mais botão manual de "Falar com humano". */}
+                  não há botão manual de "Falar com humano". */}
 
               {/* Aguardando atendente humano */}
               {isWaitingForHuman && (

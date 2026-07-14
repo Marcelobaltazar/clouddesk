@@ -20,6 +20,7 @@ import { format, formatDistanceToNow } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { broadcastConvUpdated } from "@/lib/conv-broadcast";
 import type { Conversation } from "@/stores/useInboxStore";
 
 // ─── Agent types ──────────────────────────────────────────────────────────────
@@ -226,6 +227,8 @@ function AssigneeSection({ conversation }: { conversation: { id: string; assigne
     if (error) { toast.error("Erro ao atribuir conversa"); return; }
 
     upsertConversation({ id: conversation.id, assigned_agent_id: agentId } as Record<string, unknown>);
+    // Widget mostra "✅ Atendente conectado" quando alguém assume
+    if (agentId) void broadcastConvUpdated(conversation.id, { assigned_agent_id: agentId });
 
     const msg = agentId
       ? `Conversa atribuída para ${agents.find((a) => a.id === agentId)?.name ?? "agente"}`

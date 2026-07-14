@@ -14,6 +14,8 @@ export interface WidgetConversation {
   status: string;
   created_at: string;
   subject: string | null;
+  assigned_agent_id?: string | null;
+  ai_active?: boolean;
 }
 
 // Type alias (não interface) para ser atribuível a Json — ver WidgetMessageMetadata.

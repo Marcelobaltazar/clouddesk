@@ -168,12 +168,13 @@ export default function WidgetPreview() {
           <div className="rounded-lg border border-border bg-card p-6">
             <h2 className="text-lg font-semibold text-foreground mb-2">Comportamento esperado</h2>
             <ul className="text-sm text-muted-foreground space-y-1.5 list-disc pl-4">
+              <li><strong className="text-foreground">Requer login de operador</strong> — o backend do widget verifica identidade (HMAC no site real; aqui, sua sessão de operador)</li>
               <li>Clique no ícone 💬 no canto inferior direito para abrir o widget</li>
               <li>O widget usa o nome e email do cliente aplicado acima</li>
               <li>Trocar o email reseta a conversa — nova mensagem cria nova thread</li>
               <li>Quick actions iniciam uma conversa imediatamente</li>
-              <li>A IA responde automaticamente via Edge Function</li>
-              <li>Botão "Falar com humano" escala para operador na inbox</li>
+              <li>A IA responde automaticamente via Edge Function (desk-widget-api)</li>
+              <li>A transferência para humano acontece quando a IA decide (sem botão manual)</li>
             </ul>
           </div>
         </div>

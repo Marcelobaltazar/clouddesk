@@ -14,6 +14,7 @@ import { differenceInSeconds } from "date-fns";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { timeAgoShort, timeUntilShort } from "@/lib/dates";
+import { broadcastConvUpdated } from "@/lib/conv-broadcast";
 
 // ─── Tab config ───────────────────────────────────────────────────────────────
 
@@ -306,6 +307,9 @@ export function ConversationList() {
       toast.error("Erro ao resolver conversas");
       return;
     }
+
+    // Widgets abertos dessas conversas mostram o CSAT ao receber o evento
+    for (const id of ids) void broadcastConvUpdated(id, { status: "resolved" });
 
     for (const id of ids) removeConversation(id);
     clearSelection();

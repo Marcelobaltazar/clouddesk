@@ -9,6 +9,7 @@ $PROJECT_REF = "tgjvjgvbqckoqjtgbjqx"
 # desk-generate-embedding foi removida: nao existe source no repo (funcao legada
 # ainda deployada; scripts/generate-kb-embeddings.ts depende dela).
 $functions = @(
+    "desk-widget-api",
     "desk-ai-respond",
     "get-contact-info",
     "desk-embed-article",

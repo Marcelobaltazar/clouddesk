@@ -4,6 +4,7 @@ import { ChatWidget, type EmbedUser } from "@/components/widget/ChatWidget";
 import { ChatBubbleButton } from "@/components/widget/ChatBubbleButton";
 import { useWidgetStore } from "@/components/widget/useWidgetStore";
 import { DEFAULT_SETTINGS } from "@/components/widget/types";
+import { configureWidgetApi, widgetApi } from "@/lib/widget-api";
 // CSS do widget como STRING (?inline): o Vite não emite/injeta CSS no build de
 // biblioteca (IIFE). Injetamos manualmente no bootstrap para o widget ter estilo
 // no site host (que não tem o CSS do app). Ver widget.css.
@@ -15,36 +16,19 @@ interface CloudfyUser {
   id: string;
   email: string;
   name: string;
+  /**
+   * Identidade verificada (obrigatória em produção):
+   *   hash = HMAC_SHA256(WIDGET_IDENTITY_SECRET, lowercase(email)) em hex,
+   * calculado SERVER-SIDE pelo backend do cloudfy.space (nunca no navegador).
+   * Sem um hash válido o backend recusa todas as ações do widget.
+   */
+  hash?: string;
 }
 
 declare global {
   interface Window {
     CloudfyUser?: CloudfyUser;
     CloudDeskWidget?: { destroy: () => void };
-  }
-}
-
-// ── Eligibility check via Edge Function ───────────────────────────────────────
-
-const EDGE_FN_URL =
-  `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/check-widget-eligibility`;
-
-async function checkEligibility(email: string): Promise<boolean> {
-  try {
-    const res = await fetch(EDGE_FN_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email }),
-    });
-    if (!res.ok) {
-      console.warn(`[CloudDesk] check-widget-eligibility HTTP ${res.status} — widget não renderiza`);
-      return false;
-    }
-    const json = (await res.json()) as { eligible: boolean };
-    return json.eligible === true;
-  } catch (err) {
-    console.warn("[CloudDesk] check-widget-eligibility falhou — widget não renderiza:", err);
-    return false;
   }
 }
 
@@ -69,14 +53,30 @@ function EmbedRoot({ embedUser }: { embedUser: EmbedUser }) {
   const raw = window.CloudfyUser;
   if (!raw?.id || !raw?.email) return; // not logged in
 
-  const eligible = await checkEligibility(raw.email);
-  if (!eligible) return; // Intercom handles this user
-
   const embedUser: EmbedUser = {
     id:    raw.id,
     email: raw.email,
     name:  raw.name ?? raw.email,
+    hash:  raw.hash,
   };
+
+  // Gate de identidade/elegibilidade: uma chamada leve ao gateway. Se a
+  // identidade não verificar (hash ausente/errado), o widget NÃO renderiza —
+  // sem erros na página do host.
+  configureWidgetApi({
+    email: embedUser.email,
+    name: embedUser.name,
+    userHash: embedUser.hash,
+    accountUserId: embedUser.id,
+  });
+
+  try {
+    const { eligible } = await widgetApi.hello();
+    if (!eligible) return;
+  } catch (err) {
+    console.warn("[CloudDesk] verificação de identidade falhou — widget não renderiza:", err);
+    return;
+  }
 
   // Injeta o CSS do widget uma única vez. Sem isto o widget renderiza sem estilo
   // (o site host não tem o CSS do app). Guard por id evita duplicar em re-init.

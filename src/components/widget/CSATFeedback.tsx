@@ -1,19 +1,18 @@
 import { useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { widgetApi } from "@/lib/widget-api";
 import { useWidgetStore } from "./useWidgetStore";
 
 interface Props {
-  conversationId?: string | null;
-  /** auth user id do cliente no Supabase de produção da Cloudfy (embedUser.id) */
-  accountUserId?: string | null;
+  conversationId: string;
 }
 
-export function CSATFeedback({ conversationId, accountUserId }: Props) {
+export function CSATFeedback({ conversationId }: Props) {
   const { setCsatSubmitted, setShowCsat } = useWidgetStore();
   const [selected, setSelected] = useState<number | null>(null);
   const [comment, setComment] = useState("");
   const [submitted, setSubmitted] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [reopened, setReopened] = useState(false);
 
   const emojis = [
     { value: 1, emoji: "😞", label: "Ruim" },
@@ -25,30 +24,33 @@ export function CSATFeedback({ conversationId, accountUserId }: Props) {
     if (selected === null || saving) return;
     setSaving(true);
 
-    // account_user_id é NOT NULL no schema — usa o id do cliente na Cloudfy.
-    // Falha de gravação não bloqueia o agradecimento (UX primeiro, métrica depois).
-    if (conversationId && accountUserId) {
-      const { error } = await supabase.from("desk_csat").insert({
-        conversation_id: conversationId,
-        account_user_id: accountUserId,
-        rating: selected,
-        comment: comment.trim() || null,
-      });
-      if (error) console.warn("[CSAT] Falha ao salvar avaliação:", error.message);
-    } else {
-      console.warn("[CSAT] Sem conversationId/accountUserId — avaliação não persistida");
+    // Gravação via desk-widget-api (identidade verificada; account_user_id
+    // resolvido server-side). Avaliação 😞 reabre a conversa para follow-up
+    // humano — falha de gravação não bloqueia o agradecimento.
+    let wasReopened = false;
+    try {
+      const result = await widgetApi.csat(conversationId, selected, comment.trim() || undefined);
+      wasReopened = result.reopened_for_follow_up === true;
+      if (wasReopened) setReopened(true);
+    } catch (err) {
+      console.warn("[CSAT] Falha ao salvar avaliação:", err);
     }
 
     setSaving(false);
     setSubmitted(true);
     setCsatSubmitted(true);
-    setTimeout(() => setShowCsat(false), 2000);
+    setTimeout(() => setShowCsat(false), wasReopened ? 4000 : 2000);
   };
 
   if (submitted) {
     return (
       <div className="p-4 text-center">
         <p className="text-sm font-medium text-foreground">Obrigado pelo feedback! 🎉</p>
+        {reopened && (
+          <p className="text-xs text-muted-foreground mt-1">
+            Sentimos muito pela experiência — um atendente vai acompanhar seu caso. 🙏
+          </p>
+        )}
       </div>
     );
   }
@@ -83,9 +85,10 @@ export function CSATFeedback({ conversationId, accountUserId }: Props) {
           />
           <button
             onClick={handleSubmit}
-            className="w-full py-2 rounded-lg bg-primary text-primary-foreground text-xs font-medium hover:bg-primary/90 transition-colors"
+            disabled={saving}
+            className="w-full py-2 rounded-lg bg-primary text-primary-foreground text-xs font-medium hover:bg-primary/90 transition-colors disabled:opacity-60"
           >
-            Enviar avaliação
+            {saving ? "Enviando..." : "Enviar avaliação"}
           </button>
         </>
       )}

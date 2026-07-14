@@ -1,5 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.98.0';
 import { corsHeaders } from '../_shared/cors.ts';
+import { verifyOperator } from '../_shared/widget-auth.ts';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 // Same shape as before — consumers (ChatWidget, ClientInfoPanel, desk-ai-respond)
@@ -107,6 +108,17 @@ Deno.serve(async (req) => {
   }
 
   try {
+    // Dados de cliente (nome, assinaturas, infra) são sensíveis: apenas
+    // OPERADORES autenticados do painel podem consultar por e-mail arbitrário.
+    // O widget não chama mais esta função — usa desk-widget-api (identidade HMAC).
+    const operatorId = await verifyOperator(req);
+    if (!operatorId) {
+      return new Response(
+        JSON.stringify({ error: 'Apenas operadores autenticados' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      );
+    }
+
     const { email }: ContactInfoRequest = await req.json();
 
     if (!email || typeof email !== 'string') {

@@ -16,6 +16,7 @@ import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { broadcastConvUpdated } from "@/lib/conv-broadcast";
 
 // ─── Snooze options ─────────────────────────────────────────────────────────
 // Each option resolves to an absolute datetime relative to "now".
@@ -442,6 +443,8 @@ export function ConversationThread() {
       sender_type: "system",
       content: `Conversa atribuída para ${agent.name}`,
     });
+    // Widget mostra "✅ Atendente conectado" e destrava o composer
+    void broadcastConvUpdated(activeConversationId!, { assigned_agent_id: agent.id });
   };
   assignToMeRef.current = handleAssignToMe;
 
@@ -451,7 +454,9 @@ export function ConversationThread() {
       .update({ status: "resolved", resolved_at: new Date().toISOString() })
       .eq("id", activeConversationId);
 
-    if (error) toast.error("Erro ao resolver conversa");
+    if (error) { toast.error("Erro ao resolver conversa"); return; }
+    // Widget mostra o CSAT ao receber status resolved
+    void broadcastConvUpdated(activeConversationId!, { status: "resolved" });
   };
 
   // Reabre uma conversa resolvida (o cliente também reabre implicitamente ao
@@ -469,6 +474,7 @@ export function ConversationThread() {
       sender_type: "system",
       content: "Conversa reaberta pelo atendimento",
     });
+    void broadcastConvUpdated(activeConversationId!, { status: "open" });
     toast.success("Conversa reaberta");
   };
 
@@ -488,6 +494,7 @@ export function ConversationThread() {
       sender_type: "system",
       content: next ? "IA reativada nesta conversa" : "IA pausada — atendimento humano assumiu",
     });
+    void broadcastConvUpdated(activeConversationId!, { ai_active: next });
     toast.success(next ? "IA reativada" : "IA pausada");
   };
 
@@ -599,6 +606,14 @@ export function ConversationThread() {
         .update(statusUpdate)
         .eq("id", activeConversationId);
 
+      // Notifica o widget das mudanças de estado (resolved / open / IA pausada)
+      const convUpdate: { status?: string; ai_active?: boolean } = {};
+      if (typeof statusUpdate.status === "string") convUpdate.status = statusUpdate.status;
+      if (pauseAI) convUpdate.ai_active = false;
+      if (Object.keys(convUpdate).length > 0) {
+        void broadcastConvUpdated(activeConversationId!, convUpdate);
+      }
+
       // Mensagem de sistema visível ao cliente marcando o handoff (só quando a IA
       // acabou de ser pausada — evita spam a cada resposta).
       if (pauseAI) {
@@ -636,14 +651,14 @@ export function ConversationThread() {
 
     setSuggesting(true);
     try {
+      // O pipeline deriva nome/e-mail da própria conversa (server-side) —
+      // nada de identidade vinda do body.
       const { data, error } = await supabase.functions.invoke<{ reply: string | null }>(
         "desk-ai-respond",
         {
           body: {
             conversation_id: activeConversationId,
             message: lastContactMsg.content,
-            account_name: conversation.contact?.name ?? undefined,
-            account_email: conversation.contact?.email ?? conversation.user_email ?? undefined,
             mode: "draft",
           },
         },

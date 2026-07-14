@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Bot, User, KeyRound, Loader2, Check } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
-import { supabase } from "@/integrations/supabase/client";
 import type { WidgetMessage } from "./types";
 import { useWidgetStore } from "./useWidgetStore";
 
@@ -97,47 +96,9 @@ export function ChatWidgetThread({ messages, conversationId, onSend, onResendCre
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages.length, isTyping, isAiResponding]);
 
-  // ── Effect 1: initial load ───────────────────────────────────────────────────
-  // Runs once per conversationId. Merges DB results with any messages already in
-  // the store (e.g. optimistic inserts that arrived before this effect ran).
-  useEffect(() => {
-    if (!conversationId) return;
-
-    // Cast the query builder to a thenable of a plain shape. Selecting `metadata`
-    // (a recursive Json type) pushes Supabase's generic inference past its depth
-    // limit (TS2589); narrowing the result type here keeps the chain shallow.
-    const query = supabase
-      .from("desk_messages")
-      .select("id, conversation_id, sender_type, content, created_at, ai_generated, is_private_note, metadata")
-      .eq("conversation_id", conversationId)
-      .eq("is_private_note", false)
-      .order("created_at", { ascending: true }) as unknown as PromiseLike<{
-        data: WidgetMessage[] | null;
-        error: { message: string } | null;
-      }>;
-
-    query.then(({ data, error }) => {
-        if (error) {
-          console.error("[Widget] loadMessages error:", error.message);
-          return;
-        }
-        if (!data) return;
-
-        // Merge: keep any messages already in store that aren't in the DB result
-        // (shouldn't happen, but guards against race conditions).
-        const dbMessages = data;
-        const { messages: inStore, setMessages } = useWidgetStore.getState();
-        const dbIds = new Set(dbMessages.map((m) => m.id));
-        const onlyInStore = inStore.filter((m) => !dbIds.has(m.id));
-        const merged = [...dbMessages, ...onlyInStore].sort(
-          (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-        );
-        setMessages(merged);
-      });
-  }, [conversationId]);
-
-  // Realtime subscription lives in ChatWidget.tsx (parent) — not here.
-  // This component is only responsible for rendering messages and the initial load.
+  // O carregamento de mensagens acontece no ChatWidget (via desk-widget-api,
+  // com identidade verificada) — este componente apenas renderiza. O acesso
+  // direto a desk_messages foi removido junto com as policies anônimas.
 
   // ── Render ───────────────────────────────────────────────────────────────────
 

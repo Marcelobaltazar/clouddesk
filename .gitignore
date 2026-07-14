@@ -40,3 +40,6 @@ supabase/functions/.env
 
 # Supabase CLI local state (muda sozinho a cada comando — não versionar)
 supabase/.temp/
+
+# Segredo HMAC do widget (vai para Supabase Secrets + backend do cloudfy.space)
+.widget-identity-secret.local
