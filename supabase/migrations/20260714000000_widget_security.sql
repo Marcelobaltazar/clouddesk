@@ -96,3 +96,67 @@ $$;
 -- conceder a service_role deixaria a própria Edge Function sem acesso)
 REVOKE EXECUTE ON FUNCTION public.desk_rate_limit_hit(text, integer, integer) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.desk_rate_limit_hit(text, integer, integer) TO service_role;
+
+-- ── 5. Tabelas sem RLS apontadas pelo Security Advisor (14/07/2026) ─────────────
+-- Todas expostas via PostgREST com a anon key pública. Habilita RLS em todas;
+-- policies apenas onde o painel precisa (operadores). Edge Functions usam
+-- service role e não são afetadas.
+
+-- desk_conversation_tags: policies de agente JÁ existem — faltava ligar o RLS
+ALTER TABLE public.desk_conversation_tags ENABLE ROW LEVEL SECURITY;
+
+-- Tabelas internas do desk: acesso somente de operadores
+DO $$
+DECLARE
+  t text;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['desk_activity_log', 'desk_contact_notes', 'desk_macros', 'desk_routing_rules']
+  LOOP
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = t) THEN
+      EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
+      EXECUTE format('DROP POLICY IF EXISTS "agents_full_access_%s" ON public.%I', t, t);
+      EXECUTE format(
+        'CREATE POLICY "agents_full_access_%s" ON public.%I FOR ALL USING (public.is_desk_agent()) WITH CHECK (public.is_desk_agent())',
+        t, t
+      );
+    END IF;
+  END LOOP;
+END $$;
+
+-- desk_ai_config guarda api_key → SOMENTE admins (service role bypassa RLS)
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'desk_ai_config') THEN
+    ALTER TABLE public.desk_ai_config ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS "admins_full_access_ai_config" ON public.desk_ai_config;
+    CREATE POLICY "admins_full_access_ai_config"
+      ON public.desk_ai_config FOR ALL
+      USING (public.is_desk_admin()) WITH CHECK (public.is_desk_admin());
+  END IF;
+END $$;
+
+-- purchases (cópia local usada pelo painel de detalhes): operadores leem
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'purchases') THEN
+    ALTER TABLE public.purchases ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS "agents_read_purchases" ON public.purchases;
+    CREATE POLICY "agents_read_purchases"
+      ON public.purchases FOR SELECT
+      USING (public.is_desk_agent());
+  END IF;
+END $$;
+
+-- Tabelas legadas sem uso no frontend: RLS ligado SEM policies (nega tudo
+-- que não for service role)
+DO $$
+DECLARE
+  t text;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['products', 'infrastructure', 'guides', 'steps']
+  LOOP
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = t) THEN
+      EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
+    END IF;
+  END LOOP;
+END $$;
