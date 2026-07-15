@@ -126,6 +126,8 @@ const PROMPT_BLOCK_RE =
 export const _test = {
   INFRA_DOWN_RE: () => INFRA_DOWN_RE,
   BLOCKED_PAYMENT_RE: () => BLOCKED_PAYMENT_RE,
+  CANCEL_RE: () => CANCEL_RE,
+  CANCEL_FAIL_RE: () => CANCEL_FAIL_RE,
   friendlyDeployStatus: (v: string | null) => friendlyDeployStatus(v),
 };
 
@@ -151,7 +153,10 @@ function sanitizeName(name: string | undefined): string | undefined {
 const PLAN_HIERARCHY = ['max', 'ultra', 'advanced', 'starter'] as const;
 type PlanTag = (typeof PLAN_HIERARCHY)[number] | 'sem-plano';
 
-function detectPlanTag(subscriptions: ContactSubscription[]): PlanTag {
+// Exportado: o gateway grava a tag do plano JÁ NA CRIAÇÃO da conversa, para as
+// Visualizações do painel contarem certo desde o primeiro segundo (o pipeline
+// continua atualizando a cada turno).
+export function detectPlanTag(subscriptions: ContactSubscription[]): PlanTag {
   const active = subscriptions.filter((s) => {
     const st = (s.status ?? '').toLowerCase();
     return st === 'active' || st === 'completed';
@@ -351,8 +356,17 @@ async function generateEmbedding(text: string): Promise<number[]> {
 const INFRA_DOWN_RE =
   /(fora do ar|off-?line|caiu|derrubad|fora de servi[çc]o|indispon[ií]vel|n[ãa]o (est[áa] )?(abrindo|funcionando|carregando|respondendo)|n[ãa]o (abre|funciona|carrega|responde|entra|conecta|acessa)|n[ãa]o consigo (abrir|acessar|entrar|logar)|erro\s*(404|500|502|503)|\b(404|502|503)\b|p[áa]gina de erro|not found|bad gateway|gateway time-?out)/i;
 
+// "assinatura" NÃO entra aqui: sozinha é ampla demais (ex.: "cancelar minha
+// assinatura" é cancelamento, não billing — e cancelamento tem precedência).
 const BLOCKED_PAYMENT_RE =
-  /(bloquead|desbloquear|pag(uei|amento|ou|ar)|\bpago\b|fatura|cobran[çc]|assinatura|inadimpl|regulariz|liberar|reativar|voltar (a )?(funcionar|ativa))/i;
+  /(bloquead|desbloquear|pag(uei|amento|ou|ar)|\bpago\b|fatura|cobran[çc]|reembolso|estorno|cart[ãa]o|inadimpl|regulariz|liberar|reativar|voltar (a )?(funcionar|ativa))/i;
+
+// Cancelamento: menção ao ato de cancelar/encerrar a assinatura…
+const CANCEL_RE =
+  /(cancelar|cancelamento|\bcancela\b|\bcancelei\b|encerrar (a |minha )?(assinatura|conta|plano)|desistir d)/i;
+// …combinada com sinal de FALHA/frustração (não consegue, tentou, deu erro).
+const CANCEL_FAIL_RE =
+  /(n[ãa]o (consigo|consegui|estou conseguindo|deixa|funciona|aparece|acho|encontro)|tent(ei|ando)|imposs[ií]vel|d[áa] erro|deu erro|sem sucesso|de novo|novamente|j[áa] (pedi|solicitei|falei))/i;
 
 const PROBE_TIMEOUT_MS = 6_000;
 const MAX_PROBED_INFRAS = 3;
@@ -981,19 +995,25 @@ export async function runAiPipeline(
   const blockedInfras = allInfras.filter((i) => String(i.status ?? '').toUpperCase() === 'BLOCKED');
   const deployedInfras = allInfras.filter(isActiveInfra);
 
-  // Persiste o handoff (pending + IA pausada) e loga — helper dos guards de billing.
-  const persistBillingHandoff = async (reply: string, model: string): Promise<PipelineOutcome> => {
+  // Persiste o handoff (pending + IA pausada) e loga — helper dos guards
+  // determinísticos (billing, infra bloqueada, cancelamento).
+  const persistGuardHandoff = async (
+    reply: string,
+    model: string,
+    intent: string,
+    urgency: 'alta' | 'critica' = 'alta',
+  ): Promise<PipelineOutcome> => {
     const { error: handoffErr } = await supabase
       .from('desk_conversations')
       .update({ status: 'pending', ai_active: false })
       .eq('id', conversationId);
     if (handoffErr) {
-      console.error('[AI] Guard billing: persistir handoff falhou:', handoffErr.message);
+      console.error(`[AI] Guard ${model}: persistir handoff falhou:`, handoffErr.message);
     } else {
       void broadcastToConversation(conversationId, 'conv_updated', { status: 'pending', ai_active: false });
     }
     const syntheticAnalysis: MessageAnalysis = {
-      intent: 'billing', sentiment: 'negativo', urgency: 'alta', resolved: false,
+      intent, sentiment: 'negativo', urgency, resolved: false,
     };
     void applyAnalysis(supabase, conversationId, syntheticAnalysis);
     void logInteraction(supabase, {
@@ -1020,18 +1040,45 @@ export async function runAiPipeline(
       `Já avisei nossa equipe sobre o seu caso: **em até 4 horas** o acesso estará liberado. Um atendente humano vai acompanhar isso de perto por aqui, tudo bem? 🙏`;
 
     console.log(`[AI] Guard P7-A infra bloqueada: handoff (${names.join(', ') || 'sem nome'})`);
-    return await persistBillingHandoff(reply, 'guard:blocked-infra');
+    return await persistGuardHandoff(reply, 'guard:blocked-infra', 'billing');
+  }
+
+  // Guard de CANCELAMENTO (precede billing: "cancelar minha assinatura" é
+  // cancelamento, não cobrança): cliente que NÃO CONSEGUE cancelar (ou insiste
+  // que não está conseguindo) precisa de atenção humana imediata — risco de
+  // churn e de reclamação formal. Vale para TODOS os planos (inclusive
+  // Starter): impedir cancelamento não pode ficar sem resposta humana.
+  // A primeira menção simples a "cancelar" continua com a IA (ela orienta o
+  // autoatendimento via base de conhecimento).
+  const mentionsCancel = CANCEL_RE.test(message);
+  if (!isDraft && mentionsCancel) {
+    const mentionsFailure = CANCEL_FAIL_RE.test(message);
+    // Insistência: já havia mencionado cancelamento em turno anterior
+    const insisted = history.some(
+      (m) => m.sender_type === 'contact' && CANCEL_RE.test(m.content),
+    );
+
+    if (mentionsFailure || insisted) {
+      const reply =
+        `Sinto muito que você esteja com dificuldade para cancelar — isso não deveria acontecer. 😕\n\n` +
+        `Já acionei nossa equipe para cuidar do seu caso pessoalmente: você vai receber um retorno **aqui, em até 12 horas**. ` +
+        `Se puder, me conta o que aconteceu quando tentou cancelar (um print da tela ajuda muito a agilizar). 🙏`;
+      console.log(`[AI] Guard cancelamento: handoff (failure=${mentionsFailure} insisted=${insisted})`);
+      return await persistGuardHandoff(reply, 'guard:cancel', 'cancelamento', 'critica');
+    }
   }
 
   // P7-B: menção a pagamento/fatura/cobrança/desbloqueio (sem BLOCKED detectado
   // no CRM) → billing SEMPRE escala para humano (CLAUDE.md §7.6). A IA não mexe
   // em cobrança. Só não escala se for cliente somente Starter (autoatendimento).
-  if (!isDraft && mentionsBilling && !isStarterOnlyClient(contactInfo)) {
+  // Mensagens de cancelamento SEM sinal de falha não caem aqui (mentionsCancel
+  // sem falha = IA orienta o autoatendimento).
+  if (!isDraft && mentionsBilling && !mentionsCancel && !isStarterOnlyClient(contactInfo)) {
     const reply =
       `Entendi que a sua dúvida envolve pagamento/cobrança. Esse tipo de assunto é tratado diretamente pela nossa equipe. 💳\n\n` +
       `Já encaminhei o seu caso para um atendente humano — ele vai te responder por aqui assim que possível. Enquanto isso, se tiver um comprovante ou print, pode anexar aqui que agiliza. 🙏`;
     console.log('[AI] Guard P7-B billing: handoff (menção a pagamento)');
-    return await persistBillingHandoff(reply, 'guard:billing');
+    return await persistGuardHandoff(reply, 'guard:billing', 'billing');
   }
 
   // P1: reclamação de "fora do ar"/erro com infra ativa → testa as URLs reais

@@ -28,6 +28,8 @@ interface DeskView {
     airtable_product?: string;  // nome legado (views antigas) — tratado como sinônimo
     status?: string;
     priority?: string;
+    /** Filtro genérico por tag da conversa (ex.: "intent:cancelamento") */
+    tag?: string;
   };
   is_active: boolean;
 }
@@ -130,6 +132,38 @@ export function AppSidebar() {
     return () => window.removeEventListener(VIEWS_CHANGED_EVENT, handler);
   }, [loadViews]);
 
+  // ── Contadores 100% ao vivo ───────────────────────────────────────────────────
+  // Qualquer INSERT/UPDATE em desk_conversations (nova conversa, mudança de
+  // status, tag de plano gravada) reconta as views com debounce de 1,5s.
+  // São só head-counts — baratos. Sem isto os números ficavam congelados até
+  // o operador navegar.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const scheduleRefresh = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        loadViews();          // re-busca views + contadores
+        refreshPriorityCount();
+      }, 1_500);
+    };
+
+    const channel = supabase
+      .channel("sidebar-view-counts")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "desk_conversations" },
+        scheduleRefresh
+      )
+      .subscribe();
+
+    return () => {
+      if (timer) clearTimeout(timer);
+      supabase.removeChannel(channel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadViews]);
+
   // Contador de prioritários (open + high/urgent). Reconta quando a inbox muda.
   const refreshPriorityCount = useCallback(async () => {
     const { count } = await supabase
@@ -166,20 +200,21 @@ export function AppSidebar() {
         if (f.status) {
           query = query.eq("status", f.status);
         } else {
-          // Default: only non-resolved conversations
-          query = query.neq("status", "resolved");
+          // Padrão = grupo "Aberto" (open + pending) — EXATAMENTE o que o clique
+          // na view lista. Contador e lista nunca divergem.
+          query = query.in("status", ["open", "pending"]);
         }
 
         if (f.priority) {
           query = query.eq("priority", f.priority);
         }
 
-        // Filtro de plano via tag gravada em desk_conversations.tags
-        // (max/ultra/advanced/starter). A tag é populada pela Edge Function
-        // desk-ai-respond a cada resposta da IA.
-        const planTag = planTagFromFilter(f);
-        if (planTag) {
-          query = query.contains("tags", [planTag]);
+        // Filtro por tag: genérico (f.tag, ex. "intent:cancelamento") ou plano
+        // (max/ultra/advanced/starter). A tag de plano é gravada na CRIAÇÃO da
+        // conversa pelo gateway e atualizada a cada turno da IA.
+        const tagFilter = f.tag ?? planTagFromFilter(f);
+        if (tagFilter) {
+          query = query.contains("tags", [tagFilter]);
         }
 
         const { count } = await query;
@@ -196,12 +231,13 @@ export function AppSidebar() {
 
     const targetStatus = (view.filters.status as "open" | "pending" | "snoozed" | "resolved" | undefined) ?? "open";
     const targetPriority = (view.filters.priority as "low" | "medium" | "high" | "urgent" | undefined) ?? null;
-    const targetPlan = planTagFromFilter(view.filters);
+    // Tag genérica (ex.: intent:cancelamento) tem precedência sobre plano
+    const targetTag = view.filters.tag ?? planTagFromFilter(view.filters);
 
     navigate("/inbox");
-    // applyView define status + prioridade + plano atomicamente e recarrega,
+    // applyView define status + prioridade + tag atomicamente e recarrega,
     // sem a corrida que deixava a lista vazia.
-    applyView({ status: targetStatus, priority: targetPriority, plan: targetPlan });
+    applyView({ status: targetStatus, priority: targetPriority, plan: targetTag });
   }
 
   const handleToggleNotifications = () => {

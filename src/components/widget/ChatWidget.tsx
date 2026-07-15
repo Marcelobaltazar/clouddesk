@@ -486,12 +486,14 @@ export function ChatWidget({ settings, embedUser }: Props) {
               {/* Transferência só acontece quando a IA decide (should_handoff) —
                   não há botão manual de "Falar com humano". */}
 
-              {/* Aguardando atendente humano */}
+              {/* Aguardando atendente humano — o composer CONTINUA aberto:
+                  enquanto espera, o cliente pode mandar mais detalhes/prints
+                  que já ficam na conversa para o atendente ler. */}
               {isWaitingForHuman && (
                 <div className="px-4 pb-2">
                   <p className="text-[11px] text-amber-500 flex items-center gap-1.5">
                     <span className="animate-pulse">⏳</span>
-                    Aguardando um atendente humano...
+                    Aguardando um atendente — pode mandar mais detalhes enquanto isso
                   </p>
                 </div>
               )}
@@ -507,8 +509,7 @@ export function ChatWidget({ settings, embedUser }: Props) {
 
               <ChatWidgetComposer
                 onSend={handleSend}
-                disabled={isAiResponding || isWaitingForHuman}
-                placeholder={isWaitingForHuman ? "Aguardando atendente..." : undefined}
+                disabled={isAiResponding}
               />
             </>
           )}

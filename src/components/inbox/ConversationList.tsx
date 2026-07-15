@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
-import { useInboxStore, type ConversationStatus, type Conversation } from "@/stores/useInboxStore";
+import { useInboxStore, statusMatchesTab, type ConversationStatus, type Conversation } from "@/stores/useInboxStore";
 import { useAuthStore } from "@/stores/authStore";
 import { useNotifications } from "@/hooks/useNotifications";
 import { Input } from "@/components/ui/input";
@@ -8,22 +8,35 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { MessageSquare, Mail, Bot, User, Search, UserRound, CheckCircle, X, Clock } from "lucide-react";
+import { MessageSquare, Mail, Bot, User, Search, UserRound, CheckCircle, X, Clock, ChevronDown, Inbox as InboxIcon, Moon, Check } from "lucide-react";
 import { differenceInSeconds } from "date-fns";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { timeAgoShort, timeUntilShort } from "@/lib/dates";
 import { broadcastConvUpdated } from "@/lib/conv-broadcast";
 
-// ─── Tab config ───────────────────────────────────────────────────────────────
+// ─── Filtro de status (estilo Intercom) ────────────────────────────────────────
+// "Aberto" agrupa open + pending (transferidas continuam visíveis até resolver).
+// "Resolvido" fica escondido atrás do dropdown — como no Intercom, o operador
+// só vê fechadas quando escolhe explicitamente.
 
-const TABS: { value: ConversationStatus; label: string }[] = [
-  { value: "open",     label: "Abertas"   },
-  { value: "pending",  label: "Pendentes" },
-  { value: "snoozed",  label: "Adiadas"   },
-  { value: "resolved", label: "Resolvidas"},
+const STATUS_FILTERS: { value: ConversationStatus; label: string; icon: typeof InboxIcon }[] = [
+  { value: "open",     label: "Aberto",            icon: InboxIcon   },
+  { value: "pending",  label: "Aguardando humano", icon: User        },
+  { value: "snoozed",  label: "Pausado",           icon: Moon        },
+  { value: "resolved", label: "Resolvido",         icon: CheckCircle },
 ];
+
+/** Contagem por filtro: "Aberto" soma open + pending (grupo estilo Intercom). */
+function statusFilterCount(
+  filter: ConversationStatus,
+  tabCounts: Record<ConversationStatus, number>,
+): number {
+  if (filter === "open") return tabCounts.open + tabCounts.pending;
+  return tabCounts[filter];
+}
 
 // ─── Priority dot ─────────────────────────────────────────────────────────────
 
@@ -245,7 +258,7 @@ export function ConversationList() {
   // corrige a duplicidade "Abertas E Pendentes ao mesmo tempo".
   const source = isSearchMode ? searchResults : conversations;
   const filtered = source.filter((c) => {
-    if (!isSearchMode && c.status !== activeTab) return false;
+    if (!isSearchMode && !statusMatchesTab(activeTab, c.status)) return false;
     if (mineOnly && c.assigned_agent_id !== agent?.id) return false;
     return true;
   });
@@ -259,7 +272,7 @@ export function ConversationList() {
   // Abre uma conversa vinda da busca: garante que ela esteja na aba correta
   // (pode ter qualquer status) antes de ativá-la, para o thread/detalhes acharem.
   function handleSelectConversation(conv: Conversation) {
-    if (isSearchMode && conv.status !== activeTab) {
+    if (isSearchMode && !statusMatchesTab(activeTab, conv.status)) {
       setSearchQuery("");
       setActiveTab(conv.status, true);
     }
@@ -348,45 +361,42 @@ export function ConversationList() {
         </button>
       </div>
 
-      {/* ── Tabs (live counters per status — Item 6) ── */}
-      <div className="flex border-b border-border shrink-0">
-        {TABS.map((tab) => {
-          const isActive = activeTab === tab.value;
-          const count = tabCounts[tab.value];
-          // "open" tab highlights unread (unseen) conversations; the rest show total per status.
-          const showUnread = tab.value === "open" && unreadCount > 0;
-          return (
-            <button
-              key={tab.value}
-              onClick={() => setActiveTab(tab.value, true)}
-              className={cn(
-                "flex-1 py-2.5 text-[12px] font-semibold transition-colors relative inline-flex items-center justify-center gap-1",
-                isActive ? "text-foreground" : "text-muted-foreground hover:text-foreground"
-              )}
-            >
-              {tab.label}
-              {showUnread ? (
-                <Badge className="bg-unread-badge text-white text-[9px] px-1 py-0 h-4 min-w-4 justify-center hover:bg-unread-badge">
-                  {unreadCount}
-                </Badge>
-              ) : (
-                count > 0 && (
-                  <Badge
-                    className={cn(
-                      "text-[9px] px-1 py-0 h-4 min-w-4 justify-center hover:bg-muted",
-                      "bg-muted text-muted-foreground"
-                    )}
-                  >
-                    {count}
-                  </Badge>
-                )
-              )}
-              {isActive && (
-                <span className="absolute bottom-0 left-2 right-2 h-0.5 bg-accent rounded-full" />
-              )}
+      {/* ── Filtro de status (dropdown estilo Intercom: "N Aberto ▾") ── */}
+      <div className="flex items-center justify-between px-3 py-2 border-b border-border shrink-0">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button className="inline-flex items-center gap-1.5 rounded-lg bg-surface px-2.5 py-1.5 text-[12px] font-semibold text-foreground hover:bg-secondary transition-colors">
+              <span className="tabular-nums">{statusFilterCount(activeTab, tabCounts)}</span>
+              {STATUS_FILTERS.find((f) => f.value === activeTab)?.label ?? "Aberto"}
+              <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
             </button>
-          );
-        })}
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-56">
+            {STATUS_FILTERS.map((f) => {
+              const count = statusFilterCount(f.value, tabCounts);
+              const isActive = activeTab === f.value;
+              return (
+                <DropdownMenuItem
+                  key={f.value}
+                  onClick={() => setActiveTab(f.value, true)}
+                  className="gap-2"
+                >
+                  <f.icon className="h-3.5 w-3.5 text-muted-foreground" />
+                  <span className="flex-1">{f.label}</span>
+                  <span className="text-[11px] text-muted-foreground tabular-nums">{count}</span>
+                  {isActive && <Check className="h-3.5 w-3.5 text-primary" />}
+                </DropdownMenuItem>
+              );
+            })}
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        {/* Não lidas (só na visão Aberto) */}
+        {activeTab === "open" && unreadCount > 0 && (
+          <Badge className="bg-unread-badge text-white text-[9px] px-1.5 py-0 h-4 min-w-4 justify-center hover:bg-unread-badge">
+            {unreadCount} não lida{unreadCount > 1 ? "s" : ""}
+          </Badge>
+        )}
       </div>
 
       {/* ── Bulk action bar (replaces header when selecting) ── */}

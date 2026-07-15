@@ -178,6 +178,17 @@ async function enrichOne(raw: Record<string, unknown>): Promise<Conversation> {
 
 const STATUSES: ConversationStatus[] = ["open", "pending", "snoozed", "resolved"];
 
+/**
+ * Semântica estilo Intercom: a aba "Aberto" mostra tudo que precisa de atenção —
+ * status 'open' E 'pending' (aguardando humano). Uma conversa transferida NÃO
+ * some da lista principal; ela continua "aberta" até ser resolvida/pausada.
+ * As demais abas continuam 1:1 com o status.
+ */
+export function statusMatchesTab(tab: ConversationStatus, status: ConversationStatus): boolean {
+  if (tab === "open") return status === "open" || status === "pending";
+  return status === tab;
+}
+
 // ─── Store definition ─────────────────────────────────────────────────────────
 
 export const useInboxStore = create<InboxState>((set, get) => ({
@@ -204,7 +215,7 @@ export const useInboxStore = create<InboxState>((set, get) => ({
 
     // Clear active conversation if it doesn't belong to the new tab
     const activeConv = conversations.find((c) => c.id === activeConversationId);
-    const newActiveId = activeConv?.status === tab ? activeConversationId : null;
+    const newActiveId = activeConv && statusMatchesTab(tab, activeConv.status) ? activeConversationId : null;
 
     set({
       activeTab: tab,
@@ -281,7 +292,7 @@ export const useInboxStore = create<InboxState>((set, get) => ({
   applyView: ({ status, priority = null, priorityIn = null, plan = null }) => {
     const { activeConversationId, conversations } = get();
     const activeConv = conversations.find((c) => c.id === activeConversationId);
-    const newActiveId = activeConv?.status === status ? activeConversationId : null;
+    const newActiveId = activeConv && statusMatchesTab(status, activeConv.status) ? activeConversationId : null;
 
     // Define TODOS os filtros antes de carregar (set é síncrono no Zustand),
     // evitando a corrida que deixava a lista vazia ao trocar de view.
@@ -312,12 +323,15 @@ export const useInboxStore = create<InboxState>((set, get) => ({
 
     set({ isLoading: true });
 
+    // "Aberto" (estilo Intercom) = open + pending; demais abas são 1:1 com o status.
     let query = supabase
       .from("desk_conversations")
       .select("*")
-      .eq("status", status)
       .order("updated_at", { ascending: false })  // most recently active first
       .limit(100);
+    query = status === "open"
+      ? query.in("status", ["open", "pending"])
+      : query.eq("status", status);
 
     if (priorityInFilter?.length) query = query.in("priority", priorityInFilter);
     else if (priority)            query = query.eq("priority", priority);
@@ -380,7 +394,7 @@ export const useInboxStore = create<InboxState>((set, get) => ({
     delete newCache[incomingStatus];
 
     // If status doesn't match current tab, remove from list (status changed)
-    if (incomingStatus !== activeTab) {
+    if (!statusMatchesTab(activeTab, incomingStatus)) {
       if (enriched.id === activeConversationId) {
         // Agent is mid-conversation — update data but keep it visible
         set({

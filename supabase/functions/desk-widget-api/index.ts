@@ -23,7 +23,7 @@ import {
   validateAndResendCredentials,
   type ContactInfoResult,
 } from '../_shared/contact-info.ts';
-import { runAiPipeline, type MessageMetadata } from '../_shared/ai-pipeline.ts';
+import { runAiPipeline, detectPlanTag, type MessageMetadata } from '../_shared/ai-pipeline.ts';
 import { broadcastToConversation } from '../_shared/broadcast.ts';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -215,6 +215,11 @@ async function createConversation(
   email: string,
   subject: string,
 ): Promise<ConversationRow | null> {
+  // Tag do plano já na criação — as Visualizações do painel (Starter/Advanced/
+  // Ultra/Max) contam certo desde o primeiro segundo, sem esperar o turno da IA.
+  const info = await fetchContactInfo(email).catch(() => null);
+  const planTag = detectPlanTag(info?.subscriptions ?? []);
+
   const { data: created, error: createErr } = await service
     .from('desk_conversations')
     .insert({
@@ -225,6 +230,7 @@ async function createConversation(
       priority: 'medium',
       subject: subject.slice(0, 60),
       ai_active: true,
+      tags: [planTag],
     })
     .select(CONV_SELECT)
     .single();

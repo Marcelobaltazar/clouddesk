@@ -122,6 +122,29 @@ Deno.test('blocked-payment: detecta menções de pagamento/bloqueio', () => {
   }
 });
 
+// ── Guard de cancelamento ──────────────────────────────────────────────────────
+
+Deno.test('cancel: detecta pedido de cancelamento + sinal de falha', () => {
+  const cancel = _test.CANCEL_RE();
+  const fail = _test.CANCEL_FAIL_RE();
+  for (const msg of [
+    'não consigo cancelar minha assinatura',
+    'tentei cancelar e deu erro',
+    'quero cancelar mas não acho onde',
+    'já pedi o cancelamento de novo',
+  ]) {
+    assert(cancel.test(msg) && fail.test(msg), `deveria escalar: "${msg}"`);
+  }
+});
+
+Deno.test('cancel: primeira menção simples NÃO escala (IA orienta autoatendimento)', () => {
+  const cancel = _test.CANCEL_RE();
+  const fail = _test.CANCEL_FAIL_RE();
+  const msg = 'como faço para cancelar meu plano?';
+  assert(cancel.test(msg), 'menciona cancelamento');
+  assertEquals(fail.test(msg), false, 'sem sinal de falha — IA responde');
+});
+
 // ── Nomes amigáveis de status (P8) ─────────────────────────────────────────────
 
 Deno.test('status: termos internos viram rótulos pt-BR', () => {
