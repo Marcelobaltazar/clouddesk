@@ -7,7 +7,7 @@
 //   2. hmacSha256Hex — identidade verificada do widget (vetor RFC 4231)
 
 import { assertEquals, assert, assertStringIncludes } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { sanitizeContactText } from './ai-pipeline.ts';
+import { sanitizeContactText, _test } from './ai-pipeline.ts';
 import { hmacSha256Hex, isValidEmail, normalizeEmail } from './widget-auth.ts';
 
 // ── sanitizeContactText ────────────────────────────────────────────────────────
@@ -81,6 +81,58 @@ Deno.test('hmac: sensível ao segredo', async () => {
   const a = await hmacSha256Hex('segredo-1', 'cliente@cloudfy.com');
   const b = await hmacSha256Hex('segredo-2', 'cliente@cloudfy.com');
   assert(a !== b);
+});
+
+// ── Diagnóstico de infra (P1) ──────────────────────────────────────────────────
+
+Deno.test('infra-down: detecta relatos de fora do ar / erros', () => {
+  const re = _test.INFRA_DOWN_RE();
+  for (const msg of [
+    'minha infra está fora do ar',
+    'o n8n não abre',
+    'deu erro 502',
+    'a página não carrega',
+    'não consigo acessar meu evolution',
+    'tá offline desde ontem',
+    'erro 404 not found',
+  ]) {
+    assert(re.test(msg), `deveria detectar: "${msg}"`);
+  }
+});
+
+Deno.test('infra-down: NÃO dispara em conversa normal', () => {
+  const re = _test.INFRA_DOWN_RE();
+  for (const msg of ['como funciona o backup?', 'quero fazer upgrade de plano', 'obrigado pela ajuda']) {
+    assertEquals(re.test(msg), false, `não deveria detectar: "${msg}"`);
+  }
+});
+
+// ── Guard de pagamento (P7) ────────────────────────────────────────────────────
+
+Deno.test('blocked-payment: detecta menções de pagamento/bloqueio', () => {
+  const re = _test.BLOCKED_PAYMENT_RE();
+  for (const msg of [
+    'já paguei a fatura mas segue bloqueado',
+    'fiz o pagamento e não voltou',
+    'quero desbloquear minha infra',
+    'a cobrança foi feita, pode liberar?',
+    'regularizei a assinatura',
+  ]) {
+    assert(re.test(msg), `deveria detectar: "${msg}"`);
+  }
+});
+
+// ── Nomes amigáveis de status (P8) ─────────────────────────────────────────────
+
+Deno.test('status: termos internos viram rótulos pt-BR', () => {
+  assertEquals(_test.friendlyDeployStatus('DEPLOYED'), 'No ar');
+  assertEquals(_test.friendlyDeployStatus('BLOCKED'), 'Bloqueada por pendência de pagamento');
+  assertEquals(_test.friendlyDeployStatus('STOPPED'), 'Encerrada');
+  // nunca devolve o termo interno em inglês
+  for (const raw of ['DEPLOYED', 'DEPLOYING', 'STOPPED', 'BLOCKED', 'unknown']) {
+    const out = _test.friendlyDeployStatus(raw);
+    assertEquals(/DEPLOYED|DEPLOYING|STOPPED|BLOCKED/.test(out), false, `vazou termo interno em: ${out}`);
+  }
 });
 
 // ── E-mail ────────────────────────────────────────────────────────────────────

@@ -54,11 +54,19 @@ export interface PipelineParams {
   source?: 'quick_reply' | 'text';
   /** Nome do cliente informado pelo embed (fallback se o CRM não tiver nome) */
   fallbackName?: string;
+  /** URL pública da imagem enviada pelo cliente neste turno (o modelo a analisa) */
+  imageUrl?: string | null;
 }
 
 export interface PipelineOutcome {
+  /** Texto do bot. Em handoff normal é null; em handoff com aviso ao cliente
+   *  (ex.: infra bloqueada por pagamento) contém a mensagem a exibir ANTES
+   *  da transferência. */
   reply: string | null;
   should_handoff: boolean;
+  /** true = não inserir a mensagem de sistema padrão de handoff (SLA) —
+   *  o reply já explica o encaminhamento (ex.: aviso de 4h da infra bloqueada) */
+  skip_handoff_notice?: boolean;
   blocked: boolean;
   auto_resolved: boolean;
   reopened: boolean;
@@ -113,6 +121,13 @@ const CONTROL_MARKERS_RE =
 // tentativa de injeção de contexto falso.
 const PROMPT_BLOCK_RE =
   /(-{3,}\s*(?:DADOS DO CLIENTE|REGRAS SOBRE OS DADOS DO CLIENTE)\s*-{3,})|\[\s*(?:IDENTIDADE|SEGURAN[ÇC]A[^[\]]*|BASE DE CONHECIMENTO[^\]]*|REGRA DE TRANSFER[ÊE]NCIA[^\]]*|AN[ÁA]LISE OBRIGAT[ÓO]RIA[^\]]*|PRIMEIRA MENSAGEM[^\]]*|PLANO STARTER[^\]]*|MODO RASCUNHO[^\]]*)\s*\]/gi;
+
+// Exportado só para testes (regexes de detecção determinística).
+export const _test = {
+  INFRA_DOWN_RE: () => INFRA_DOWN_RE,
+  BLOCKED_PAYMENT_RE: () => BLOCKED_PAYMENT_RE,
+  friendlyDeployStatus: (v: string | null) => friendlyDeployStatus(v),
+};
 
 export function sanitizeContactText(text: string): string {
   return String(text ?? '')
@@ -262,10 +277,20 @@ interface LLMResult {
   usage: LLMUsage | null;
 }
 
+/** Conteúdo multimodal (texto + imagem) no formato OpenAI/OpenRouter. */
+type ChatContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
+interface ChatMessage {
+  role: string;
+  content: string | ChatContentPart[];
+}
+
 async function callLLM(
   apiKey: string,
   systemPrompt: string,
-  messages: Array<{ role: string; content: string }>,
+  messages: ChatMessage[],
 ): Promise<LLMResult> {
   const model = Deno.env.get('LLM_MODEL') ?? 'google/gemini-2.5-flash';
 
@@ -316,7 +341,109 @@ async function generateEmbedding(text: string): Promise<number[]> {
   return output as number[];
 }
 
+// ─── Diagnóstico determinístico da infraestrutura ─────────────────────────────
+// P1: cliente diz que a infra está fora do ar / com erro → o sistema testa as
+// URLs REAIS antes de o modelo responder. As URLs seguem o padrão fixo:
+//   https://{nome}-n8n.cloudfy.live   e   https://{nome}-evolution.cloudfy.live
+// P7: infra BLOQUEADA por pagamento + reclamação relacionada → resposta
+// determinística (aviso de até 4h) + transferência para humano.
+
+const INFRA_DOWN_RE =
+  /(fora do ar|off-?line|caiu|derrubad|fora de servi[çc]o|indispon[ií]vel|n[ãa]o (est[áa] )?(abrindo|funcionando|carregando|respondendo)|n[ãa]o (abre|funciona|carrega|responde|entra|conecta|acessa)|n[ãa]o consigo (abrir|acessar|entrar|logar)|erro\s*(404|500|502|503)|\b(404|502|503)\b|p[áa]gina de erro|not found|bad gateway|gateway time-?out)/i;
+
+const BLOCKED_PAYMENT_RE =
+  /(bloquead|desbloquear|pag(uei|amento|ou|ar)|\bpago\b|fatura|cobran[çc]|assinatura|inadimpl|regulariz|liberar|reativar|voltar (a )?(funcionar|ativa))/i;
+
+const PROBE_TIMEOUT_MS = 6_000;
+const MAX_PROBED_INFRAS = 3;
+
+interface ProbeResult {
+  infra: string;
+  service: string;
+  url: string;
+  ok: boolean;
+  status: number | null; // null = sem resposta (timeout/DNS)
+}
+
+async function probeUrl(url: string): Promise<{ ok: boolean; status: number | null }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { method: 'GET', redirect: 'follow', signal: controller.signal });
+    return { ok: res.ok, status: res.status };
+  } catch {
+    return { ok: false, status: null };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Testa n8n + Evolution das infras ATIVAS do cliente (máx. 3 infras). */
+async function probeInfraHealth(infras: ContactInfra[]): Promise<ProbeResult[]> {
+  const targets = infras
+    .filter((i) => i.default_domain)
+    .slice(0, MAX_PROBED_INFRAS)
+    .flatMap((i) => [
+      { infra: i.default_domain, service: 'n8n', url: `https://${i.default_domain}-n8n.cloudfy.live` },
+      { infra: i.default_domain, service: 'Evolution API', url: `https://${i.default_domain}-evolution.cloudfy.live` },
+    ]);
+
+  return Promise.all(
+    targets.map(async (t) => {
+      const r = await probeUrl(t.url);
+      return { ...t, ...r };
+    }),
+  );
+}
+
+function buildDiagnosticsSection(results: ProbeResult[]): string {
+  if (results.length === 0) return '';
+
+  const lines = results.map((r) => {
+    const state = r.ok
+      ? `ONLINE (respondeu normalmente)`
+      : r.status !== null
+      ? `COM PROBLEMA (não respondeu normalmente)`
+      : `SEM RESPOSTA (não abriu)`;
+    return `- Infra "${r.infra}" · ${r.service}: ${state}`;
+  });
+
+  const allOk = results.every((r) => r.ok);
+
+  return `
+[DIAGNÓSTICO AUTOMÁTICO — TESTE FEITO AGORA NAS URLS REAIS DO CLIENTE]
+O cliente relatou problema de acesso e o sistema acabou de testar os serviços dele:
+${lines.join('\n')}
+
+Como responder (OBRIGATÓRIO):
+${allOk
+    ? `- TODOS os serviços testados estão ONLINE. Diga ao cliente que você acabou de fazer um teste e está tudo funcionando normalmente do nosso lado. Peça a ele um PRINT da tela do erro (ele pode anexar a imagem aqui no chat) e mais detalhes: qual link ele está acessando e qual mensagem aparece. NÃO transfira ainda — provavelmente é outro problema (link errado, cache, senha).`
+    : `- Um ou mais serviços do cliente estão realmente com problema. Confirme para o cliente que você verificou e há uma instabilidade no serviço dele, e TRANSFIRA para um humano respondendo APENAS ${TRANSFER_KEYWORD} (exceto se o cliente for somente Starter — nesse caso oriente a Central de ajuda e o Discord).`}
+- NUNCA cite códigos HTTP, termos técnicos internos ou as URLs de teste. Fale de forma simples: "testei agora e está no ar" ou "confirmei uma instabilidade".`;
+}
+
 // ─── Prompt builder ───────────────────────────────────────────────────────────
+
+// P8: nomes internos (DEPLOYED/STOPPED/BLOCKED/active/canceled...) NUNCA chegam
+// ao cliente. O contexto do LLM já recebe apenas os rótulos amigáveis em pt-BR —
+// assim o modelo não tem como vazar o termo interno.
+function friendlyDeployStatus(raw: string | null | undefined): string {
+  const v = String(raw ?? '').toUpperCase();
+  if (v === 'DEPLOYED')  return 'No ar';
+  if (v === 'DEPLOYING') return 'Sendo preparada (fica pronta em ~20 min)';
+  if (v === 'STOPPED')   return 'Encerrada';
+  if (v === 'BLOCKED')   return 'Bloqueada por pendência de pagamento';
+  return 'Indisponível no momento';
+}
+
+function friendlySubStatus(normalized: string | null | undefined): string {
+  const v = String(normalized ?? '').toLowerCase();
+  if (v === 'active' || v === 'completed') return 'Ativa';
+  if (v === 'pending')  return 'Em preparação';
+  if (v === 'canceled') return 'Encerrada';
+  if (v === 'unpaid')   return 'Bloqueada por pendência de pagamento';
+  return 'Indisponível no momento';
+}
 
 function buildClientContext(info: ContactInfoResult | null): string {
   if (!info?.customer) return '';
@@ -333,9 +460,9 @@ function buildClientContext(info: ContactInfoResult | null): string {
   const subLines = subscriptions.map((s) => {
     const infra = infras.find((inf) => inf.subscription_id === s.subscription_id);
     const date = formatDate(s.created_at);
-    const head = `- ${s.product} | Status: ${s.status} | Desde: ${date}`;
+    const head = `- ${s.product} | Situação: ${friendlySubStatus(s.status)} | Desde: ${date}`;
     const infraLine = infra
-      ? `  Infra: ${infra.default_domain || infra.purchase_code} | Deploy: ${infra.status}`
+      ? `  Infra: ${infra.default_domain || infra.purchase_code} | Situação: ${friendlyDeployStatus(infra.status)}`
       : '';
     return [head, infraLine].filter(Boolean).join('\n');
   }).join('\n');
@@ -357,6 +484,7 @@ ${subLines || '(nenhuma assinatura registrada)'}
 - NUNCA INVENTE produtos, planos ou infraestruturas que não estejam listados no bloco DADOS DO CLIENTE. Use SOMENTE os nomes que aparecem ali, EXATAMENTE como estão escritos.
 - Ao listar assinaturas/infras do cliente, copie os nomes e status exatamente do bloco — não os traduza, não os "embeleze", não invente descrições.
 - NUNCA mencione nomes de campos internos: purchase_code, infra_id, customer_id, subscription_id, default_domain.
+- NUNCA use termos internos de status em inglês (DEPLOYED, DEPLOYING, STOPPED, BLOCKED, active, canceled, unpaid, pending) — use SOMENTE os rótulos em português exatamente como aparecem no bloco acima ("No ar", "Encerrada", "Bloqueada por pendência de pagamento", etc.).
 - Para se referir à infraestrutura, use o nome (ex.: "sua infraestrutura icyskate") ou apenas "sua infraestrutura".
 - Tom: prestativo, direto, sem jargão técnico.
 -----------------------------------------
@@ -382,6 +510,7 @@ function buildSystemPrompt(
   clientName?: string,
   contactInfo?: ContactInfoResult | null,
   isFirstMessage?: boolean,
+  diagnosticsSection?: string,
 ): string {
   const clientSection = clientName
     ? `\n[CLIENTE]\nVocê está atendendo: ${clientName}. Cumprimente-o pelo nome na primeira mensagem.\n`
@@ -456,7 +585,7 @@ Adapte o tom — não copie o formato acima palavra por palavra, mas inclua as i
 
   return `${BASE_SYSTEM_PROMPT}
 ${SECURITY_PROMPT}
-${clientSection}${contactContext}${firstMessageInstruction}${starterRule}
+${clientSection}${contactContext}${diagnosticsSection ?? ''}${firstMessageInstruction}${starterRule}
 ---
 
 [REGRA DE TRANSFERÊNCIA — OBRIGATÓRIA]
@@ -712,6 +841,10 @@ export async function runAiPipeline(
   const isButtonClick = params.source === 'quick_reply';
   const message = sanitizeContactText(params.message);
   const fallbackName = sanitizeName(params.fallbackName);
+  // URL pública (bucket desk-attachments) já validada/enviada pelo gateway
+  const imageUrl = typeof params.imageUrl === 'string' && /^https:\/\//.test(params.imageUrl)
+    ? params.imageUrl
+    : null;
 
   const none: PipelineOutcome = {
     reply: null,
@@ -843,6 +976,74 @@ export async function runAiPipeline(
     console.log(`[AI] Plan tag: ${planTag}`);
   }
 
+  // ── Guards determinísticos de infraestrutura (P1/P7) ─────────────────────────
+  const allInfras = contactInfo?.infras ?? [];
+  const blockedInfras = allInfras.filter((i) => String(i.status ?? '').toUpperCase() === 'BLOCKED');
+  const deployedInfras = allInfras.filter(isActiveInfra);
+
+  // Persiste o handoff (pending + IA pausada) e loga — helper dos guards de billing.
+  const persistBillingHandoff = async (reply: string, model: string): Promise<PipelineOutcome> => {
+    const { error: handoffErr } = await supabase
+      .from('desk_conversations')
+      .update({ status: 'pending', ai_active: false })
+      .eq('id', conversationId);
+    if (handoffErr) {
+      console.error('[AI] Guard billing: persistir handoff falhou:', handoffErr.message);
+    } else {
+      void broadcastToConversation(conversationId, 'conv_updated', { status: 'pending', ai_active: false });
+    }
+    const syntheticAnalysis: MessageAnalysis = {
+      intent: 'billing', sentiment: 'negativo', urgency: 'alta', resolved: false,
+    };
+    void applyAnalysis(supabase, conversationId, syntheticAnalysis);
+    void logInteraction(supabase, {
+      conversationId, model, usage: null, latencyMs: 0, wasEscalated: true,
+      analysis: syntheticAnalysis, kbIds: [], faqIds: [], snippetIds: [], draft: false,
+    });
+    return { reply, should_handoff: true, skip_handoff_notice: true, blocked: false, auto_resolved: false, reopened, metadata: null };
+  };
+
+  const mentionsBilling = BLOCKED_PAYMENT_RE.test(message);
+
+  // P7-A: infra REALMENTE bloqueada + reclamação relacionada → aviso das 4h.
+  if (!isDraft && blockedInfras.length > 0 && (mentionsBilling || INFRA_DOWN_RE.test(message))) {
+    const names = blockedInfras.map((i) => i.default_domain || i.purchase_code).filter(Boolean);
+    const infraLabel = names.length === 0
+      ? 'sua infraestrutura'
+      : names.length === 1
+      ? `sua infraestrutura **${names[0]}**`
+      : `suas infraestruturas **${names.join('**, **')}**`;
+
+    const reply =
+      `Verifiquei aqui: ${infraLabel} está com o acesso bloqueado por uma pendência de pagamento. ` +
+      `Quando o pagamento é confirmado, a reativação não acontece na hora — a operadora pode levar um tempo para liberar o acesso de volta. 😕\n\n` +
+      `Já avisei nossa equipe sobre o seu caso: **em até 4 horas** o acesso estará liberado. Um atendente humano vai acompanhar isso de perto por aqui, tudo bem? 🙏`;
+
+    console.log(`[AI] Guard P7-A infra bloqueada: handoff (${names.join(', ') || 'sem nome'})`);
+    return await persistBillingHandoff(reply, 'guard:blocked-infra');
+  }
+
+  // P7-B: menção a pagamento/fatura/cobrança/desbloqueio (sem BLOCKED detectado
+  // no CRM) → billing SEMPRE escala para humano (CLAUDE.md §7.6). A IA não mexe
+  // em cobrança. Só não escala se for cliente somente Starter (autoatendimento).
+  if (!isDraft && mentionsBilling && !isStarterOnlyClient(contactInfo)) {
+    const reply =
+      `Entendi que a sua dúvida envolve pagamento/cobrança. Esse tipo de assunto é tratado diretamente pela nossa equipe. 💳\n\n` +
+      `Já encaminhei o seu caso para um atendente humano — ele vai te responder por aqui assim que possível. Enquanto isso, se tiver um comprovante ou print, pode anexar aqui que agiliza. 🙏`;
+    console.log('[AI] Guard P7-B billing: handoff (menção a pagamento)');
+    return await persistBillingHandoff(reply, 'guard:billing');
+  }
+
+  // P1: reclamação de "fora do ar"/erro com infra ativa → testa as URLs reais
+  // AGORA (em paralelo com o RAG) e injeta o resultado no contexto do modelo.
+  const shouldProbe = !isDraft && deployedInfras.length > 0 && INFRA_DOWN_RE.test(message);
+  const probePromise: Promise<ProbeResult[]> = shouldProbe
+    ? probeInfraHealth(deployedInfras).catch((e) => {
+        console.warn('[AI] Probe de infra falhou:', e instanceof Error ? e.message : e);
+        return [] as ProbeResult[];
+      })
+    : Promise.resolve([] as ProbeResult[]);
+
   // ── Step 2: busca semântica (RAG) ────────────────────────────────────────────
   let kbMatches: KBMatch[] = [];
   let faqMatches: FAQMatch[] = [];
@@ -892,10 +1093,24 @@ export async function runAiPipeline(
     console.warn('[AI] Embedding/search failed — responding without KB context:', embedErr);
   }
 
+  // Diagnóstico de infra (P1) — aguarda o probe iniciado em paralelo com o RAG
+  const probeResults = await probePromise;
+  const diagnosticsSection = buildDiagnosticsSection(probeResults);
+  if (shouldProbe) {
+    console.log(`[AI] Probe: ${probeResults.map((r) => `${r.infra}/${r.service}=${r.status ?? 'timeout'}`).join(' ') || '(sem alvos)'}`);
+  }
+
   // ── Step 3: prompt + LLM ─────────────────────────────────────────────────────
   const clientName = contactInfo?.customer?.name || fallbackName;
-  let systemPrompt = buildSystemPrompt(kbMatches, faqMatches, snippetMatches, clientName, contactInfo, isFirstMessage);
+  let systemPrompt = buildSystemPrompt(kbMatches, faqMatches, snippetMatches, clientName, contactInfo, isFirstMessage, diagnosticsSection);
   systemPrompt += `\n${META_INSTRUCTION}`;
+
+  if (imageUrl) {
+    systemPrompt += `
+
+[IMAGEM ANEXADA PELO CLIENTE]
+O cliente anexou uma imagem nesta mensagem (você consegue vê-la). Analise-a com atenção — geralmente é um print de erro, tela ou configuração. Descreva o que identificou de relevante e use isso na resposta. Se a imagem não carregar para você, peça para ele descrever o que aparece na tela.`;
+  }
 
   if (isDraft) {
     systemPrompt += `
@@ -907,12 +1122,20 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
 - Não use [OPCOES] nem [ACTION].`;
   }
 
-  const chatMessages = history.map((m) => ({
+  const chatMessages: ChatMessage[] = history.map((m) => ({
     role: m.sender_type === 'contact' ? 'user' : 'assistant',
     // Mensagens do cliente sanitizadas; respostas do bot/agente passam direto
     content: m.sender_type === 'contact' ? sanitizeContactText(m.content) : String(m.content ?? '').slice(0, 6000),
   }));
-  chatMessages.push({ role: 'user', content: message });
+  // Turno atual: texto puro, ou multimodal (texto + imagem) quando o cliente
+  // anexou uma foto — o modelo (gemini-2.5-flash) analisa a imagem de verdade.
+  const userContent: ChatMessage['content'] = imageUrl
+    ? [
+        { type: 'text', text: message },
+        { type: 'image_url', image_url: { url: imageUrl } },
+      ]
+    : message;
+  chatMessages.push({ role: 'user', content: userContent });
 
   const llmStart = Date.now();
   const llm = await callLLM(apiKey, systemPrompt, chatMessages);
@@ -1035,5 +1258,14 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
   // Cinto e suspensório: nenhum marcador de controle sai para o cliente.
   reply = reply.replace(CONTROL_MARKERS_RE, '').replace(/\n{3,}/g, '\n\n').trim();
 
-  return { reply, should_handoff, blocked: false, auto_resolved, reopened, metadata };
+  return {
+    // Handoff normal: o "reply" é só a keyword — o cliente recebe apenas a
+    // mensagem de sistema de encaminhamento (inserida pelo gateway).
+    reply: should_handoff ? null : reply,
+    should_handoff,
+    blocked: false,
+    auto_resolved,
+    reopened,
+    metadata,
+  };
 }

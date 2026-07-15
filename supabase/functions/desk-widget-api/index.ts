@@ -49,6 +49,8 @@ interface WidgetApiRequest {
   comment?: string;
   infra_id?: string;
   account_user_id?: string;
+  /** Imagem anexada pelo cliente: data URL base64 (image/png|jpeg|webp|gif, ≤4MB) */
+  image_data?: string;
 }
 
 interface ConversationRow {
@@ -174,7 +176,8 @@ async function insertMessage(
   senderType: 'contact' | 'bot' | 'system',
   content: string,
   aiGenerated = false,
-  metadata: MessageMetadata | null = null,
+  metadata: (MessageMetadata & { attachments?: unknown[] }) | null = null,
+  contentType: 'text' | 'image' = 'text',
 ): Promise<MessageRow | null> {
   const { data, error } = await service
     .from('desk_messages')
@@ -183,7 +186,7 @@ async function insertMessage(
       sender_type: senderType,
       content,
       ai_generated: aiGenerated,
-      content_type: 'text',
+      content_type: contentType,
       is_private_note: false,
       metadata: metadata ?? {},
     })
@@ -207,6 +210,82 @@ function publicConversation(row: ConversationRow): Record<string, unknown> {
   };
 }
 
+async function createConversation(
+  service: ServiceClient,
+  email: string,
+  subject: string,
+): Promise<ConversationRow | null> {
+  const { data: created, error: createErr } = await service
+    .from('desk_conversations')
+    .insert({
+      account_user_id: null,
+      user_email: email,
+      channel: 'chat',
+      status: 'open',
+      priority: 'medium',
+      subject: subject.slice(0, 60),
+      ai_active: true,
+    })
+    .select(CONV_SELECT)
+    .single();
+  if (createErr || !created) {
+    console.error('[widget-api] criar conversa falhou:', createErr?.message);
+    return null;
+  }
+  return created as unknown as ConversationRow;
+}
+
+// ─── Upload de imagem (P2) ─────────────────────────────────────────────────────
+// Recebe um data URL base64, valida tipo/tamanho e sobe para o bucket público
+// desk-attachments (caminho com UUID — não adivinhável). O upload é feito com
+// service role; o cliente nunca escreve no Storage diretamente.
+
+const IMAGE_DATAURL_RE = /^data:image\/(png|jpe?g|webp|gif);base64,([A-Za-z0-9+/=]+)$/;
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+
+async function uploadImage(
+  service: ServiceClient,
+  conversationId: string,
+  dataUrl: string,
+): Promise<{ url: string } | { error: string }> {
+  const match = dataUrl.match(IMAGE_DATAURL_RE);
+  if (!match) return { error: 'Formato de imagem inválido (use PNG, JPG, WebP ou GIF)' };
+
+  const ext = match[1] === 'jpeg' ? 'jpg' : match[1];
+  const contentType = `image/${match[1] === 'jpg' ? 'jpeg' : match[1]}`;
+
+  let bytes: Uint8Array;
+  try {
+    const binary = atob(match[2]);
+    bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  } catch {
+    return { error: 'Imagem corrompida' };
+  }
+
+  if (bytes.byteLength > MAX_IMAGE_BYTES) {
+    return { error: 'Imagem muito grande (máximo 4MB)' };
+  }
+  if (bytes.byteLength < 100) {
+    return { error: 'Imagem vazia' };
+  }
+
+  const path = `${conversationId}/${crypto.randomUUID()}.${ext}`;
+  const { error: upErr } = await service.storage
+    .from('desk-attachments')
+    .upload(path, bytes, { contentType, upsert: false });
+
+  if (upErr) {
+    console.error('[widget-api] upload de imagem falhou:', upErr.message);
+    return { error: 'Não foi possível enviar a imagem. Tente novamente.' };
+  }
+
+  const { data: pub } = service.storage.from('desk-attachments').getPublicUrl(path);
+  if (!pub?.publicUrl) return { error: 'Não foi possível enviar a imagem. Tente novamente.' };
+
+  return { url: pub.publicUrl };
+}
+
 // ─── Turno de conversa (start/send compartilham isto) ─────────────────────────
 
 async function runTurn(
@@ -215,10 +294,30 @@ async function runTurn(
   message: string,
   source: 'quick_reply' | 'text',
   fallbackName?: string,
+  imageDataUrl?: string,
 ): Promise<Record<string, unknown>> {
   const newMessages: MessageRow[] = [];
 
-  const contactMsg = await insertMessage(service, conversation.id, 'contact', message);
+  // P2: imagem anexada → sobe para o Storage e vira attachment da mensagem
+  let imageUrl: string | null = null;
+  if (imageDataUrl) {
+    const uploaded = await uploadImage(service, conversation.id, imageDataUrl);
+    if ('error' in uploaded) {
+      return { error: uploaded.error, status: 400 };
+    }
+    imageUrl = uploaded.url;
+  }
+
+  const contactContent = message || (imageUrl ? '📷 Imagem' : '');
+  const contactMsg = await insertMessage(
+    service,
+    conversation.id,
+    'contact',
+    contactContent,
+    false,
+    imageUrl ? { attachments: [{ type: 'image', url: imageUrl }] } : null,
+    imageUrl ? 'image' : 'text',
+  );
   if (!contactMsg) {
     return { error: 'Não foi possível registrar sua mensagem. Tente novamente.', status: 500 };
   }
@@ -228,9 +327,10 @@ async function runTurn(
   try {
     outcome = await runAiPipeline(service, {
       conversationId: conversation.id,
-      message,
+      message: message || 'O cliente enviou uma imagem (analise-a).',
       source,
       fallbackName,
+      imageUrl,
     });
   } catch (e) {
     console.error('[widget-api] pipeline error:', e instanceof Error ? e.message : e);
@@ -244,8 +344,16 @@ async function runTurn(
   }
 
   if (outcome.should_handoff) {
-    const sysMsg = await insertMessage(service, conversation.id, 'system', HANDOFF_MESSAGE);
-    if (sysMsg) newMessages.push(sysMsg);
+    // Aviso customizado ao cliente ANTES do encaminhamento (ex.: infra
+    // bloqueada por pagamento → mensagem das 4h vinda do guard determinístico)
+    if (outcome.reply) {
+      const botMsg = await insertMessage(service, conversation.id, 'bot', outcome.reply, true);
+      if (botMsg) newMessages.push(botMsg);
+    }
+    if (!outcome.skip_handoff_notice) {
+      const sysMsg = await insertMessage(service, conversation.id, 'system', HANDOFF_MESSAGE);
+      if (sysMsg) newMessages.push(sysMsg);
+    }
   } else if (outcome.reply) {
     const botMsg = await insertMessage(
       service,
@@ -354,9 +462,12 @@ Deno.serve(async (req) => {
 
     if (action === 'start' || action === 'send') {
       const message = cleanForStorage(body.message ?? '');
-      if (!message) return json({ error: 'Mensagem vazia' }, 400);
+      const imageData = typeof body.image_data === 'string' ? body.image_data : undefined;
+      // Precisa de texto OU imagem
+      if (!message && !imageData) return json({ error: 'Mensagem vazia' }, 400);
       const source: 'quick_reply' | 'text' = body.source === 'quick_reply' ? 'quick_reply' : 'text';
       const fallbackName = typeof body.name === 'string' ? body.name : undefined;
+      const subject = message || 'Atendimento via widget';
 
       let conversation: ConversationRow | null = null;
 
@@ -364,32 +475,25 @@ Deno.serve(async (req) => {
         if (!body.conversation_id) return json({ error: 'conversation_id obrigatório' }, 400);
         conversation = await loadOwnedConversation(service, body.conversation_id, email);
         if (!conversation) return json({ error: 'Conversa não encontrada' }, 403);
+
+        // P9: se a conversa referenciada já foi RESOLVIDA, não reabre a antiga —
+        // abre um chamado NOVO e zerado (data nova, contexto limpo). Assim o
+        // cliente que volta dias depois não herda o histórico de outro assunto.
+        if (conversation.status === 'resolved') {
+          const fresh = await createConversation(service, email, subject);
+          if (!fresh) return json({ error: 'Não foi possível iniciar a conversa. Tente novamente.' }, 500);
+          conversation = fresh;
+        }
       } else {
-        // start: reutiliza conversa aberta existente (evita duplicatas) ou cria
+        // start: reutiliza conversa aberta (não-resolvida) existente ou cria nova
         conversation = await findOpenConversation(service, email);
         if (!conversation) {
-          const { data: created, error: createErr } = await service
-            .from('desk_conversations')
-            .insert({
-              account_user_id: null,
-              user_email: email,
-              channel: 'chat',
-              status: 'open',
-              priority: 'medium',
-              subject: message.slice(0, 60),
-              ai_active: true,
-            })
-            .select(CONV_SELECT)
-            .single();
-          if (createErr || !created) {
-            console.error('[widget-api] criar conversa falhou:', createErr?.message);
-            return json({ error: 'Não foi possível iniciar a conversa. Tente novamente.' }, 500);
-          }
-          conversation = created as unknown as ConversationRow;
+          conversation = await createConversation(service, email, subject);
+          if (!conversation) return json({ error: 'Não foi possível iniciar a conversa. Tente novamente.' }, 500);
         }
       }
 
-      const result = await runTurn(service, conversation, message, source, fallbackName);
+      const result = await runTurn(service, conversation, message, source, fallbackName, imageData);
       if (typeof result.status === 'number' && result.error) {
         return json({ error: result.error as string }, result.status as number);
       }

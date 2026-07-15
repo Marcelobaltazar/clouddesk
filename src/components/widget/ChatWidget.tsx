@@ -181,12 +181,16 @@ export function ChatWidget({ settings, embedUser }: Props) {
 
   const bootstrapInFlight = useRef(false);
 
-  // Aplica o resultado de um turno (start/send) ao estado do widget
-  const applyTurn = useCallback((result: TurnResult) => {
+  // Aplica o resultado de um turno (start/send) ao estado do widget.
+  // Remove a mensagem otimista temporária (optimisticId) ao mesclar as reais.
+  const applyTurn = useCallback((result: TurnResult, optimisticId?: string) => {
     if (result.conversation) setConversation(result.conversation);
 
     const store = useWidgetStore.getState();
-    store.setMessages(mergeMessages(store.messages, result.messages ?? []));
+    const base = optimisticId
+      ? store.messages.filter((m) => m.id !== optimisticId)
+      : store.messages;
+    store.setMessages(mergeMessages(base, result.messages ?? []));
 
     if (result.waiting_for_human) {
       setIsWaitingForHuman(true);
@@ -213,42 +217,57 @@ export function ChatWidget({ settings, embedUser }: Props) {
     addMessage(localMessage("bot", content));
   }, [addMessage]);
 
-  const startConversation = useCallback(
-    async (firstMessage: string, source: "quick_reply" | "text" = "text") => {
-      setIsAiResponding(true);
-      setIsWaitingForHuman(false);
-      setAgentConnected(false);
+  // Submit unificado (start + send): mostra a mensagem do cliente NA HORA
+  // (otimista, estilo WhatsApp) e só liga o "IA digitando" quando a IA de fato
+  // vai responder (conversa com ai_active e não aguardando humano).
+  const submit = useCallback(
+    async (text: string, source: "quick_reply" | "text" = "text", imageData?: string) => {
+      const trimmed = text.trim();
+      if (!trimmed && !imageData) return;
+
+      const store = useWidgetStore.getState();
+      const conv = store.conversation;
+
+      // P5: o balãozinho de "digitando" só aparece se a IA vai responder.
+      // Se um humano assumiu (ai_active=false / aguardando humano), NÃO mostra.
+      const aiWillReply =
+        !store.isWaitingForHuman &&
+        (!conv || conv.ai_active !== false) &&
+        conv?.status !== "pending";
+
+      // P4: mensagem otimista imediata (com preview da imagem, se houver)
+      const optimistic = localMessage("contact", trimmed || "📷 Imagem");
+      if (imageData) {
+        optimistic.metadata = { attachments: [{ type: "image", url: imageData }] };
+      }
+      store.setMessages([...store.messages, optimistic]);
+
+      if (aiWillReply) setIsAiResponding(true);
 
       try {
-        const result = await widgetApi.start(firstMessage, source);
-        applyTurn(result);
+        const result = conv
+          ? await widgetApi.send(conv.id, trimmed, source, imageData)
+          : await widgetApi.start(trimmed, source, imageData);
+        applyTurn(result, optimistic.id);
       } catch (err) {
+        // Mantém a mensagem otimista (o cliente vê o que enviou) e mostra o erro
         handleTurnError(err);
       } finally {
         setIsAiResponding(false);
       }
     },
-    [applyTurn, handleTurnError, setIsAiResponding, setIsWaitingForHuman, setAgentConnected]
+    [applyTurn, handleTurnError, setIsAiResponding]
+  );
+
+  const startConversation = useCallback(
+    (firstMessage: string, source: "quick_reply" | "text" = "text") => submit(firstMessage, source),
+    [submit]
   );
 
   const handleSend = useCallback(
-    async (text: string, source: "quick_reply" | "text" = "text") => {
-      if (!conversation) {
-        await startConversation(text, source);
-        return;
-      }
-
-      setIsAiResponding(true);
-      try {
-        const result = await widgetApi.send(conversation.id, text, source);
-        applyTurn(result);
-      } catch (err) {
-        handleTurnError(err);
-      } finally {
-        setIsAiResponding(false);
-      }
-    },
-    [conversation, startConversation, applyTurn, handleTurnError, setIsAiResponding]
+    (text: string, source: "quick_reply" | "text" = "text", imageData?: string) =>
+      submit(text, source, imageData),
+    [submit]
   );
 
   // ── Reenvio de credenciais (disparado pelo CLIENTE ao clicar no botão) ───────

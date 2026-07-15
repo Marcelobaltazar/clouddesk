@@ -24,6 +24,11 @@ export type CredentialAction = {
   label: string;
 };
 
+export type MessageAttachment = {
+  type: "image";
+  url: string;
+};
+
 // Type alias (não interface): aliases ganham index signature implícita, o que
 // permite passar o metadata direto ao INSERT tipado (coluna Json) sem cast.
 export type WidgetMessageMetadata = {
@@ -31,6 +36,8 @@ export type WidgetMessageMetadata = {
   // Botões de reenvio de credenciais — um por infraestrutura ATIVA. O disparo só
   // acontece quando o cliente clica; a IA nunca reenvia por conta própria.
   credential_actions?: CredentialAction[];
+  // Anexos (imagens) enviados pelo cliente.
+  attachments?: MessageAttachment[];
 };
 
 export interface WidgetMessage {

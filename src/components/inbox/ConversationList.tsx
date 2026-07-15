@@ -298,7 +298,7 @@ export function ConversationList() {
 
     const { error } = await supabase
       .from("desk_conversations")
-      .update({ status: "resolved", resolved_at: new Date().toISOString() })
+      .update({ status: "resolved", resolved_at: new Date().toISOString(), ai_active: true })
       .in("id", ids);
 
     setResolving(false);
@@ -308,8 +308,9 @@ export function ConversationList() {
       return;
     }
 
-    // Widgets abertos dessas conversas mostram o CSAT ao receber o evento
-    for (const id of ids) void broadcastConvUpdated(id, { status: "resolved" });
+    // Widgets abertos dessas conversas mostram o CSAT ao receber o evento;
+    // ai_active=true garante que a IA reassume se a conversa for reaberta.
+    for (const id of ids) void broadcastConvUpdated(id, { status: "resolved", ai_active: true });
 
     for (const id of ids) removeConversation(id);
     clearSelection();

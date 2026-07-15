@@ -130,8 +130,12 @@ export const widgetApi = {
   },
 
   /** Primeira mensagem — cria (ou retoma) a conversa e roda a IA. */
-  start(message: string, source: "quick_reply" | "text" = "text"): Promise<TurnResult> {
-    return call("start", { message, source });
+  start(
+    message: string,
+    source: "quick_reply" | "text" = "text",
+    imageData?: string,
+  ): Promise<TurnResult> {
+    return call("start", { message, source, image_data: imageData });
   },
 
   /** Mensagem em conversa existente. */
@@ -139,8 +143,9 @@ export const widgetApi = {
     conversationId: string,
     message: string,
     source: "quick_reply" | "text" = "text",
+    imageData?: string,
   ): Promise<TurnResult> {
-    return call("send", { conversation_id: conversationId, message, source });
+    return call("send", { conversation_id: conversationId, message, source, image_data: imageData });
   },
 
   /** Recarrega o thread (usado ao voltar o foco para a aba). */

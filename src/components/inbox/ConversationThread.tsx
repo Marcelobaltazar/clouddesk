@@ -449,14 +449,19 @@ export function ConversationThread() {
   assignToMeRef.current = handleAssignToMe;
 
   const handleResolve = async () => {
+    // P6: ao encerrar o atendimento humano, a IA volta a ficar ATIVA. Se o
+    // cliente reabrir/mandar nova mensagem, a IA atende de novo sem precisar de
+    // religamento manual. (No fluxo do widget uma nova mensagem numa conversa
+    // resolvida abre um chamado NOVO, que já nasce com ai_active=true — este
+    // religamento cobre o caso de a mesma conversa ser reaberta pelo operador.)
     const { error } = await supabase
       .from("desk_conversations")
-      .update({ status: "resolved", resolved_at: new Date().toISOString() })
+      .update({ status: "resolved", resolved_at: new Date().toISOString(), ai_active: true })
       .eq("id", activeConversationId);
 
     if (error) { toast.error("Erro ao resolver conversa"); return; }
     // Widget mostra o CSAT ao receber status resolved
-    void broadcastConvUpdated(activeConversationId!, { status: "resolved" });
+    void broadcastConvUpdated(activeConversationId!, { status: "resolved", ai_active: true });
   };
 
   // Reabre uma conversa resolvida (o cliente também reabre implicitamente ao
@@ -1229,7 +1234,17 @@ function MessageBubble({
             <span className="text-[10px] font-medium">IA</span>
           </div>
         )}
-        <p className="text-sm leading-[21px] whitespace-pre-wrap">{message.content}</p>
+        {/* Imagens anexadas pelo cliente (prints) */}
+        {(((message.metadata?.attachments as Array<{ type?: string; url?: string }> | undefined) ?? [])
+          .filter((a) => a?.type === "image" && a?.url))
+          .map((a, i) => (
+            <a key={i} href={a.url} target="_blank" rel="noopener noreferrer" className="block mb-1.5">
+              <img src={a.url} alt="anexo do cliente" loading="lazy" className="max-w-full max-h-64 rounded-lg object-cover" />
+            </a>
+          ))}
+        {message.content && (
+          <p className="text-sm leading-[21px] whitespace-pre-wrap">{message.content}</p>
+        )}
         <span className="text-[11px] text-muted-foreground mt-1 block text-right">{time}</span>
       </div>
     </div>

@@ -176,21 +176,43 @@ export function ChatWidgetThread({ messages, conversationId, onSend, onResendCre
                     </span>
                   )}
 
+                  {/* Imagens anexadas pelo cliente (prints de erro etc.) */}
+                  {(msg.metadata?.attachments ?? [])
+                    .filter((a) => a.type === "image")
+                    .map((a, i) => (
+                      <a
+                        key={`${msg.id}-img-${i}`}
+                        href={a.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="block mt-1 first:mt-0"
+                      >
+                        <img
+                          src={a.url}
+                          alt="anexo do cliente"
+                          loading="lazy"
+                          className="max-w-full max-h-52 rounded-lg object-cover"
+                        />
+                      </a>
+                    ))}
+
                   {/* Bot messages render Markdown + inline images; others stay plain text */}
-                  {isBot
+                  {msg.content && (isBot
                     ? <BotMarkdown content={msg.content} />
                     : <p className="whitespace-pre-wrap">{msg.content}</p>
-                  }
+                  )}
                 </div>
 
-                {/* Quick reply chips — one-time use */}
+                {/* Quick reply chips — one-time use. Estilo de BOTÃO destacado
+                    (fundo claro, texto escuro) para o cliente perceber que é
+                    clicável. */}
                 {showQuickReplies && (
                   <div className="flex flex-wrap gap-1.5 mt-2">
                     {quickReplies.map((option, i) => (
                       <button
                         key={`${msg.id}-qr-${i}`}
                         onClick={() => handleQuickReply(msg.id, option)}
-                        className="rounded-full border border-white/30 px-3 py-1 text-sm text-foreground hover:bg-white/20 transition-colors"
+                        className="rounded-lg bg-slate-100 border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-900 shadow-sm hover:bg-slate-200 active:scale-[0.98] transition-all"
                       >
                         {option}
                       </button>
