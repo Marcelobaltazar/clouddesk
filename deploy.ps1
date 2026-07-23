@@ -14,7 +14,9 @@ $functions = @(
     "get-contact-info",
     "desk-embed-article",
     "check-widget-eligibility",
-    "desk-resend-credentials"
+    "desk-resend-credentials",
+    "desk-inbound-email",
+    "desk-send-email"
 )
 
 Write-Host ""

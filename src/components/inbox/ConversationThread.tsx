@@ -11,7 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { Bot, Lock, Info, CheckCircle, Send, MessageSquare, UserPlus, Clock, BookOpen, Reply, Search, Zap, Sparkles, Loader2, RotateCcw } from "lucide-react";
+import { Bot, Lock, Info, CheckCircle, Send, MessageSquare, UserPlus, Clock, BookOpen, Reply, Search, Zap, Sparkles, Loader2, RotateCcw, Mail } from "lucide-react";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
@@ -548,6 +548,36 @@ export function ConversationThread() {
     }
     if (!agent) return;
     setSending(true);
+
+    // ── Canal E-MAIL: resposta pública sai pela Gmail API (support@cloudfy.email)
+    // via desk-send-email. Notas internas seguem o fluxo normal (só no banco).
+    if (conversation.channel === "email" && !isNote) {
+      try {
+        const { data, error } = await supabase.functions.invoke<{ ok?: boolean; error?: string }>(
+          "desk-send-email",
+          {
+            body: {
+              conversation_id: activeConversationId,
+              text: content.trim(),
+              agent_id: agent.id,
+              agent_name: agent.name,
+              resolve: resolveAfter,
+            },
+          },
+        );
+        if (error || !data?.ok) throw new Error(data?.error ?? error?.message ?? "Falha ao enviar e-mail");
+        setContent("");
+        setMode("reply");
+        // A mensagem 'agent' e o estado da conversa são gravados server-side;
+        // o Realtime da inbox atualiza a lista.
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Erro desconhecido";
+        toast.error("Erro ao enviar e-mail", { description: msg });
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
 
     try {
       // Use .select().single() to get the inserted row back with DB-generated
@@ -1232,6 +1262,17 @@ function MessageBubble({
           <div className="flex items-center gap-1 mb-1 text-muted-foreground">
             <Bot className="h-3 w-3" />
             <span className="text-[10px] font-medium">IA</span>
+          </div>
+        )}
+        {/* Selo de e-mail — mostra o assunto quando a mensagem veio por e-mail.
+            Renderizamos o TEXTO puro (já extraído do MIME) — nunca HTML cru do
+            cliente, para não abrir vetor de XSS no painel. */}
+        {(message.metadata?.email as { subject?: string } | undefined)?.subject && (
+          <div className="flex items-center gap-1 mb-1 text-muted-foreground">
+            <Mail className="h-3 w-3" />
+            <span className="text-[10px] font-medium truncate max-w-[240px]">
+              {(message.metadata?.email as { subject?: string }).subject}
+            </span>
           </div>
         )}
         {/* Imagens anexadas pelo cliente (prints) */}

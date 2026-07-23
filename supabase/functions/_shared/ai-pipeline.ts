@@ -56,6 +56,9 @@ export interface PipelineParams {
   fallbackName?: string;
   /** URL pública da imagem enviada pelo cliente neste turno (o modelo a analisa) */
   imageUrl?: string | null;
+  /** Canal da conversa. 'email' muda o tom/formatação da resposta (sem
+   *  emojis/markdown de chat, saudação e assinatura de e-mail). Default: 'chat'. */
+  channel?: 'chat' | 'email';
 }
 
 export interface PipelineOutcome {
@@ -1157,6 +1160,22 @@ export async function runAiPipeline(
 
 [IMAGEM ANEXADA PELO CLIENTE]
 O cliente anexou uma imagem nesta mensagem (você consegue vê-la). Analise-a com atenção — geralmente é um print de erro, tela ou configuração. Descreva o que identificou de relevante e use isso na resposta. Se a imagem não carregar para você, peça para ele descrever o que aparece na tela.`;
+  }
+
+  if (params.channel === 'email') {
+    systemPrompt += `
+
+[CANAL E-MAIL — TOM E FORMATAÇÃO]
+Esta conversa é por E-MAIL, não chat. Ajuste a escrita:
+- Comece com uma saudação de e-mail: "Olá, {nome}," (ou "Prezado(a)," se não souber o nome), em linha própria.
+- Escreva em parágrafos completos e bem estruturados — e-mail comporta um texto um pouco mais longo e formal que o chat.
+- NÃO use emojis, NÃO use markdown de chat (nada de **negrito**, [OPCOES], chips ou botões). E-mail é texto corrido.
+- Se listar passos, use lista numerada simples (1., 2., 3.).
+- Encerre com uma assinatura curta em linhas próprias:
+  "Atenciosamente,
+  Equipe Cloudfy"
+- Mantenha a objetividade: resolva a dúvida, ofereça o próximo passo, e diga que ele pode responder este e-mail se precisar de mais ajuda.
+- As mesmas regras de segurança e de transferência valem: cobrança, cancelamento e infraestrutura bloqueada continuam indo para atendimento humano.`;
   }
 
   if (isDraft) {
