@@ -43,6 +43,9 @@ export interface MessageMetadata {
   // Botões de reenvio de credenciais. Um por infraestrutura ATIVA.
   // O disparo só acontece quando o CLIENTE clica no botão no widget.
   credential_actions?: CredentialAction[];
+  // Imagem ilustrativa do artigo-fonte (passo a passo visual). URL do nosso
+  // Storage — nunca de terceiro. Anexada quando a IA sinaliza [ILUSTRAR].
+  attachments?: Array<{ type: 'image'; url: string }>;
 }
 
 export interface PipelineParams {
@@ -118,7 +121,7 @@ const MAX_CONTACT_MESSAGE_CHARS = 4000;
 const MAX_NAME_CHARS = 80;
 
 const CONTROL_MARKERS_RE =
-  /\[\s*(?:TRANSFERIR|OFERECER_CREDENCIAIS|OPCOES\s*:[^\]]*|META\s*:[^\]]*|ACTION\b[^\]]*)\s*\]/gi;
+  /\[\s*(?:TRANSFERIR|OFERECER_CREDENCIAIS|ILUSTRAR|OPCOES\s*:[^\]]*|META\s*:[^\]]*|ACTION\b[^\]]*)\s*\]/gi;
 
 // Cabeçalhos internos do prompt — se aparecem numa mensagem de cliente, é
 // tentativa de injeção de contexto falso.
@@ -692,6 +695,15 @@ Cada artigo abaixo tem um campo "URL". Quando você usar as informações de um 
 
 Inclua a fonte APENAS se o artigo realmente usado tiver uma URL (campo URL diferente de "null"). Se a URL for "null", NÃO cite a fonte daquele artigo. Nunca invente URLs nem use uma URL diferente da fornecida. Se usar mais de um artigo com URL, liste uma linha "📚 Fonte:" por artigo.
 
+[IMAGEM ILUSTRATIVA — MARCADOR [ILUSTRAR]]
+Quando a resposta for um PASSO A PASSO VISUAL (o cliente perguntou "como faço/onde clico/onde acesso" algo na interface) E o artigo que você usou como base tiver imagens, adicione o marcador [ILUSTRAR] em uma linha própria no FINAL da resposta. O sistema vai anexar automaticamente 1 imagem ilustrativa do artigo — você NÃO escreve a URL da imagem, apenas o marcador.
+
+Use [ILUSTRAR] SOMENTE quando:
+- A pergunta é claramente sobre COMO FAZER algo na interface (cancelar, configurar, acessar, gerar QR code, atualizar cartão, etc.); E
+- Você está usando um artigo da base de conhecimento na resposta.
+
+NÃO use [ILUSTRAR] em: perguntas conceituais ("o que é X"), dúvidas rápidas, saudações, status do cliente, ou quando não há artigo relevante. No máximo UMA imagem por resposta. Na dúvida, não use.
+
 ${contextSection}`;
 }
 
@@ -699,6 +711,22 @@ ${contextSection}`;
 
 const OPCOES_RE = /\[OPCOES:\s*([^\]]+)\]/i;
 const OFFER_CREDENTIALS_RE = /\[OFERECER_CREDENCIAIS\s*\]/i;
+// [ILUSTRAR] → o servidor anexa 1 imagem do artigo-fonte (passo a passo visual).
+// A IA só SINALIZA; ela nunca escolhe a URL (evita alucinação). A imagem vem
+// determinística da 1ª imagem do KB de maior similaridade que já esteja no NOSSO
+// Storage (migração feita — nada de URL do Intercom).
+const ILUSTRAR_RE = /\[ILUSTRAR\s*\]/i;
+
+// Extrai a 1ª imagem markdown (só do nosso Storage) de um conteúdo de artigo.
+const MD_IMG_RE = /!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/g;
+function firstOwnImage(content: string): string | null {
+  for (const m of content.matchAll(MD_IMG_RE)) {
+    const url = m[1];
+    // Só imagens já migradas para o nosso Storage — nunca servir URL de terceiro.
+    if (url.includes('/desk-kb-images/')) return url;
+  }
+  return null;
+}
 
 // O modelo NUNCA envia credenciais — afirmações de envio são falsas por
 // definição e corrigidas server-side.
@@ -876,6 +904,7 @@ async function logInteraction(
 function parseReplyMarkers(
   raw: string,
   activeInfras: ContactInfra[],
+  kbMatches: KBMatch[] = [],
 ): { text: string; metadata: MessageMetadata | null } {
   let text = raw;
   const metadata: MessageMetadata = {};
@@ -901,9 +930,24 @@ function parseReplyMarkers(
     if (actions.length > 0) metadata.credential_actions = actions;
   }
 
+  // [ILUSTRAR] → anexa 1 imagem do artigo-fonte de MAIOR similaridade que tenha
+  // imagem no nosso Storage. A IA só sinaliza; o servidor escolhe a URL.
+  if (ILUSTRAR_RE.test(text)) {
+    text = text.replace(ILUSTRAR_RE, '');
+    const sorted = [...kbMatches].sort((a, b) => b.similarity - a.similarity);
+    for (const kb of sorted) {
+      const img = firstOwnImage(kb.content ?? '');
+      if (img) {
+        metadata.attachments = [{ type: 'image', url: img }];
+        console.log(`[AI] Ilustrar: anexada imagem do artigo "${kb.title}"`);
+        break;
+      }
+    }
+  }
+
   text = text.replace(/\n{3,}/g, '\n\n').trim();
 
-  const hasMetadata = !!metadata.quick_replies || !!metadata.credential_actions;
+  const hasMetadata = !!metadata.quick_replies || !!metadata.credential_actions || !!metadata.attachments;
   return { text, metadata: hasMetadata ? metadata : null };
 }
 
@@ -1277,7 +1321,7 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
   const activeInfras = (contactInfo?.infras ?? []).filter(isActiveInfra);
   let { text: reply, metadata } = should_handoff
     ? { text: rawReply, metadata: null as MessageMetadata | null }
-    : parseReplyMarkers(rawReply, activeInfras);
+    : parseReplyMarkers(rawReply, activeInfras, kbMatches);
 
   // ── Guard determinístico do fluxo de credenciais ─────────────────────────────
   if (!isDraft && !should_handoff) {
