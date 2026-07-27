@@ -11,12 +11,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { Bot, Lock, Info, CheckCircle, Send, MessageSquare, UserPlus, Clock, BookOpen, Reply, Search, Zap, Sparkles, Loader2, RotateCcw, Mail } from "lucide-react";
+import { Bot, Lock, Info, CheckCircle, Send, MessageSquare, UserPlus, Clock, BookOpen, Reply, Search, Zap, Sparkles, Loader2, RotateCcw, Mail, MoreHorizontal, GitMerge } from "lucide-react";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { broadcastConvUpdated } from "@/lib/conv-broadcast";
+import { MergeDialog } from "./MergeDialog";
 
 // ─── Snooze options ─────────────────────────────────────────────────────────
 // Each option resolves to an absolute datetime relative to "now".
@@ -138,6 +139,9 @@ export function ConversationThread() {
 
   // Snooze dropdown (also opened via keyboard shortcut Z)
   const [snoozeOpen, setSnoozeOpen] = useState(false);
+
+  // Merge dialog (Ctrl+Shift+M) — mesclar chamados do mesmo cliente
+  const [mergeOpen, setMergeOpen] = useState(false);
 
   // KB insert popover (Ctrl+Shift+H)
   const [kbOpen, setKbOpen]         = useState(false);
@@ -366,6 +370,13 @@ export function ConversationThread() {
         if (!conv || conv.status === "resolved") return;
         e.preventDefault();
         setKbOpen(true);
+      }
+      // Ctrl+Shift+M → mesclar com outra conversa do mesmo cliente
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "m") {
+        const { activeConversationId: convId } = useInboxStore.getState();
+        if (!convId) return;
+        e.preventDefault();
+        setMergeOpen(true);
       }
     };
     window.addEventListener("keydown", handler);
@@ -805,6 +816,31 @@ export function ConversationThread() {
 
         <TooltipProvider delayDuration={500}>
           <div className="flex items-center gap-2 shrink-0">
+            {/* Menu de ações (⋯) — Mesclar com... */}
+            <DropdownMenu>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-8 w-8 rounded-lg text-foreground hover:bg-surface-hover"
+                    >
+                      <MoreHorizontal className="h-4 w-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                </TooltipTrigger>
+                <TooltipContent>Mais ações</TooltipContent>
+              </Tooltip>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => setMergeOpen(true)} className="gap-2">
+                  <GitMerge className="h-4 w-4" />
+                  <span className="flex-1">Mesclar com…</span>
+                  <span className="text-[10px] text-muted-foreground">Ctrl Shift M</span>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+
             {/* Priority badge */}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -1203,6 +1239,21 @@ export function ConversationThread() {
           </div>
         </TooltipProvider>
       )}
+
+      {/* Dialog de mesclagem — abre pelo menu ⋯ ou Ctrl+Shift+M */}
+      <MergeDialog
+        open={mergeOpen}
+        onOpenChange={setMergeOpen}
+        sourceId={activeConversationId!}
+        sourceContactName={contactName}
+        onMerged={(targetId) => {
+          // A conversa atual foi absorvida — sai dela e vai para o destino.
+          const store = useInboxStore.getState();
+          store.removeConversation(activeConversationId!);
+          store.setActiveConversationId(targetId);
+          store.loadConversations(store.activeTab, null, true);
+        }}
+      />
     </div>
   );
 }
@@ -1217,6 +1268,41 @@ function MessageBubble({
   agentId?: string;
 }) {
   const time = format(new Date(message.created_at), "HH:mm", { locale: ptBR });
+
+  // Card de resumo de mesclagem — mensagem de sistema com metadata.merge
+  const merge = (message.metadata as { merge?: { source?: string; question?: string; summary?: string[]; agent_name?: string } } | undefined)?.merge;
+  if (message.sender_type === "system" && merge) {
+    return (
+      <div className="max-w-[80%] mx-auto w-full animate-fade-in">
+        <div className="rounded-xl border border-border bg-surface/60 p-4">
+          <div className="flex items-center gap-1.5 mb-2 text-muted-foreground">
+            <GitMerge className="h-3.5 w-3.5" />
+            <span className="text-[11px] font-semibold">{message.content}</span>
+          </div>
+          {merge.question && (
+            <div className="mb-2">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-0.5">Motivo</p>
+              <p className="text-[13px] text-foreground leading-snug">{merge.question}</p>
+            </div>
+          )}
+          {merge.summary && merge.summary.length > 0 && (
+            <div>
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">Resumo</p>
+              <ul className="space-y-1">
+                {merge.summary.map((b, i) => (
+                  <li key={i} className="text-[13px] text-foreground leading-snug flex gap-1.5">
+                    <span className="text-muted-foreground shrink-0">•</span>
+                    <span>{b}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <span className="text-[10px] text-muted-foreground mt-2 block">{time}</span>
+        </div>
+      </div>
+    );
+  }
 
   // System message — centered pill
   if (message.sender_type === "system") {

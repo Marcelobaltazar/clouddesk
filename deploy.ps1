@@ -16,7 +16,8 @@ $functions = @(
     "check-widget-eligibility",
     "desk-resend-credentials",
     "desk-inbound-email",
-    "desk-send-email"
+    "desk-send-email",
+    "desk-merge-conversations"
 )
 
 Write-Host ""

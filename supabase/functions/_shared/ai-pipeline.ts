@@ -332,6 +332,66 @@ async function callLLM(
   };
 }
 
+// ─── Resumo de conversa (para mesclagem no painel) ─────────────────────────────
+// Gera { question, summary[] } a partir do histórico de mensagens de uma
+// conversa. Usado pela Edge Function desk-merge-conversations para o card de
+// resumo da conversa absorvida (estilo Intercom).
+
+export interface ConversationSummary {
+  question: string;   // 1 frase: o motivo/pergunta do cliente
+  summary: string[];  // bullets do que aconteceu
+}
+
+export async function summarizeConversation(
+  messages: Array<{ sender_type: string; content: string }>,
+): Promise<ConversationSummary | null> {
+  const apiKey = Deno.env.get('OPENROUTER_API_KEY');
+  if (!apiKey) return null;
+
+  // Monta o transcript legível (sanitizando o conteúdo do cliente).
+  const transcript = messages
+    .filter((m) => m.sender_type !== 'system')
+    .map((m) => {
+      const who = m.sender_type === 'contact' ? 'Cliente'
+        : m.sender_type === 'agent' ? 'Atendente'
+        : 'IA';
+      const text = m.sender_type === 'contact' ? sanitizeContactText(m.content) : String(m.content ?? '');
+      return `${who}: ${text}`;
+    })
+    .join('\n')
+    .slice(0, 8000);
+
+  if (!transcript.trim()) return null;
+
+  const systemPrompt = `Você resume conversas de suporte da Cloudfy para um operador humano.
+Responda SOMENTE com um JSON válido, sem texto antes ou depois, no formato:
+{"question": "<uma frase com o motivo/pergunta principal do cliente>", "summary": ["<bullet 1>", "<bullet 2>", "..."]}
+Regras:
+- "question": uma única frase objetiva descrevendo o que o cliente queria.
+- "summary": de 2 a 5 bullets curtos, factuais, do que aconteceu na conversa (o que o cliente pediu, o que foi respondido/resolvido, pendências).
+- Português do Brasil. Sem emojis. Não invente informação que não esteja na conversa.`;
+
+  try {
+    const llm = await callLLM(apiKey, systemPrompt, [
+      { role: 'user', content: `Resuma esta conversa:\n\n${transcript}` },
+    ]);
+    // Extrai o JSON (o modelo às vezes embrulha em ```json)
+    const raw = llm.content.replace(/```json|```/gi, '').trim();
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    const parsed = JSON.parse(match[0]) as { question?: unknown; summary?: unknown };
+    const question = typeof parsed.question === 'string' ? parsed.question.trim() : '';
+    const summary = Array.isArray(parsed.summary)
+      ? parsed.summary.filter((s): s is string => typeof s === 'string').map((s) => s.trim()).filter(Boolean).slice(0, 5)
+      : [];
+    if (!question && summary.length === 0) return null;
+    return { question, summary };
+  } catch (e) {
+    console.warn('[summarize] falhou:', e instanceof Error ? e.message : e);
+    return null;
+  }
+}
+
 // ─── Embedding nativo (gte-small, 384 dims) ───────────────────────────────────
 
 declare const Supabase: {

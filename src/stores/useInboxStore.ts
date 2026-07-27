@@ -271,6 +271,7 @@ export const useInboxStore = create<InboxState>((set, get) => ({
       .from("desk_conversations")
       .select("*")
       .or(ors.join(","))
+      .neq("status", "merged")  // conversas mescladas não aparecem na busca
       .order("updated_at", { ascending: false })
       .limit(50);
 
