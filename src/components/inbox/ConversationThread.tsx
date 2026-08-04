@@ -332,21 +332,20 @@ export function ConversationThread() {
         tag === "TEXTAREA" ||
         target?.isContentEditable === true;
 
-      // While typing, only allow R/N to switch composer mode when the composer
-      // textarea is empty — otherwise letters must pass through to the message.
-      const inComposer = target === textareaRef.current;
+      // Dentro de qualquer campo de texto, letra é TEXTO — nunca atalho. Antes,
+      // R/N eram capturados no composer vazio e comiam a primeira letra de
+      // palavras como "Não" ou "Recebemos" (sobrava "ão"). Atalhos de letra só
+      // valem com o foco FORA de input/textarea/contenteditable.
+      if (typingFreeText) return;
+
       const key = e.key.toLowerCase();
 
       if (key === "r" || key === "n") {
-        if (typingFreeText && !(inComposer && textareaRef.current?.value.trim() === "")) return;
         e.preventDefault();
         setMode(key === "r" ? "reply" : "note");
         requestAnimationFrame(() => textareaRef.current?.focus());
         return;
       }
-
-      // Z / A only when not typing free text
-      if (typingFreeText) return;
 
       if (key === "z") {
         e.preventDefault();
