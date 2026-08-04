@@ -1047,7 +1047,7 @@ export function ConversationThread() {
               </div>
 
             {/* Textarea */}
-            <div className="flex items-end gap-2 px-3 py-2">
+            <div className="flex items-end gap-2 px-3 py-2.5">
               <Textarea
                 ref={textareaRef}
                 value={content}
@@ -1058,8 +1058,8 @@ export function ConversationThread() {
                     ? "Escreva uma nota interna... (visível só para operadores)"
                     : "Digite sua mensagem... (Enter para enviar)"
                 }
-                className="min-h-[40px] max-h-32 resize-none border-none bg-transparent p-0 text-sm focus-visible:ring-0 placeholder:text-muted-foreground"
-                rows={1}
+                className="min-h-[92px] max-h-[320px] resize-none border-none bg-transparent p-0 text-[15px] leading-relaxed focus-visible:ring-0 placeholder:text-muted-foreground"
+                rows={4}
               />
               <div className="flex items-center gap-1 shrink-0">
                 {/* Copilot: sugerir resposta com IA (mesmo contexto do widget) */}
@@ -1338,7 +1338,7 @@ function MessageBubble({
             <Lock className="h-3 w-3" />
             <span className="text-[10px] font-medium">Nota interna</span>
           </div>
-          <p className="text-sm leading-[21px] whitespace-pre-wrap">{message.content}</p>
+          <p className="text-sm leading-[21px] whitespace-pre-wrap [overflow-wrap:anywhere]">{message.content}</p>
           <span className="text-[11px] opacity-60 mt-1 block text-right">{time}</span>
         </div>
       </div>
@@ -1384,7 +1384,7 @@ function MessageBubble({
             </a>
           ))}
         {message.content && (
-          <p className="text-sm leading-[21px] whitespace-pre-wrap">{message.content}</p>
+          <p className="text-sm leading-[21px] whitespace-pre-wrap [overflow-wrap:anywhere]">{message.content}</p>
         )}
         <span className="text-[11px] text-muted-foreground mt-1 block text-right">{time}</span>
       </div>

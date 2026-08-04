@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Bot, User, KeyRound, Loader2, Check } from "lucide-react";
+import { Bot, User, KeyRound, Loader2, Check, Copy } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import type { WidgetMessage } from "./types";
 import { useWidgetStore } from "./useWidgetStore";
@@ -20,6 +20,7 @@ interface Props {
 // into Markdown image syntax first, so they render inline via the `img` renderer.
 
 const IMG_URL_RE = /(https?:\/\/[^\s)]+\.(?:jpg|jpeg|png|gif|webp)(?:\?[^\s)]*)?)/gi;
+const BARE_URL_RE = /(https?:\/\/[^\s<>()[\]]+)/gi;
 
 function linkifyImages(text: string): string {
   // Skip URLs already inside markdown image syntax: ![alt](url)
@@ -30,17 +31,78 @@ function linkifyImages(text: string): string {
   });
 }
 
+/** URLs cruas (ex.: link de 2ª via da fatura) viram markdown para não estourar
+ *  a largura da bolha como texto contínuo. Ignora as que já são markdown. */
+function linkifyUrls(text: string): string {
+  return text.replace(BARE_URL_RE, (url, _g, offset: number, full: string) => {
+    const before = full.slice(Math.max(0, offset - 2), offset);
+    if (before === "](" || before.endsWith("(")) return url; // já é link/imagem
+    // Pontuação final não faz parte da URL.
+    const trailing = url.match(/[.,;:!?]+$/)?.[0] ?? "";
+    const clean = trailing ? url.slice(0, -trailing.length) : url;
+    return `[${clean}](${clean})${trailing}`;
+  });
+}
+
+/** Link com ação de copiar — usado para qualquer URL nas respostas do bot. */
+function CopyableLink({ href, children }: { href: string; children: React.ReactNode }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(href);
+    } catch {
+      // Fallback para navegadores/contextos sem Clipboard API.
+      const ta = document.createElement("textarea");
+      ta.value = href;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); } catch { /* sem clipboard disponível */ }
+      document.body.removeChild(ta);
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <span className="inline-flex items-baseline gap-1 max-w-full">
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="underline decoration-white/40 underline-offset-2 hover:decoration-white break-all min-w-0"
+      >
+        {children}
+      </a>
+      <button
+        type="button"
+        onClick={handleCopy}
+        title={copied ? "Copiado!" : "Copiar link"}
+        aria-label={copied ? "Link copiado" : "Copiar link"}
+        className="shrink-0 inline-flex items-center justify-center rounded p-0.5 opacity-60 hover:opacity-100 transition-opacity align-middle"
+      >
+        {copied
+          ? <Check className="w-3 h-3 text-emerald-400" />
+          : <Copy className="w-3 h-3" />}
+      </button>
+    </span>
+  );
+}
+
 const markdownComponents: Components = {
   p:      ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
   strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
   em:     ({ children }) => <em className="italic">{children}</em>,
   ul:     ({ children }) => <ul className="list-disc ml-4 space-y-1 mb-2 last:mb-0">{children}</ul>,
   ol:     ({ children }) => <ol className="list-decimal ml-4 space-y-1 mb-2 last:mb-0">{children}</ol>,
-  a:      ({ children, href }) => (
-    <a href={href} target="_blank" rel="noopener noreferrer" className="underline opacity-80 hover:opacity-100">
-      {children}
-    </a>
-  ),
+  a:      ({ children, href }) =>
+    typeof href === "string"
+      ? <CopyableLink href={href}>{children}</CopyableLink>
+      : <span>{children}</span>,
   code: ({ className, children }) => {
     // Block code carries a language-* className; inline code does not.
     const isBlock = !!className;
@@ -62,8 +124,10 @@ const markdownComponents: Components = {
 
 function BotMarkdown({ content }: { content: string }) {
   return (
-    <div className="text-sm leading-relaxed">
-      <ReactMarkdown components={markdownComponents}>{linkifyImages(content)}</ReactMarkdown>
+    <div className="text-sm leading-relaxed min-w-0 [overflow-wrap:anywhere]">
+      <ReactMarkdown components={markdownComponents}>
+        {linkifyUrls(linkifyImages(content))}
+      </ReactMarkdown>
     </div>
   );
 }
@@ -155,8 +219,8 @@ export function ChatWidgetThread({ messages, conversationId, onSend, onResendCre
                 </div>
               )}
 
-              <div className="max-w-[75%]">
-                <div className={`px-3 py-2 rounded-xl text-sm leading-relaxed ${
+              <div className="max-w-[75%] min-w-0">
+                <div className={`px-3 py-2 rounded-xl text-sm leading-relaxed min-w-0 overflow-hidden ${
                   isContact
                     ? "bg-primary text-primary-foreground rounded-br-sm"
                     : isBot
