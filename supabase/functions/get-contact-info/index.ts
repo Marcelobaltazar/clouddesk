@@ -1,6 +1,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.98.0';
 import { corsHeaders } from '../_shared/cors.ts';
 import { verifyOperator } from '../_shared/widget-auth.ts';
+import { fetchBillingInfo, type BillingInfo } from '../_shared/chargefy.ts';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 // Same shape as before — consumers (ChatWidget, ClientInfoPanel, desk-ai-respond)
@@ -50,6 +51,8 @@ interface ContactInfoResult {
   customer: CustomerInfo | null;
   subscriptions: SubscriptionInfo[];
   infras: InfraInfo[];
+  /** Cobrança na Chargefy. null para clientes ainda não migrados da Stripe. */
+  billing?: BillingInfo | null;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -144,6 +147,9 @@ Deno.serve(async (req) => {
     });
 
     // ── 1) account by email ────────────────────────────────────────────────
+    // Cobrança (Chargefy) em paralelo com o banco — não soma latência.
+    const billingPromise = fetchBillingInfo(email).catch(() => null);
+
     const { data: accRow, error: accErr } = await prodClient
       .from('account')
       .select('id, name, email, stripe_customer_id')
@@ -196,7 +202,8 @@ Deno.serve(async (req) => {
         status:          normalizeStatus(row.deployment_status),
         infra_status:    row.deployment_status ?? '',
         product:         row.products?.name ?? '',
-        mrr:             typeof row.purchase?.amount === 'number' ? row.purchase.amount : 0,
+        // purchases.amount vem em CENTAVOS (75480 = R$ 754,80).
+        mrr:             typeof row.purchase?.amount === 'number' ? row.purchase.amount / 100 : 0,
         interval:        '',
         promocode:       '',
         created_at:      row.created_at,
@@ -221,7 +228,12 @@ Deno.serve(async (req) => {
       `[get-contact-info] ${email} → ${subscriptions.length} subscription(s), ${infras.length} infra(s)`,
     );
 
-    const result: ContactInfoResult = { customer, subscriptions, infras };
+    const result: ContactInfoResult = {
+      customer,
+      subscriptions,
+      infras,
+      billing: await billingPromise,
+    };
     return new Response(
       JSON.stringify(result),
       { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
