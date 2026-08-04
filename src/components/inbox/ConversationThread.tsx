@@ -332,21 +332,20 @@ export function ConversationThread() {
         tag === "TEXTAREA" ||
         target?.isContentEditable === true;
 
-      // While typing, only allow R/N to switch composer mode when the composer
-      // textarea is empty — otherwise letters must pass through to the message.
-      const inComposer = target === textareaRef.current;
+      // Dentro de qualquer campo de texto, letra é TEXTO — nunca atalho. Antes,
+      // R/N eram capturados no composer vazio e comiam a primeira letra de
+      // palavras como "Não" ou "Recebemos" (sobrava "ão"). Atalhos de letra só
+      // valem com o foco FORA de input/textarea/contenteditable.
+      if (typingFreeText) return;
+
       const key = e.key.toLowerCase();
 
       if (key === "r" || key === "n") {
-        if (typingFreeText && !(inComposer && textareaRef.current?.value.trim() === "")) return;
         e.preventDefault();
         setMode(key === "r" ? "reply" : "note");
         requestAnimationFrame(() => textareaRef.current?.focus());
         return;
       }
-
-      // Z / A only when not typing free text
-      if (typingFreeText) return;
 
       if (key === "z") {
         e.preventDefault();
@@ -498,9 +497,21 @@ export function ConversationThread() {
   const handleToggleAI = async () => {
     if (!conversation) return;
     const next = !conversation.ai_active;
+    // Reativar a IA precisa também tirar a conversa de 'pending'/'resolved': o
+    // guard do pipeline bloqueia por QUALQUER um dos três (ai_active=false,
+    // pending, resolved). Sem reabrir, o toggle acende mas a IA segue muda.
+    const convUpdate: { ai_active: boolean; updated_at: string; status?: string; resolved_at?: null } = {
+      ai_active: next,
+      updated_at: new Date().toISOString(),
+    };
+    if (next && (conversation.status === "pending" || conversation.status === "resolved")) {
+      convUpdate.status = "open";
+      convUpdate.resolved_at = null;
+    }
+
     const { error } = await supabase
       .from("desk_conversations")
-      .update({ ai_active: next, updated_at: new Date().toISOString() })
+      .update(convUpdate)
       .eq("id", activeConversationId!);
 
     if (error) { toast.error("Erro ao alterar a IA"); return; }
@@ -510,7 +521,10 @@ export function ConversationThread() {
       sender_type: "system",
       content: next ? "IA reativada nesta conversa" : "IA pausada — atendimento humano assumiu",
     });
-    void broadcastConvUpdated(activeConversationId!, { ai_active: next });
+    void broadcastConvUpdated(activeConversationId!, {
+      ai_active: next,
+      ...(convUpdate.status ? { status: convUpdate.status } : {}),
+    });
     toast.success(next ? "IA reativada" : "IA pausada");
   };
 
@@ -1033,7 +1047,7 @@ export function ConversationThread() {
               </div>
 
             {/* Textarea */}
-            <div className="flex items-end gap-2 px-3 py-2">
+            <div className="flex items-end gap-2 px-3 py-2.5">
               <Textarea
                 ref={textareaRef}
                 value={content}
@@ -1044,8 +1058,8 @@ export function ConversationThread() {
                     ? "Escreva uma nota interna... (visível só para operadores)"
                     : "Digite sua mensagem... (Enter para enviar)"
                 }
-                className="min-h-[40px] max-h-32 resize-none border-none bg-transparent p-0 text-sm focus-visible:ring-0 placeholder:text-muted-foreground"
-                rows={1}
+                className="min-h-[92px] max-h-[320px] resize-none border-none bg-transparent p-0 text-[15px] leading-relaxed focus-visible:ring-0 placeholder:text-muted-foreground"
+                rows={4}
               />
               <div className="flex items-center gap-1 shrink-0">
                 {/* Copilot: sugerir resposta com IA (mesmo contexto do widget) */}
@@ -1324,7 +1338,7 @@ function MessageBubble({
             <Lock className="h-3 w-3" />
             <span className="text-[10px] font-medium">Nota interna</span>
           </div>
-          <p className="text-sm leading-[21px] whitespace-pre-wrap">{message.content}</p>
+          <p className="text-sm leading-[21px] whitespace-pre-wrap [overflow-wrap:anywhere]">{message.content}</p>
           <span className="text-[11px] opacity-60 mt-1 block text-right">{time}</span>
         </div>
       </div>
@@ -1370,7 +1384,7 @@ function MessageBubble({
             </a>
           ))}
         {message.content && (
-          <p className="text-sm leading-[21px] whitespace-pre-wrap">{message.content}</p>
+          <p className="text-sm leading-[21px] whitespace-pre-wrap [overflow-wrap:anywhere]">{message.content}</p>
         )}
         <span className="text-[11px] text-muted-foreground mt-1 block text-right">{time}</span>
       </div>

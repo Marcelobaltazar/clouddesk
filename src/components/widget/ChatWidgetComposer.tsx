@@ -147,7 +147,7 @@ export function ChatWidgetComposer({ onSend, disabled, placeholder }: Props) {
           placeholder={placeholder ?? "Digite sua mensagem..."}
           rows={1}
           disabled={disabled}
-          className="flex-1 resize-none bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none py-1.5 max-h-24 scrollbar-thin"
+          className="flex-1 resize-none bg-transparent text-[15px] text-foreground placeholder:text-muted-foreground outline-none py-1.5 min-h-[44px] max-h-40 scrollbar-thin"
           style={{ lineHeight: "1.5" }}
         />
         <button

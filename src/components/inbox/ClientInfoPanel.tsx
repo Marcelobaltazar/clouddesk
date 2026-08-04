@@ -25,7 +25,17 @@ import { format, formatDistanceToNow } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { type ContactInfo, type ContactSubscription, type ContactInfra, planLabel, deploymentStatusStyle } from "@/lib/contact-info";
+import {
+  type ContactInfo,
+  type ContactSubscription,
+  type ContactInfra,
+  type BillingInfo,
+  type BillingSubscription,
+  type BillingInvoice,
+  type BillingCharge,
+  planLabel,
+  deploymentStatusStyle,
+} from "@/lib/contact-info";
 import { formatDateTimeBR } from "@/lib/dates";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -131,8 +141,15 @@ export function ClientInfoPanel() {
       .invoke("get-contact-info", { body: { email } })
       .then(({ data }) => {
         const info = data as ContactInfo | null;
+        const hasBilling =
+          (info?.billing?.subscriptions?.length ?? 0) > 0 ||
+          (info?.billing?.invoices?.length ?? 0) > 0 ||
+          (info?.billing?.charges?.length ?? 0) > 0;
         const hasData =
-          !!info?.customer || (info?.subscriptions?.length ?? 0) > 0 || (info?.infras?.length ?? 0) > 0;
+          !!info?.customer ||
+          (info?.subscriptions?.length ?? 0) > 0 ||
+          (info?.infras?.length ?? 0) > 0 ||
+          hasBilling;
         if (info && hasData) {
           setContactInfo(info);
           // Primeira assinatura define o plano usado no match de SLA
@@ -280,6 +297,14 @@ export function ClientInfoPanel() {
         <>
           <Separator />
           <GroupedResources contactInfo={contactInfo} onCopyDomain={(d) => copyToClipboard(d, "Domínio")} />
+        </>
+      )}
+
+      {/* Cobrança (Chargefy) — só para clientes já migrados */}
+      {contactInfo?.billing && (
+        <>
+          <Separator />
+          <BillingSection billing={contactInfo.billing} />
         </>
       )}
 
@@ -615,6 +640,206 @@ function GroupedResources({
   );
 }
 
+// ─── Cobrança (Chargefy) ──────────────────────────────────────────────────────
+
+const billingStatusStyle: Record<string, { label: string; cls: string; dotCls: string }> = {
+  active:     { label: "Ativa",     cls: "border-emerald-500/30 text-emerald-500", dotCls: "bg-emerald-500" },
+  trialing:   { label: "Teste",     cls: "border-sky-500/30 text-sky-500",         dotCls: "bg-sky-500"     },
+  past_due:   { label: "Atrasada",  cls: "border-amber-500/30 text-amber-500",     dotCls: "bg-amber-500"   },
+  unpaid:     { label: "Não paga",  cls: "border-rose-500/30 text-rose-500",       dotCls: "bg-rose-500"    },
+  paused:     { label: "Pausada",   cls: "border-muted text-muted-foreground",     dotCls: "bg-muted-foreground" },
+  canceled:   { label: "Cancelada", cls: "border-muted text-muted-foreground",     dotCls: "bg-muted-foreground" },
+  incomplete: { label: "Pendente",  cls: "border-amber-500/30 text-amber-500",     dotCls: "bg-amber-500"   },
+};
+
+const invoiceStatusStyle: Record<string, { label: string; cls: string }> = {
+  paid:          { label: "Paga",       cls: "border-emerald-500/30 text-emerald-500" },
+  open:          { label: "Em aberto",  cls: "border-amber-500/30 text-amber-500"     },
+  draft:         { label: "Rascunho",   cls: "border-muted text-muted-foreground"     },
+  uncollectible: { label: "Incobrável", cls: "border-rose-500/30 text-rose-500"       },
+  void:          { label: "Cancelada",  cls: "border-muted text-muted-foreground"     },
+};
+
+const intervalLabel: Record<string, string> = {
+  month: "/mês", year: "/ano", week: "/sem", day: "/dia",
+};
+
+const methodLabel: Record<string, string> = {
+  credit_card: "Cartão", pix: "PIX", boleto: "Boleto",
+};
+
+/** Link externo + botão de copiar — para 2ª via e comprovantes. */
+function LinkAction({ url, label }: { url: string; label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-[10px] text-primary underline underline-offset-2 hover:opacity-80"
+      >
+        {label}
+      </a>
+      <button
+        type="button"
+        onClick={() => copyToClipboard(url, label)}
+        title={`Copiar link — ${label}`}
+        className="opacity-50 hover:opacity-100 transition-opacity"
+      >
+        <Copy className="h-2.5 w-2.5" />
+      </button>
+    </span>
+  );
+}
+
+function BillingSubCard({ sub }: { sub: BillingSubscription }) {
+  const st = billingStatusStyle[sub.status] ?? {
+    label: sub.status || "—", cls: "border-muted text-muted-foreground", dotCls: "bg-muted-foreground",
+  };
+  return (
+    <div className="rounded-md border border-border bg-surface px-2.5 py-2 space-y-1">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs font-medium text-card-foreground truncate">{sub.product_name}</p>
+        <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0 h-4 shrink-0 border", st.cls)}>
+          <span className={cn("h-1.5 w-1.5 rounded-full mr-1", st.dotCls)} />
+          {st.label}
+        </Badge>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] text-muted-foreground">
+        <span className="font-medium text-card-foreground">
+          {formatCurrency(sub.amount, sub.currency)}{intervalLabel[sub.interval] ?? ""}
+        </span>
+        {sub.quantity > 1 && <><span className="opacity-40">·</span><span>{sub.quantity}x</span></>}
+        {sub.next_billing_at && (
+          <><span className="opacity-40">·</span><span>Renova {formatDateShortBR(sub.next_billing_at)}</span></>
+        )}
+      </div>
+      {sub.trial_end && (
+        <p className="text-[10px] text-sky-500">Teste até {formatDateShortBR(sub.trial_end)}</p>
+      )}
+      {sub.cancel_at_period_end && (
+        <p className="text-[10px] text-amber-500">
+          Cancelamento agendado — acesso até {formatDateShortBR(sub.cancel_at ?? sub.current_period_end)}
+        </p>
+      )}
+      {sub.has_pending_update && (
+        <p className="text-[10px] text-amber-500">Alteração de plano agendada</p>
+      )}
+    </div>
+  );
+}
+
+function BillingInvoiceCard({ inv }: { inv: BillingInvoice }) {
+  const st = invoiceStatusStyle[inv.status] ?? { label: inv.status || "—", cls: "border-muted text-muted-foreground" };
+  const overdue = inv.amount_due > 0 && !!inv.due_date && new Date(inv.due_date) < new Date();
+  return (
+    <div className="rounded-md border border-border bg-surface px-2.5 py-2 space-y-1">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-medium text-card-foreground font-mono truncate">{inv.number}</span>
+        <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0 h-4 shrink-0 border", st.cls)}>
+          {st.label}
+        </Badge>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] text-muted-foreground">
+        <span className="font-medium text-card-foreground">{formatCurrency(inv.amount_total, inv.currency)}</span>
+        {inv.amount_due > 0 && (
+          <><span className="opacity-40">·</span>
+          <span className={overdue ? "text-rose-500 font-medium" : "text-amber-500"}>
+            {overdue ? "Vencida" : "Em aberto"} {formatCurrency(inv.amount_due, inv.currency)}
+          </span></>
+        )}
+        {inv.due_date && <><span className="opacity-40">·</span><span>Venc. {formatDateShortBR(inv.due_date)}</span></>}
+        {inv.paid_at && <><span className="opacity-40">·</span><span>Paga {formatDateShortBR(inv.paid_at)}</span></>}
+      </div>
+      {(inv.interest_amount > 0 || inv.late_fee_amount > 0 || inv.credit_applied > 0) && (
+        <div className="flex flex-wrap gap-x-1.5 text-[10px] text-muted-foreground">
+          {inv.interest_amount > 0 && <span>Juros {formatCurrency(inv.interest_amount, inv.currency)}</span>}
+          {inv.late_fee_amount > 0 && <span>Multa {formatCurrency(inv.late_fee_amount, inv.currency)}</span>}
+          {inv.credit_applied > 0 && <span>Crédito {formatCurrency(inv.credit_applied, inv.currency)}</span>}
+        </div>
+      )}
+      {(inv.hosted_url || inv.pdf_url) && (
+        <div className="flex flex-wrap items-center gap-2 pt-0.5">
+          {inv.hosted_url && <LinkAction url={inv.hosted_url} label="2ª via" />}
+          {inv.pdf_url && <LinkAction url={inv.pdf_url} label="PDF" />}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BillingChargeCard({ chg }: { chg: BillingCharge }) {
+  const ok = chg.paid;
+  return (
+    <div className="rounded-md border border-border bg-surface px-2.5 py-2 space-y-1">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-medium text-card-foreground">
+          {formatCurrency(chg.amount, chg.currency)}
+        </span>
+        <Badge
+          variant="outline"
+          className={cn("text-[9px] px-1.5 py-0 h-4 shrink-0 border",
+            ok ? "border-emerald-500/30 text-emerald-500" : "border-rose-500/30 text-rose-500")}
+        >
+          {ok ? "Aprovado" : chg.status === "canceled" ? "Cancelado" : "Recusado"}
+        </Badge>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] text-muted-foreground">
+        <span>{formatDateShortBR(chg.created_at)}</span>
+        <span className="opacity-40">·</span>
+        <span>{methodLabel[chg.method] ?? chg.method ?? "—"}</span>
+        {chg.card_brand && chg.card_last4 && (
+          <><span className="opacity-40">·</span><span className="capitalize">{chg.card_brand} ••{chg.card_last4}</span></>
+        )}
+        {chg.installments && chg.installments > 1 && (
+          <><span className="opacity-40">·</span><span>{chg.installments}x</span></>
+        )}
+      </div>
+      {chg.error_message && (
+        <p className="text-[10px] text-rose-500 [overflow-wrap:anywhere]">{chg.error_message}</p>
+      )}
+      {chg.receipt_url && <LinkAction url={chg.receipt_url} label="Comprovante" />}
+    </div>
+  );
+}
+
+function BillingSection({ billing }: { billing: BillingInfo }) {
+  const hasAny =
+    billing.subscriptions.length > 0 || billing.invoices.length > 0 || billing.charges.length > 0;
+  if (!hasAny) return null;
+
+  return (
+    <div className="space-y-3">
+      {billing.subscriptions.length > 0 && (
+        <div className="space-y-1.5">
+          <SectionHeader icon={CreditCard} title="Cobrança" count={billing.subscriptions.length} />
+          <div className="space-y-1.5">
+            {billing.subscriptions.map((s, i) => <BillingSubCard key={i} sub={s} />)}
+          </div>
+        </div>
+      )}
+
+      {billing.invoices.length > 0 && (
+        <div className="space-y-1.5">
+          <SectionHeader icon={Package} title="Faturas" count={billing.invoices.length} />
+          <div className="space-y-1.5">
+            {billing.invoices.map((inv, i) => <BillingInvoiceCard key={inv.number || i} inv={inv} />)}
+          </div>
+        </div>
+      )}
+
+      {billing.charges.length > 0 && (
+        <div className="space-y-1.5">
+          <SectionHeader icon={CheckCircle2} title="Pagamentos" count={billing.charges.length} />
+          <div className="space-y-1.5">
+            {billing.charges.map((c, i) => <BillingChargeCard key={i} chg={c} />)}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SubscriptionCard({ sub }: { sub: ContactSubscription }) {
   const style = deploymentStatusStyle(sub.infra_status);
   const plan = planLabel(sub) ?? sub.product ?? "Assinatura";
@@ -713,6 +938,14 @@ function UnknownContactPanel({
         <>
           <Separator />
           <GroupedResources contactInfo={contactInfo} onCopyDomain={(d) => copyToClipboard(d, "Domínio")} />
+        </>
+      )}
+
+      {/* Cobrança (Chargefy) — só para clientes já migrados */}
+      {contactInfo?.billing && (
+        <>
+          <Separator />
+          <BillingSection billing={contactInfo.billing} />
         </>
       )}
 

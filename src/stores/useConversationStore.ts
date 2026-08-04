@@ -189,7 +189,9 @@ export const useConversationStore = create<ConversationState>((set) => ({
       purchase_code: p.purchase_code as string | null,
       purchase_date: p.purchase_date as string | null,
       status: p.status as PurchaseStatus,
-      amount: p.amount as number | null,
+      // purchases.amount é armazenado em CENTAVOS (ex.: 75480 = R$ 754,80).
+      // Conferido contra a Chargefy, que é a fonte de verdade da cobrança.
+      amount: typeof p.amount === "number" ? p.amount / 100 : null,
       currency: p.currency as string | null,
       pending_deployment: p.pending_deployment as boolean | null,
       deployment_failure_reason: p.deployment_failure_reason as string | null,

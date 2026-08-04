@@ -43,3 +43,6 @@ supabase/.temp/
 
 # Segredo HMAC do widget (vai para Supabase Secrets + backend do cloudfy.space)
 .widget-identity-secret.local
+
+# MCP local config (contém API keys — nunca commitar)
+.mcp.json

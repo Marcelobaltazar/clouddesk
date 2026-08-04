@@ -29,6 +29,7 @@ import {
   type ContactInfra,
   type ContactSubscription,
 } from './contact-info.ts';
+import type { BillingInfo } from './chargefy.ts';
 import { broadcastToConversation } from './broadcast.ts';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -424,6 +425,11 @@ const INFRA_DOWN_RE =
 
 // "assinatura" NÃO entra aqui: sozinha é ampla demais (ex.: "cancelar minha
 // assinatura" é cancelamento, não billing — e cancelamento tem precedência).
+// Pedidos de ALTERAÇÃO em cobrança — a IA só lê a Chargefy, nunca escreve.
+// Estes continuam indo para humano; consultas de leitura, não.
+const BILLING_ACTION_RE =
+  /(reembols|estorn|devolv|desbloque|liberar|reativar|regulariz|trocar? (o |meu )?cart[ãa]o|alterar? (a )?forma|(mudar|trocar|alterar|migrar)( de| o)? plano|upgrade|downgrade|cobran[çc]a indevida|cobrad[oa] (a mais|duas vezes|em dobro|2x)|em dobro|duplicad|n[ãa]o reconhe[çc]o|contestar?)/i;
+
 const BLOCKED_PAYMENT_RE =
   /(bloquead|desbloquear|pag(uei|amento|ou|ar)|\bpago\b|fatura|cobran[çc]|reembolso|estorno|cart[ãa]o|inadimpl|regulariz|liberar|reativar|voltar (a )?(funcionar|ativa))/i;
 
@@ -525,6 +531,129 @@ function friendlySubStatus(normalized: string | null | undefined): string {
   return 'Indisponível no momento';
 }
 
+function friendlyBillingStatus(raw: string): string {
+  switch ((raw ?? '').toLowerCase()) {
+    case 'active':     return 'Ativa';
+    case 'trialing':   return 'Em período de teste';
+    case 'past_due':   return 'Com pagamento em atraso';
+    case 'unpaid':     return 'Não paga';
+    case 'paused':     return 'Pausada';
+    case 'canceled':   return 'Cancelada';
+    case 'incomplete': return 'Aguardando confirmação do primeiro pagamento';
+    default:           return 'Indisponível no momento';
+  }
+}
+
+function friendlyInvoiceStatus(raw: string): string {
+  switch ((raw ?? '').toLowerCase()) {
+    case 'paid':           return 'Paga';
+    case 'open':           return 'Em aberto';
+    case 'draft':          return 'Em preparação';
+    case 'uncollectible':  return 'Não recebida';
+    case 'void':           return 'Cancelada';
+    default:               return 'Indisponível no momento';
+  }
+}
+
+function friendlyInterval(raw: string): string {
+  switch ((raw ?? '').toLowerCase()) {
+    case 'month': return 'por mês';
+    case 'year':  return 'por ano';
+    case 'week':  return 'por semana';
+    case 'day':   return 'por dia';
+    default:      return '';
+  }
+}
+
+function friendlyMethod(raw: string): string {
+  switch ((raw ?? '').toLowerCase()) {
+    case 'credit_card': return 'Cartão de crédito';
+    case 'pix':         return 'PIX';
+    case 'boleto':      return 'Boleto';
+    default:            return 'Não informado';
+  }
+}
+
+function money(amount: number, currency: string): string {
+  const cur = (currency || 'BRL').toUpperCase();
+  try {
+    return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: cur }).format(amount);
+  } catch {
+    return `${cur} ${amount.toFixed(2)}`;
+  }
+}
+
+/** Bloco de cobrança (Chargefy). Vazio quando o cliente não foi migrado. */
+function buildBillingContext(billing: BillingInfo | null | undefined): string {
+  if (!billing) return '';
+
+  const fmtDate = (iso: string | null): string => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime())
+      ? ''
+      : d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  };
+
+  const subs = billing.subscriptions.map((s) => {
+    const parts = [
+      `- ${s.product_name}`,
+      `Situação: ${friendlyBillingStatus(s.status)}`,
+      `Valor: ${money(s.amount, s.currency)} ${friendlyInterval(s.interval)}`.trim(),
+    ];
+    if (s.quantity > 1)          parts.push(`Quantidade: ${s.quantity}`);
+    if (s.started_at)            parts.push(`Assinante desde: ${fmtDate(s.started_at)}`);
+    if (s.trial_end)             parts.push(`Teste grátis até: ${fmtDate(s.trial_end)}`);
+    if (s.next_billing_at)       parts.push(`Próxima cobrança: ${fmtDate(s.next_billing_at)}`);
+    if (s.cancel_at_period_end)  parts.push(`Cancelamento agendado — acesso até ${fmtDate(s.cancel_at ?? s.current_period_end)}`);
+    if (s.has_pending_update)    parts.push('Há uma alteração de plano agendada');
+    return parts.join(' | ');
+  }).join('\n');
+
+  const invs = billing.invoices.map((i) => {
+    const parts = [
+      `- Fatura ${i.number}`,
+      `Situação: ${friendlyInvoiceStatus(i.status)}`,
+      `Valor: ${money(i.amount_total, i.currency)}`,
+    ];
+    if (i.amount_due > 0)      parts.push(`Em aberto: ${money(i.amount_due, i.currency)}`);
+    if (i.due_date)            parts.push(`Vencimento: ${fmtDate(i.due_date)}`);
+    if (i.paid_at)             parts.push(`Paga em: ${fmtDate(i.paid_at)}`);
+    if (i.amount_discount > 0) parts.push(`Desconto: ${money(i.amount_discount, i.currency)}`);
+    if (i.interest_amount > 0) parts.push(`Juros: ${money(i.interest_amount, i.currency)}`);
+    if (i.late_fee_amount > 0) parts.push(`Multa: ${money(i.late_fee_amount, i.currency)}`);
+    if (i.credit_applied > 0)  parts.push(`Crédito aplicado: ${money(i.credit_applied, i.currency)}`);
+    if (i.hosted_url)          parts.push(`Link da 2ª via: ${i.hosted_url}`);
+    return parts.join(' | ');
+  }).join('\n');
+
+  const chgs = billing.charges.map((c) => {
+    const parts = [
+      `- ${fmtDate(c.created_at)}`,
+      `${money(c.amount, c.currency)}`,
+      `Forma: ${friendlyMethod(c.method)}`,
+      `Situação: ${c.paid ? 'Aprovado' : (c.status === 'canceled' ? 'Cancelado' : 'Não aprovado')}`,
+    ];
+    if (c.card_brand && c.card_last4) parts.push(`Cartão: ${c.card_brand} final ${c.card_last4}`);
+    if (c.installments && c.installments > 1) parts.push(`Parcelado em ${c.installments}x`);
+    if (c.error_message) parts.push(`Motivo da recusa: ${c.error_message}`);
+    if (c.receipt_url)   parts.push(`Comprovante: ${c.receipt_url}`);
+    return parts.join(' | ');
+  }).join('\n');
+
+  const blocks: string[] = [];
+  if (subs) blocks.push(`Assinaturas (cobrança):\n${subs}`);
+  if (invs) blocks.push(`Últimas faturas:\n${invs}`);
+  if (chgs) blocks.push(`Últimos pagamentos:\n${chgs}`);
+  if (blocks.length === 0) return '';
+
+  return `
+--- DADOS DE COBRANÇA DO CLIENTE ---
+${blocks.join('\n\n')}
+------------------------------------
+`;
+}
+
 function buildClientContext(info: ContactInfoResult | null): string {
   if (!info?.customer) return '';
 
@@ -555,12 +684,14 @@ Email: ${customer.email}
 Assinaturas:
 ${subLines || '(nenhuma assinatura registrada)'}
 ------------------------
-
+${buildBillingContext(info.billing)}
 --- REGRAS SOBRE OS DADOS DO CLIENTE ---
 - Você TEM acesso aos dados reais do cliente acima.
 - Use essas informações para responder com precisão.
 - NUNCA diga que não tem acesso a informações que estão no bloco DADOS DO CLIENTE.
-- Para valores de plano ou preço, diga que não tem essa informação — ela NÃO está nos dados disponíveis.
+- Valores, faturas e pagamentos: responda usando SOMENTE o bloco DADOS DE COBRANÇA. Copie os valores exatamente como aparecem ali (já estão formatados em reais) — NUNCA recalcule, converta ou arredonde.
+- Se o bloco DADOS DE COBRANÇA não estiver presente, diga que não consegue consultar os detalhes de cobrança no momento e ofereça transferir para um atendente. NUNCA afirme que o cliente não tem assinatura, não tem faturas ou não pagou — a ausência do bloco significa apenas que a informação não está disponível para você.
+- Ao informar um link de 2ª via ou comprovante, use a URL EXATAMENTE como aparece no bloco. Nunca invente, encurte ou modifique links.
 - NUNCA INVENTE produtos, planos ou infraestruturas que não estejam listados no bloco DADOS DO CLIENTE. Use SOMENTE os nomes que aparecem ali, EXATAMENTE como estão escritos.
 - Ao listar assinaturas/infras do cliente, copie os nomes e status exatamente do bloco — não os traduza, não os "embeleze", não invente descrições.
 - NUNCA mencione nomes de campos internos: purchase_code, infra_id, customer_id, subscription_id, default_domain.
@@ -677,7 +808,9 @@ NÃO transfira para humano por padrão. Antes de pensar em transferir, siga esta
 
 Você DEVE responder APENAS com a palavra-chave ${TRANSFER_KEYWORD} SOMENTE em um destes casos:
   a) O cliente pediu EXPLICITAMENTE para falar com um humano/atendente; OU
-  b) É um problema técnico específico que realmente precisa de intervenção humana e que você não consegue resolver — por exemplo: infraestrutura bloqueada, problema de pagamento/cobrança não resolvido, ou um bug reportado pelo cliente.
+  b) É um problema técnico específico que realmente precisa de intervenção humana e que você não consegue resolver — por exemplo: infraestrutura bloqueada ou um bug reportado pelo cliente.
+
+Perguntas sobre cobrança (valor do plano, fatura, 2ª via, vencimento, se o pagamento passou, motivo de recusa do cartão, parcelas) NÃO são motivo de transferência: responda você mesma usando o bloco DADOS DE COBRANÇA. Só transfira se o cliente pedir explicitamente, ou se ele quiser ALTERAR algo (cancelar, reembolsar, trocar de plano, mudar forma de pagamento) — você só consulta, não executa alterações.
 
 Quando transferir, retorne APENAS ${TRANSFER_KEYWORD} — nada antes ou depois, sem explicação.
 Dúvida genérica, pergunta fora de contexto, ou algo que você consegue responder NÃO são motivos para transferir.
@@ -1175,12 +1308,27 @@ export async function runAiPipeline(
     }
   }
 
-  // P7-B: menção a pagamento/fatura/cobrança/desbloqueio (sem BLOCKED detectado
-  // no CRM) → billing SEMPRE escala para humano (CLAUDE.md §7.6). A IA não mexe
-  // em cobrança. Só não escala se for cliente somente Starter (autoatendimento).
-  // Mensagens de cancelamento SEM sinal de falha não caem aqui (mentionsCancel
-  // sem falha = IA orienta o autoatendimento).
-  if (!isDraft && mentionsBilling && !mentionsCancel && !isStarterOnlyClient(contactInfo)) {
+  // P7-B: menção a pagamento/fatura/cobrança/desbloqueio.
+  //
+  // A IA CONSULTA cobrança (dados reais da Chargefy no contexto) mas NÃO executa
+  // alterações — o acesso à Chargefy é somente leitura. Então só escala quando o
+  // cliente quer MUDAR algo (reembolso, estorno, desbloqueio, trocar cartão) ou
+  // quando não temos os dados dele para responder.
+  //
+  // Perguntas de consulta ("qual o valor da minha fatura", "qual cartão
+  // cadastrei", "meu pagamento passou") seguem para o modelo, que responde com o
+  // bloco DADOS DE COBRANÇA.
+  const wantsBillingChange = BILLING_ACTION_RE.test(message);
+  const hasBillingData = (contactInfo?.billing?.subscriptions?.length ?? 0) > 0
+    || (contactInfo?.billing?.invoices?.length ?? 0) > 0
+    || (contactInfo?.billing?.charges?.length ?? 0) > 0;
+
+  // Pedido de alteração escala por si só — "quero mudar de plano" ou "fui
+  // cobrado em dobro" não contêm as palavras de BLOCKED_PAYMENT_RE.
+  if (
+    !isDraft && !mentionsCancel && !isStarterOnlyClient(contactInfo) &&
+    (wantsBillingChange || (mentionsBilling && !hasBillingData))
+  ) {
     const reply =
       `Entendi que a sua dúvida envolve pagamento/cobrança. Esse tipo de assunto é tratado diretamente pela nossa equipe. 💳\n\n` +
       `Já encaminhei o seu caso para um atendente humano — ele vai te responder por aqui assim que possível. Enquanto isso, se tiver um comprovante ou print, pode anexar aqui que agiliza. 🙏`;

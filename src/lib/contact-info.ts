@@ -31,10 +31,73 @@ export interface ContactInfra {
   requests_30d: number;
 }
 
+// ─── Cobrança (Chargefy) ──────────────────────────────────────────────────────
+// Espelha os tipos de supabase/functions/_shared/chargefy.ts. Valores já vêm
+// convertidos de centavos pela Edge Function.
+
+export interface BillingSubscription {
+  status: string;
+  product_name: string;
+  amount: number;
+  currency: string;
+  interval: string;
+  quantity: number;
+  started_at: string;
+  next_billing_at: string;
+  current_period_end: string;
+  trial_end: string | null;
+  cancel_at_period_end: boolean;
+  cancel_at: string | null;
+  has_pending_update: boolean;
+}
+
+export interface BillingInvoice {
+  number: string;
+  status: string;
+  amount_total: number;
+  amount_due: number;
+  amount_discount: number;
+  currency: string;
+  due_date: string | null;
+  paid_at: string | null;
+  hosted_url: string | null;
+  pdf_url: string | null;
+  interest_amount: number;
+  late_fee_amount: number;
+  credit_applied: number;
+  billing_reason: string | null;
+  allow_late_payment: boolean;
+}
+
+export interface BillingCharge {
+  status: string;
+  paid: boolean;
+  amount: number;
+  currency: string;
+  created_at: string;
+  method: string;
+  card_brand: string | null;
+  card_last4: string | null;
+  installments: number | null;
+  receipt_url: string | null;
+  error_message: string | null;
+  error_code: string | null;
+}
+
+export interface BillingInfo {
+  customer_since: string;
+  phone: string | null;
+  subscriptions: BillingSubscription[];
+  invoices: BillingInvoice[];
+  charges: BillingCharge[];
+}
+
 export interface ContactInfo {
   customer: ContactCustomer | null;
   subscriptions: ContactSubscription[];
   infras: ContactInfra[];
+  /** null para clientes ainda não migrados para a Chargefy. */
+  billing?: BillingInfo | null;
 }
 
 export const intervalLabels: Record<string, string> = {
