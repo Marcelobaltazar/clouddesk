@@ -3,6 +3,7 @@
 // Somente .select() em account / infrastructure / products / purchases.
 
 import { newClient, type ServiceClient } from './supabase.ts';
+import { fetchBillingInfo, type BillingInfo } from './chargefy.ts';
 
 export interface ContactCustomer {
   name: string;
@@ -37,6 +38,10 @@ export interface ContactInfoResult {
   customer: ContactCustomer | null;
   subscriptions: ContactSubscription[];
   infras: ContactInfra[];
+  /** Cobrança na Chargefy. null quando o cliente ainda não foi migrado da
+   *  Stripe — maioria dos casos hoje. Campo aditivo: consumidores que só usam
+   *  customer/subscriptions/infras seguem funcionando sem alteração. */
+  billing?: BillingInfo | null;
 }
 
 interface InfraQueryRow {
@@ -81,6 +86,10 @@ export async function fetchContactInfo(email: string): Promise<ContactInfoResult
     return null;
   }
 
+  // Cobrança (Chargefy) roda em paralelo com as queries do banco — não soma
+  // latência. Falha ou cliente não-migrado resolve para null.
+  const billingPromise = fetchBillingInfo(email).catch(() => null);
+
   const { data: accRow } = await prod
     .from('account')
     .select('id, name, email, stripe_customer_id')
@@ -117,7 +126,9 @@ export async function fetchContactInfo(email: string): Promise<ContactInfoResult
       status:          normalizeInfraStatus(row.deployment_status),
       infra_status:    row.deployment_status ?? '',
       product:         row.products?.name ?? '',
-      mrr:             typeof row.purchase?.amount === 'number' ? row.purchase.amount : 0,
+      // purchases.amount vem em CENTAVOS (75480 = R$ 754,80) — conferido contra
+      // a Chargefy. Sem dividir, o painel mostrava valores 100x maiores.
+      mrr:             typeof row.purchase?.amount === 'number' ? row.purchase.amount / 100 : 0,
       interval:        '',
       promocode:       '',
       created_at:      row.created_at,
@@ -138,7 +149,7 @@ export async function fetchContactInfo(email: string): Promise<ContactInfoResult
     };
   });
 
-  return { customer, subscriptions, infras };
+  return { customer, subscriptions, infras, billing: await billingPromise };
 }
 
 // ─── Reenvio de credenciais (validação de posse + chamada ao partner API) ──────
