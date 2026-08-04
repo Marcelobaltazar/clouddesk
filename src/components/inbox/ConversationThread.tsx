@@ -498,9 +498,21 @@ export function ConversationThread() {
   const handleToggleAI = async () => {
     if (!conversation) return;
     const next = !conversation.ai_active;
+    // Reativar a IA precisa também tirar a conversa de 'pending'/'resolved': o
+    // guard do pipeline bloqueia por QUALQUER um dos três (ai_active=false,
+    // pending, resolved). Sem reabrir, o toggle acende mas a IA segue muda.
+    const convUpdate: { ai_active: boolean; updated_at: string; status?: string; resolved_at?: null } = {
+      ai_active: next,
+      updated_at: new Date().toISOString(),
+    };
+    if (next && (conversation.status === "pending" || conversation.status === "resolved")) {
+      convUpdate.status = "open";
+      convUpdate.resolved_at = null;
+    }
+
     const { error } = await supabase
       .from("desk_conversations")
-      .update({ ai_active: next, updated_at: new Date().toISOString() })
+      .update(convUpdate)
       .eq("id", activeConversationId!);
 
     if (error) { toast.error("Erro ao alterar a IA"); return; }
@@ -510,7 +522,10 @@ export function ConversationThread() {
       sender_type: "system",
       content: next ? "IA reativada nesta conversa" : "IA pausada — atendimento humano assumiu",
     });
-    void broadcastConvUpdated(activeConversationId!, { ai_active: next });
+    void broadcastConvUpdated(activeConversationId!, {
+      ai_active: next,
+      ...(convUpdate.status ? { status: convUpdate.status } : {}),
+    });
     toast.success(next ? "IA reativada" : "IA pausada");
   };
 
