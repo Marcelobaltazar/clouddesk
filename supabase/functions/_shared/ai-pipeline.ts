@@ -207,6 +207,20 @@ async function applyPlanTag(
 
 const HELP_CENTER_URL = (Deno.env.get('HELP_CENTER_URL') ?? 'https://clouddesk.apps.cloudfy.cloud').replace(/\/+$/, '');
 
+// ─── Comunidade ───────────────────────────────────────────────────────────────
+// Grupos abertos a todos os clientes. Convite feito no encerramento e em
+// dúvidas gerais — nunca em ticket de problema, cobrança ou cliente irritado
+// (ver shouldInviteToCommunity).
+const COMMUNITY_WHATSAPP = Deno.env.get('COMMUNITY_WHATSAPP_URL') ?? 'https://chat.whatsapp.com/Hwuzqn4tXhxLSkpnivihIE';
+const COMMUNITY_DISCORD  = Deno.env.get('COMMUNITY_DISCORD_URL')  ?? 'https://discord.gg/uDftSRtfKe';
+
+const COMMUNITY_INVITE = `Ah, e se quiser trocar ideia com outros usuários da Cloudfy, temos duas comunidades abertas:
+
+💬 WhatsApp: ${COMMUNITY_WHATSAPP}
+🎮 Discord: ${COMMUNITY_DISCORD}
+
+É lá que rolam dicas de automação, novidades e ajuda entre a galera.`;
+
 function slugifyTitle(title: string): string {
   return title
     .toLowerCase()
@@ -873,6 +887,62 @@ const CLIENT_CLOSURE_RE =
 
 function clientConfirmedClosure(message: string): boolean {
   return CLIENT_CLOSURE_RE.test(message) && !message.includes('?');
+}
+
+// ─── Convite para as comunidades ──────────────────────────────────────────────
+// Anexado server-side (não é decisão do modelo, que tenderia a repetir ou a
+// convidar na hora errada). Duas janelas: encerramento da conversa e dúvidas
+// gerais já resolvidas.
+
+/** Já convidamos nesta conversa? Evita repetir no mesmo atendimento. */
+function alreadyInvited(history: MessageRow[]): boolean {
+  return history.some(
+    (m) => m.sender_type === 'bot' && m.content.includes(COMMUNITY_WHATSAPP),
+  );
+}
+
+interface InviteContext {
+  history: MessageRow[];
+  analysis: MessageAnalysis | null;
+  autoResolved: boolean;
+  shouldHandoff: boolean;
+  isDraft: boolean;
+  hasQuickReplies: boolean;
+  hasCredentialActions: boolean;
+}
+
+/**
+ * Convida quando o atendimento terminou bem, sem atrapalhar quem está com
+ * problema. NUNCA convida em: handoff, cliente irritado/negativo, urgência
+ * alta ou crítica, temas sensíveis (cobrança, cancelamento, infra fora do ar)
+ * ou quando ainda há ação pendente do cliente.
+ */
+function shouldInviteToCommunity(ctx: InviteContext): boolean {
+  const { history, analysis, autoResolved, shouldHandoff, isDraft } = ctx;
+
+  // Rascunho do operador nunca leva convite — quem escreve é humano.
+  if (isDraft || shouldHandoff || !analysis) return false;
+
+  // Ação pendente do cliente (botão de credenciais, pergunta com opções):
+  // a conversa não terminou de fato.
+  if (ctx.hasQuickReplies || ctx.hasCredentialActions) return false;
+
+  if (alreadyInvited(history)) return false;
+
+  // Cliente insatisfeito ou com urgência: convite soa desatento.
+  if (analysis.sentiment === 'negativo' || analysis.sentiment === 'irritado') return false;
+  if (analysis.urgency === 'alta' || analysis.urgency === 'critica') return false;
+
+  // Temas sensíveis — mesmo resolvidos, não é hora de convidar.
+  const sensitiveIntents = ['billing', 'cancelamento', 'infra_down'];
+  if (sensitiveIntents.includes(analysis.intent)) return false;
+
+  // Janela 1 — a conversa está sendo encerrada.
+  if (autoResolved) return true;
+
+  // Janela 2 — dúvida geral resolvida, sem ser ticket de problema.
+  const generalIntents = ['duvida_geral', 'n8n', 'evolution', 'dominio'];
+  return analysis.resolved === true && generalIntents.includes(analysis.intent);
 }
 
 // ─── Análise de intenção / sentimento / urgência ─────────────────────────────
@@ -1575,6 +1645,24 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
 
   // Cinto e suspensório: nenhum marcador de controle sai para o cliente.
   reply = reply.replace(CONTROL_MARKERS_RE, '').replace(/\n{3,}/g, '\n\n').trim();
+
+  // Convite às comunidades — anexado server-side depois da limpeza, para não
+  // ser removido junto com os marcadores nem virar decisão do modelo.
+  if (
+    reply &&
+    shouldInviteToCommunity({
+      history,
+      analysis,
+      autoResolved: auto_resolved,
+      shouldHandoff: should_handoff,
+      isDraft,
+      hasQuickReplies: !!metadata?.quick_replies,
+      hasCredentialActions: !!metadata?.credential_actions,
+    })
+  ) {
+    reply = `${reply}\n\n${COMMUNITY_INVITE}`;
+    console.log(`[AI] Convite às comunidades anexado (intent=${analysis?.intent} resolved=${auto_resolved})`);
+  }
 
   return {
     // Handoff normal: o "reply" é só a keyword — o cliente recebe apenas a
