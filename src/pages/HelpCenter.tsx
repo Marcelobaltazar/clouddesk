@@ -12,16 +12,31 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import ReactMarkdown, { type Components } from "react-markdown";
 import { supabase } from "@/integrations/supabase/client";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ArticleMarkdown } from "@/components/help/ArticleMarkdown";
 import {
-  Search, ChevronRight, ArrowLeft, BookOpen,
-  AlertTriangle, CheckCircle2, XCircle,
-  HelpCircle, RefreshCw, Wrench, CreditCard,
-  Zap, MessageCircle, Server, LayoutGrid,
+  Search, ChevronRight, ChevronLeft, ArrowLeft, BookOpen,
+  HelpCircle, RefreshCw, Wrench, CreditCard, Clock, List,
+  Zap, MessageCircle, Server, LayoutGrid, FileText, Home,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  normalizeArticleMarkdown,
+  readingTimeMinutes,
+  extractToc,
+  type TocEntry,
+} from "@/lib/help-markdown";
+
+const SITE_NAME = "Central de Ajuda Cloudfy";
+
+/** Mantém o título da aba coerente com a página aberta. */
+function usePageTitle(title: string | null) {
+  useEffect(() => {
+    document.title = title ? `${title} · ${SITE_NAME}` : SITE_NAME;
+    return () => { document.title = "CloudDesk — Suporte Cloudfy"; };
+  }, [title]);
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -231,105 +246,32 @@ function parseArticleId(param: string): string {
   return idx > 0 ? param.slice(0, idx) : param;
 }
 
-// ─── Markdown callouts ────────────────────────────────────────────────────────
-
-const CALLOUT_PATTERNS: Array<{
-  regex: RegExp;
-  icon: typeof AlertTriangle;
-  bg: string; border: string; text: string; iconColor: string;
-}> = [
-  { regex: /^⚠️/, icon: AlertTriangle,  bg: "bg-amber-500/10",   border: "border-amber-500/40",   text: "text-amber-200",   iconColor: "text-amber-400" },
-  { regex: /^🔴/, icon: XCircle,        bg: "bg-rose-500/10",    border: "border-rose-500/40",    text: "text-rose-200",    iconColor: "text-rose-400"  },
-  { regex: /^✅/, icon: CheckCircle2,   bg: "bg-emerald-500/10", border: "border-emerald-500/40", text: "text-emerald-200", iconColor: "text-emerald-400"},
-];
-
-function CalloutBlockquote({ children }: { children: React.ReactNode }) {
-  const raw = String(
-    (Array.isArray(children) ? children : [children])
-      .map((c) => (typeof c === "string" ? c : ""))
-      .join("")
-  ).trimStart();
-
-  const pattern = CALLOUT_PATTERNS.find((p) => p.regex.test(raw));
-
-  if (!pattern) {
-    return (
-      <blockquote className="border-l-4 border-primary/40 pl-4 italic text-muted-foreground my-4">
-        {children}
-      </blockquote>
-    );
-  }
-
-  const Icon = pattern.icon;
-  return (
-    <div className={cn("flex gap-3 items-start rounded-lg border px-4 py-3 my-4", pattern.bg, pattern.border)}>
-      <Icon className={cn("h-4 w-4 shrink-0 mt-0.5", pattern.iconColor)} />
-      <div className={cn("text-sm leading-relaxed", pattern.text)}>{children}</div>
-    </div>
-  );
-}
-
-const MD_COMPONENTS: Components = {
-  h1: ({ children }) => <h1 className="text-2xl font-bold text-foreground mt-8 mb-3">{children}</h1>,
-  h2: ({ children }) => <h2 className="text-xl font-semibold text-foreground mt-7 mb-2 border-b border-border pb-1">{children}</h2>,
-  h3: ({ children }) => <h3 className="text-lg font-semibold text-foreground mt-5 mb-2">{children}</h3>,
-  p:  ({ children }) => <p className="text-[15px] leading-relaxed text-foreground/90 mb-4">{children}</p>,
-  a:  ({ children, href }) => (
-    <a href={href} target="_blank" rel="noopener noreferrer"
-       className="text-primary underline underline-offset-2 hover:text-primary/80">{children}</a>
-  ),
-  ul: ({ children }) => <ul className="list-disc ml-5 space-y-1.5 mb-4 text-[15px] text-foreground/90">{children}</ul>,
-  ol: ({ children }) => <ol className="list-decimal ml-5 space-y-1.5 mb-4 text-[15px] text-foreground/90">{children}</ol>,
-  li: ({ children }) => <li className="leading-relaxed">{children}</li>,
-  strong: ({ children }) => <strong className="font-semibold text-foreground">{children}</strong>,
-  em:     ({ children }) => <em className="italic text-foreground/80">{children}</em>,
-  code: ({ className, children, ...rest }) => {
-    const isBlock = !!className;
-    if (isBlock) {
-      return (
-        <code className={cn("block bg-muted rounded-lg p-4 text-sm font-mono overflow-x-auto text-foreground", className)} {...rest}>
-          {children}
-        </code>
-      );
-    }
-    return <code className="bg-muted text-primary rounded px-1.5 py-0.5 text-[13px] font-mono" {...rest}>{children}</code>;
-  },
-  pre:        ({ children }) => <pre className="mb-4 rounded-lg overflow-hidden">{children}</pre>,
-  // Prints colados no editor: nunca estouram a coluna e abrem em tamanho real.
-  img: ({ src, alt }) => (
-    <a href={src} target="_blank" rel="noopener noreferrer" className="block my-4">
-      <img
-        src={src}
-        alt={alt ?? ""}
-        loading="lazy"
-        className="max-w-full h-auto rounded-lg border border-border"
-      />
-    </a>
-  ),
-  blockquote: ({ children }) => <CalloutBlockquote>{children}</CalloutBlockquote>,
-  hr:         () => <hr className="border-border my-6" />,
-  table: ({ children }) => (
-    <div className="overflow-x-auto mb-4">
-      <table className="w-full text-sm border-collapse">{children}</table>
-    </div>
-  ),
-  th: ({ children }) => <th className="border border-border bg-muted px-3 py-2 text-left font-semibold text-foreground">{children}</th>,
-  td: ({ children }) => <td className="border border-border px-3 py-2 text-foreground/90">{children}</td>,
-  img: ({ src, alt }) =>
-    typeof src === "string"
-      ? <img src={src} alt={alt ?? ""} loading="lazy" className="max-w-full rounded-lg my-4 border border-border" />
-      : null,
-};
-
 // ─── Layout ───────────────────────────────────────────────────────────────────
+
+const BRAND_GRADIENT = "linear-gradient(135deg, #6366f1, #a855f7, #E8784A)";
 
 function HelpCenterLayout({ children }: { children: React.ReactNode }) {
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      {children}
-      <footer className="border-t border-border mt-16 py-8">
-        <div className="max-w-5xl mx-auto px-6 text-center text-xs text-muted-foreground">
-          © {new Date().getFullYear()} Cloudfy · Central de Ajuda
+    <div className="flex min-h-screen flex-col bg-background text-foreground">
+      <div className="flex-1">{children}</div>
+
+      <footer className="mt-20 border-t border-border">
+        <div className="mx-auto flex max-w-6xl flex-col items-center gap-4 px-6 py-8 text-center sm:flex-row sm:justify-between sm:text-left">
+          <Link to="/ajuda" className="flex items-center gap-2">
+            <span
+              className="flex h-6 w-6 items-center justify-center rounded-md"
+              style={{ background: BRAND_GRADIENT }}
+            >
+              <BookOpen className="h-3 w-3 text-white" />
+            </span>
+            <span className="text-sm font-semibold text-foreground">Central de Ajuda</span>
+          </Link>
+
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            Não encontrou o que procurava? Fale com o suporte pelo chat da sua conta Cloudfy.
+            <span className="mx-2 hidden text-muted-foreground/40 sm:inline">·</span>
+            <span className="block sm:inline">© {new Date().getFullYear()} Cloudfy</span>
+          </p>
         </div>
       </footer>
     </div>
@@ -360,7 +302,7 @@ function HelpCenterHeader({
       <div className="relative max-w-5xl mx-auto px-6 py-16 text-center">
         <div className="flex items-center justify-center gap-2 mb-8">
           <div className="h-8 w-8 rounded-lg flex items-center justify-center"
-            style={{ background: "linear-gradient(135deg, #6366f1, #E8784A)" }}>
+            style={{ background: BRAND_GRADIENT }}>
             <BookOpen className="h-4 w-4 text-white" />
           </div>
           <span className="text-white font-semibold text-lg tracking-tight">Cloudfy</span>
@@ -399,6 +341,8 @@ export function HelpCenterHome() {
 
   const [articles, setArticles] = useState<Article[]>([]);
   const [loading, setLoading]   = useState(true);
+
+  usePageTitle(null);
 
   // Load all published articles once (category filtering is client-side)
   useEffect(() => {
@@ -496,7 +440,7 @@ export function HelpCenterHome() {
             ) : (
               <div className="rounded-xl border border-border bg-card overflow-hidden divide-y divide-border">
                 {searchResults.map((a) => (
-                  <ArticleRow key={a.id} article={a} catKey={a._cat} showCategory />
+                  <ArticleRow key={a.id} article={a} catKey={a._cat} showCategory showExcerpt />
                 ))}
               </div>
             )}
@@ -558,8 +502,11 @@ export function HelpCenterArticle() {
   const { articleId } = useParams<{ articleId: string }>();
   const navigate = useNavigate();
   const [article, setArticle] = useState<Article | null>(null);
+  const [related, setRelated] = useState<Article[]>([]);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+
+  usePageTitle(article?.title ?? null);
 
   useEffect(() => {
     if (!articleId) { setNotFound(true); setLoading(false); return; }
@@ -568,6 +515,8 @@ export function HelpCenterArticle() {
     setLoading(true);
     setNotFound(false);
     setArticle(null);
+    setRelated([]);
+    window.scrollTo({ top: 0 });
 
     const isUuid = /^[0-9a-f]{8}-/i.test(rawId);
     const req = isUuid
@@ -582,25 +531,44 @@ export function HelpCenterArticle() {
     });
   }, [articleId]);
 
+  // Artigos da mesma categoria, para o rodapé "Continue lendo".
+  useEffect(() => {
+    if (!article) return;
+    const key = classifyArticle(article);
+
+    supabase
+      .from("desk_knowledge_base")
+      .select("id, title, category, source, source_id, is_published, created_at, updated_at, content")
+      .eq("is_published", true)
+      .neq("source", "intercom_internal")
+      .neq("id", article.id)
+      .limit(120)
+      .then(({ data, error }) => {
+        if (error) { console.error("[HelpCenter] related fetch:", error.message); return; }
+        const same = (data ?? []).filter((a) => classifyArticle(a as Article) === key);
+        setRelated(same.slice(0, 4) as Article[]);
+      });
+  }, [article]);
+
   if (loading) return (
     <HelpCenterLayout>
-      <div className="max-w-3xl mx-auto px-6 py-12 space-y-4">
-        <Skeleton className="h-4 w-64" />
-        <Skeleton className="h-8 w-3/4 mt-6" />
-        {[1,2,3,4].map(i => <Skeleton key={i} className="h-4 w-full" />)}
-      </div>
+      <ArticleSkeleton />
     </HelpCenterLayout>
   );
 
   if (notFound || !article) return (
     <HelpCenterLayout>
-      <div className="max-w-3xl mx-auto px-6 py-20 text-center">
-        <BookOpen className="h-12 w-12 mx-auto mb-4 opacity-20" />
-        <h1 className="text-xl font-semibold mb-2">Artigo não encontrado</h1>
-        <p className="text-sm text-muted-foreground mb-6">
+      <div className="mx-auto max-w-3xl px-6 py-24 text-center">
+        <BookOpen className="mx-auto mb-4 h-12 w-12 opacity-20" />
+        <h1 className="mb-2 text-xl font-semibold">Artigo não encontrado</h1>
+        <p className="mb-6 text-sm text-muted-foreground">
           Este artigo pode ter sido removido ou a URL está incorreta.
         </p>
-        <Link to="/ajuda" className="text-sm text-primary underline underline-offset-2">
+        <Link
+          to="/ajuda"
+          className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
+        >
+          <Home className="h-3.5 w-3.5" />
           Voltar para a Central de Ajuda
         </Link>
       </div>
@@ -609,89 +577,276 @@ export function HelpCenterArticle() {
 
   const catKey = classifyArticle(article);
   const catDef = CAT_BY_KEY[catKey];
+  const markdown = normalizeArticleMarkdown(article.content, article.title);
+  const toc = extractToc(markdown);
+  const minutes = readingTimeMinutes(markdown);
 
   return (
     <HelpCenterLayout>
-      {/* ── Sticky top bar ── */}
-      <div className="border-b border-border bg-card sticky top-0 z-10">
-        <div className="max-w-3xl mx-auto px-6 py-3 flex items-center gap-2 min-w-0">
-          <button
-            onClick={() => navigate(-1)}
-            className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors shrink-0"
-          >
-            <ArrowLeft className="h-3.5 w-3.5" />
-            Voltar
-          </button>
-          <span className="text-muted-foreground/30 text-xs shrink-0">·</span>
-          <nav className="flex items-center gap-1 text-xs text-muted-foreground min-w-0">
-            <Link to="/ajuda" className="hover:text-foreground shrink-0 transition-colors">
-              Central de Ajuda
-            </Link>
-            <ChevronRight className="h-3 w-3 shrink-0" />
-            <Link
-              to={`/ajuda?cat=${catKey}`}
-              className="hover:text-foreground shrink-0 transition-colors flex items-center gap-1"
-            >
-              {catDef && (
-                <span className={cn("inline-flex h-4 w-4 rounded items-center justify-center shrink-0", catDef.iconBg)}>
-                  <catDef.icon className="h-2.5 w-2.5 text-white" />
-                </span>
-              )}
-              {catDef?.label ?? "Geral"}
-            </Link>
-            <ChevronRight className="h-3 w-3 shrink-0" />
-            <span className="text-foreground truncate">{article.title}</span>
-          </nav>
-        </div>
-      </div>
+      <ArticleTopBar article={article} catKey={catKey} catDef={catDef} onBack={() => navigate(-1)} />
 
-      {/* ── Content ── */}
-      <main className="max-w-3xl mx-auto px-6 py-10">
-        <div className="mb-6 flex items-center gap-2">
-          {catDef && (
-            <Link
-              to={`/ajuda?cat=${catKey}`}
-              className={cn(
-                "inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full transition-colors",
-                catDef.iconBg + "/15",
-                "hover:opacity-80",
-              )}
-            >
-              <catDef.icon className={cn("h-3 w-3", catDef.iconText)} style={{ color: undefined }} />
-              <span className="text-foreground/70">{catDef.label}</span>
-            </Link>
+      <main className="mx-auto max-w-6xl px-6 py-10">
+        <div className="flex gap-12">
+          {/* ── Coluna do artigo ── */}
+          <div className="min-w-0 flex-1 lg:max-w-3xl">
+            <div className="mb-5 flex flex-wrap items-center gap-3">
+              {catDef && <CategoryPill catKey={catKey} def={catDef} />}
+              <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Clock className="h-3 w-3" />
+                {minutes} min de leitura
+              </span>
+            </div>
+
+            <h1 className="mb-3 text-[28px] font-bold leading-tight text-foreground sm:text-[34px]">
+              {article.title}
+            </h1>
+
+            <p className="mb-8 border-b border-border pb-6 text-xs text-muted-foreground">
+              Atualizado em{" "}
+              {new Date(article.updated_at).toLocaleDateString("pt-BR", {
+                day: "2-digit", month: "long", year: "numeric",
+              })}
+            </p>
+
+            {markdown ? (
+              <ArticleMarkdown content={markdown} />
+            ) : (
+              <p className="rounded-xl border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
+                Este artigo ainda não tem conteúdo publicado.
+              </p>
+            )}
+
+            <ArticleFeedback articleId={article.id} />
+
+            {related.length > 0 && <RelatedArticles articles={related} />}
+
+            <div className="mt-10 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-6">
+              <Link
+                to={`/ajuda?cat=${catKey}`}
+                className="flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <ChevronLeft className="h-4 w-4" />
+                {catDef?.label ?? "Todos os artigos"}
+              </Link>
+              <Link
+                to="/ajuda"
+                className="flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <Home className="h-3.5 w-3.5" />
+                Central de Ajuda
+              </Link>
+            </div>
+          </div>
+
+          {/* ── Índice lateral ── */}
+          {toc.length > 1 && (
+            <aside className="hidden w-56 shrink-0 lg:block">
+              <TableOfContents entries={toc} />
+            </aside>
           )}
-        </div>
-
-        <h1 className="text-2xl sm:text-3xl font-bold text-foreground mb-8 leading-tight">
-          {article.title}
-        </h1>
-
-        <article className="min-w-0">
-          <ReactMarkdown components={MD_COMPONENTS}>
-            {article.content}
-          </ReactMarkdown>
-        </article>
-
-        <div className="mt-12 pt-6 border-t border-border flex items-center justify-between flex-wrap gap-3">
-          <Link
-            to={`/ajuda?cat=${catKey}`}
-            className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <ArrowLeft className="h-3.5 w-3.5" />
-            {catDef?.label ?? "Todos os artigos"}
-          </Link>
-          <span className="text-xs text-muted-foreground">
-            Atualizado em{" "}
-            {new Date(article.updated_at).toLocaleDateString("pt-BR", {
-              day: "2-digit", month: "short", year: "numeric",
-            })}
-          </span>
         </div>
       </main>
     </HelpCenterLayout>
   );
 }
+
+function ArticleTopBar({
+  article, catKey, catDef, onBack,
+}: {
+  article: Article;
+  catKey: string;
+  catDef?: CategoryDef;
+  onBack: () => void;
+}) {
+  return (
+    <div className="sticky top-0 z-20 border-b border-border bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/80">
+      <div className="mx-auto flex min-w-0 max-w-6xl items-center gap-2 px-6 py-3">
+        <button
+          onClick={onBack}
+          className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <ArrowLeft className="h-3.5 w-3.5" />
+          Voltar
+        </button>
+        <span className="shrink-0 text-xs text-muted-foreground/30">·</span>
+        <nav aria-label="Trilha de navegação" className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+          <Link to="/ajuda" className="shrink-0 transition-colors hover:text-foreground">
+            Central de Ajuda
+          </Link>
+          <ChevronRight className="h-3 w-3 shrink-0" />
+          <Link
+            to={`/ajuda?cat=${catKey}`}
+            className="flex shrink-0 items-center gap-1 transition-colors hover:text-foreground"
+          >
+            {catDef && (
+              <span className={cn("inline-flex h-4 w-4 shrink-0 items-center justify-center rounded", catDef.iconBg)}>
+                <catDef.icon className="h-2.5 w-2.5 text-white" />
+              </span>
+            )}
+            {catDef?.label ?? "Geral"}
+          </Link>
+          <ChevronRight className="h-3 w-3 shrink-0" />
+          <span className="truncate text-foreground">{article.title}</span>
+        </nav>
+      </div>
+    </div>
+  );
+}
+
+function CategoryPill({ catKey, def }: { catKey: string; def: CategoryDef }) {
+  return (
+    <Link
+      to={`/ajuda?cat=${catKey}`}
+      className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-xs font-medium transition-colors hover:border-primary/40"
+    >
+      <span className={cn("inline-flex h-4 w-4 items-center justify-center rounded", def.iconBg)}>
+        <def.icon className="h-2.5 w-2.5 text-white" />
+      </span>
+      <span className="text-foreground/80">{def.label}</span>
+    </Link>
+  );
+}
+
+/** Índice lateral: acompanha a rolagem e destaca a seção visível. */
+function TableOfContents({ entries }: { entries: TocEntry[] }) {
+  const [activeId, setActiveId] = useState<string>(entries[0]?.id ?? "");
+
+  useEffect(() => {
+    const headings = entries
+      .map((e) => document.getElementById(e.id))
+      .filter((el): el is HTMLElement => el !== null);
+    if (headings.length === 0) return;
+
+    const observer = new IntersectionObserver(
+      (records) => {
+        const visible = records
+          .filter((r) => r.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+        if (visible[0]?.target.id) setActiveId(visible[0].target.id);
+      },
+      { rootMargin: "-80px 0px -70% 0px", threshold: 0 },
+    );
+
+    headings.forEach((h) => observer.observe(h));
+    return () => observer.disconnect();
+  }, [entries]);
+
+  return (
+    <nav aria-label="Índice do artigo" className="sticky top-24">
+      <p className="mb-3 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+        <List className="h-3 w-3" />
+        Nesta página
+      </p>
+      <ul className="space-y-1 border-l border-border">
+        {entries.map((entry) => (
+          <li key={entry.id}>
+            <a
+              href={`#${entry.id}`}
+              className={cn(
+                "-ml-px block border-l-2 py-1 text-[13px] leading-snug transition-colors",
+                entry.level === 3 ? "pl-6" : "pl-3",
+                activeId === entry.id
+                  ? "border-primary font-medium text-foreground"
+                  : "border-transparent text-muted-foreground hover:border-border hover:text-foreground",
+              )}
+            >
+              {entry.text}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  );
+}
+
+/** Voto simples de utilidade — guardado no navegador do leitor. */
+function ArticleFeedback({ articleId }: { articleId: string }) {
+  const storageKey = `clouddesk:help-feedback:${articleId}`;
+  const [vote, setVote] = useState<"yes" | "no" | null>(null);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(storageKey);
+      setVote(saved === "yes" || saved === "no" ? saved : null);
+    } catch {
+      // localStorage indisponível (janela anônima): o voto só não fica salvo.
+    }
+  }, [storageKey]);
+
+  const send = (value: "yes" | "no") => {
+    setVote(value);
+    try { localStorage.setItem(storageKey, value); } catch { /* ver acima */ }
+  };
+
+  return (
+    <div className="mt-12 rounded-xl border border-border bg-card px-5 py-4">
+      {vote ? (
+        <p className="text-sm text-muted-foreground">
+          {vote === "yes"
+            ? "Obrigado pelo retorno! Ficamos felizes em ajudar."
+            : "Obrigado pelo retorno. Se ainda precisar de ajuda, fale com o suporte pelo chat da sua conta Cloudfy."}
+        </p>
+      ) : (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm font-medium text-foreground">Este artigo resolveu sua dúvida?</p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => send("yes")}
+              className="rounded-lg border border-border px-3 py-1.5 text-sm transition-colors hover:border-emerald-500/50 hover:bg-emerald-500/10"
+            >
+              👍 Sim
+            </button>
+            <button
+              onClick={() => send("no")}
+              className="rounded-lg border border-border px-3 py-1.5 text-sm transition-colors hover:border-rose-500/50 hover:bg-rose-500/10"
+            >
+              👎 Não
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RelatedArticles({ articles }: { articles: Article[] }) {
+  return (
+    <section className="mt-10">
+      <h2 className="mb-3 text-sm font-semibold text-foreground">Continue lendo</h2>
+      <div className="grid gap-2 sm:grid-cols-2">
+        {articles.map((a) => (
+          <Link
+            key={a.id}
+            to={articlePath(a)}
+            className="group flex items-start gap-2.5 rounded-xl border border-border bg-card px-4 py-3 transition-colors hover:border-primary/40 hover:bg-primary/5"
+          >
+            <FileText className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+            <span className="text-sm leading-snug text-foreground transition-colors group-hover:text-primary">
+              {a.title}
+            </span>
+          </Link>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ArticleSkeleton() {
+  return (
+    <div className="mx-auto max-w-3xl space-y-4 px-6 py-12">
+      <Skeleton className="h-4 w-64" />
+      <Skeleton className="mt-6 h-9 w-3/4" />
+      <Skeleton className="h-3 w-40" />
+      <div className="space-y-3 pt-6">
+        {[1, 2, 3, 4, 5, 6].map((i) => (
+          <Skeleton key={i} className={cn("h-4", i % 3 === 0 ? "w-2/3" : "w-full")} />
+        ))}
+      </div>
+      <Skeleton className="h-32 w-full" />
+    </div>
+  );
+}
+
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
@@ -729,34 +884,66 @@ function CategoryCard({
   );
 }
 
+/** Primeiras linhas do artigo em texto corrido, sem marcação de Markdown. */
+function excerptOf(content: string, max = 150): string {
+  const plain = content
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/[*_`>|]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (plain.length <= max) return plain;
+  const cut = plain.slice(0, max);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${(lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
+}
+
 function ArticleRow({
   article,
   catKey,
   showCategory,
+  showExcerpt,
 }: {
   article: Article;
   catKey: string;
   showCategory?: boolean;
+  showExcerpt?: boolean;
 }) {
   const catDef = CAT_BY_KEY[catKey];
   const Icon = catDef?.icon ?? BookOpen;
+  const excerpt = showExcerpt ? excerptOf(article.content ?? "") : "";
+
   return (
     <Link
       to={articlePath(article)}
-      className="flex items-center justify-between px-4 py-3.5 hover:bg-muted/40 transition-colors group"
+      className="group flex items-start justify-between gap-3 px-4 py-3.5 transition-colors hover:bg-muted/40"
     >
-      <div className="flex items-center gap-3 min-w-0">
-        <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
+      <div className="flex min-w-0 items-start gap-3">
+        <Icon className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
         <div className="min-w-0">
-          <span className="text-sm font-medium text-foreground group-hover:text-primary transition-colors truncate block">
+          <span className="block text-sm font-medium leading-snug text-foreground transition-colors group-hover:text-primary">
             {article.title}
           </span>
+          {excerpt && (
+            <span className="mt-0.5 block text-xs leading-relaxed text-muted-foreground">
+              {excerpt}
+            </span>
+          )}
           {showCategory && catDef && (
-            <span className="text-xs text-muted-foreground">{catDef.label}</span>
+            <span className="mt-1 inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+              <span className={cn("inline-flex h-3 w-3 items-center justify-center rounded-sm", catDef.iconBg)}>
+                <catDef.icon className="h-2 w-2 text-white" />
+              </span>
+              {catDef.label}
+            </span>
           )}
         </div>
       </div>
-      <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-primary shrink-0 ml-3 transition-colors" />
+      <ChevronRight className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground transition-colors group-hover:text-primary" />
     </Link>
   );
 }
