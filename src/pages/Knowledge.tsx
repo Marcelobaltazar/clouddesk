@@ -8,7 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetFooter } from "@/components/ui/sheet";
-import { MarkdownImageTextarea } from "@/components/knowledge/MarkdownImageTextarea";
+import { MarkdownMediaTextarea } from "@/components/knowledge/MarkdownMediaTextarea";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -609,7 +609,7 @@ export default function Knowledge() {
             <div className="space-y-1.5 flex flex-col">
               <label className="text-xs font-medium text-foreground">Conteúdo <span className="text-rose-500">*</span></label>
               <p className="text-[10px] text-muted-foreground">Suporta Markdown. Este conteúdo é indexado semanticamente pela IA.</p>
-              <MarkdownImageTextarea
+              <MarkdownMediaTextarea
                 value={form.content}
                 onChange={(content) => setForm((f) => ({ ...f, content }))}
                 articleId={editing?.id}
@@ -658,7 +658,7 @@ export default function Knowledge() {
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-foreground">Conteúdo <span className="text-rose-500">*</span></label>
               <p className="text-[10px] text-muted-foreground">Texto curto e direto que a IA usará como referência em respostas.</p>
-              <MarkdownImageTextarea
+              <MarkdownMediaTextarea
                 value={snippetForm.content}
                 onChange={(content) => setSnippetForm((f) => ({ ...f, content }))}
                 articleId={editingSnippet?.id}
@@ -731,7 +731,7 @@ function ArticleRow({
   onDelete: () => void;
   onRegenerate: () => void;
 }) {
-  const preview = article.content.replace(/[#*`>\-]/g, "").slice(0, 140).trim();
+  const preview = article.content.replace(/[#*`>-]/g, "").slice(0, 140).trim();
   const updatedAt = format(new Date(article.updated_at), "dd MMM yyyy", { locale: ptBR });
   const hasEmbedding = article.embedding != null;
 
