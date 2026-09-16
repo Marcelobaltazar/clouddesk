@@ -1,73 +1,67 @@
-# Welcome to your Lovable project
+# CloudDesk
 
-## Project info
+Plataforma interna de suporte ao cliente da **Cloudfy**. Reúne três partes:
 
-**URL**: https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID
+- **Painel do operador** — inbox, CRM, base de conhecimento e analytics
+- **Chat widget** — bolha embarcada na área logada dos clientes Cloudfy
+- **Motor de IA** — agente que responde clientes com contexto real da conta
 
-## How can I edit this code?
+A **Central de Ajuda** pública fica em `/ajuda` e é servida pelo mesmo app,
+sem autenticação.
 
-There are several ways of editing your application.
+> As convenções do projeto (schema, pipeline da IA, design system, regras de
+> código) estão em [`CLAUDE.md`](./CLAUDE.md) — é a fonte de verdade.
 
-**Use Lovable**
+## Stack
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and start prompting.
+Vite · React 18 · TypeScript · Tailwind CSS · shadcn/ui · Zustand ·
+React Router · Supabase (Auth, Postgres + pgvector, Realtime, Storage,
+Edge Functions) · Recharts
 
-Changes made via Lovable will be committed automatically to this repo.
+## Rodando localmente
 
-**Use your preferred IDE**
-
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
-
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
-
-Follow these steps:
+Requisito: Node.js 18+ e npm.
 
 ```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
-
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
-npm run dev
+npm install
+cp .env.example .env    # preencha VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY
+npm run dev             # http://localhost:8080
 ```
 
-**Edit a file directly in GitHub**
+## Scripts
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+| Comando | O que faz |
+|---|---|
+| `npm run dev` | Servidor de desenvolvimento |
+| `npm run build` | Build de produção do painel (`dist/`) |
+| `npm run build:widget` | Build do widget embarcável e cópia para `public/widget.js` |
+| `npm run preview` | Serve o build de produção localmente |
+| `npm test` | Testes (Vitest) |
+| `npm run lint` | ESLint |
+| `npx tsc --noEmit` | Type check |
 
-**Use GitHub Codespaces**
+## Supabase
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+```sh
+npx supabase db push --linked                 # aplica as migrations
+npx supabase functions serve                  # Edge Functions locais
+npx supabase gen types typescript --linked > src/integrations/supabase/types.ts
+```
 
-## What technologies are used for this project?
+## Deploy
 
-This project is built with:
+`deploy-producao.ps1` aplica migrations, publica os secrets e faz o deploy das
+Edge Functions, além de gerar os builds do painel e do widget. O painel em si é
+publicado em `clouddesk.apps.cloudfy.cloud`.
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+## Variáveis de ambiente
 
-## How can I deploy this project?
+Nunca commite `.env` / `.env.local`.
 
-Simply open [Lovable](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and click on Share -> Publish.
+```env
+VITE_SUPABASE_URL=https://xxxx.supabase.co
+VITE_SUPABASE_ANON_KEY=eyJxxxx
+```
 
-## Can I connect a custom domain to my Lovable project?
-
-Yes, you can!
-
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
-
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+Chaves de serviço (Stripe, provedores de LLM, Resend) vivem apenas nos secrets
+do Supabase, usados pelas Edge Functions — nunca no frontend.
