@@ -52,7 +52,7 @@ npx supabase gen types typescript --linked > src/integrations/supabase/types.ts
 
 `deploy-producao.ps1` aplica migrations, publica os secrets e faz o deploy das
 Edge Functions, além de gerar os builds do painel e do widget. O painel em si é
-publicado em `clouddesk.apps.cloudfy.cloud`.
+publicado em `clouddesk-omega.vercel.app`.
 
 ## Variáveis de ambiente
 

@@ -114,7 +114,7 @@ const HANDOFF_MESSAGE = `Vou encaminhar sua solicitação para nossa equipe.
 - Resposta em até 12 horas úteis
 - Fora do horário: fila para próximo dia útil
 
-📚 Central de ajuda: https://clouddesk.apps.cloudfy.cloud/ajuda
+📚 Central de ajuda: https://clouddesk-omega.vercel.app/ajuda
 💬 Discord: ${COMMUNITY_DISCORD}`;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

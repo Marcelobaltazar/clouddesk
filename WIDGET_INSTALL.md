@@ -70,7 +70,7 @@ Inserir **apenas em páginas autenticadas**, depois do login e antes do script d
     hash:  "{{ user_hash }}"           // HMAC calculado no passo 2 (server-side)
   };
 </script>
-<script src="https://clouddesk.apps.cloudfy.cloud/widget.js" defer></script>
+<script src="https://clouddesk-omega.vercel.app/widget.js" defer></script>
 ```
 
 ---
@@ -123,7 +123,7 @@ npm run build:widget
 npm run build
 
 # 5. Publicar o app (Lovable → Share → Publish, ou o pipeline atual)
-#    O widget fica em: https://clouddesk.apps.cloudfy.cloud/widget.js
+#    O widget fica em: https://clouddesk-omega.vercel.app/widget.js
 ```
 
 > **Ordem importa:** faça o deploy das functions ANTES de publicar o widget.js

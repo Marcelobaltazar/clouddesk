@@ -20,7 +20,7 @@ describe("prepareRichMessage", () => {
   });
 
   it("não mexe em link que já é markdown", () => {
-    const md = "[a central de ajuda](https://clouddesk.apps.cloudfy.cloud/ajuda)";
+    const md = "[a central de ajuda](https://clouddesk-omega.vercel.app/ajuda)";
     expect(prepareRichMessage(md)).toBe(md);
   });
 
