@@ -208,7 +208,7 @@ async function applyPlanTag(
 
 // ─── Help center URLs ─────────────────────────────────────────────────────────
 
-const HELP_CENTER_URL = (Deno.env.get('HELP_CENTER_URL') ?? 'https://clouddesk.apps.cloudfy.cloud').replace(/\/+$/, '');
+const HELP_CENTER_URL = (Deno.env.get('HELP_CENTER_URL') ?? 'https://clouddesk-omega.vercel.app').replace(/\/+$/, '');
 
 // ─── Comunidade ───────────────────────────────────────────────────────────────
 // Grupos abertos a todos os clientes. O convite sai em duas janelas (ver

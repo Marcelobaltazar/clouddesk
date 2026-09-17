@@ -14,7 +14,7 @@ Substitua os `{{ ... }}` pelos valores reais do seu template e calcule o `hash`
     hash:  "{{ clouddesk_user_hash }}"  // HMAC-SHA256 calculado no servidor (ver abaixo)
   };
 </script>
-<script src="https://clouddesk.apps.cloudfy.cloud/widget.js" defer></script>
+<script src="https://clouddesk-omega.vercel.app/widget.js" defer></script>
 <!-- =================================================== -->
 ```
 
@@ -105,7 +105,7 @@ o único widget na área logada.
 - [ ] `hash` calculado no servidor e injetado em `window.CloudfyUser.hash`
 - [ ] Snippet do CloudDesk só em páginas autenticadas
 - [ ] Intercom removido das mesmas páginas
-- [ ] widget.js publicado em `https://clouddesk.apps.cloudfy.cloud/widget.js`
+- [ ] widget.js publicado em `https://clouddesk-omega.vercel.app/widget.js`
       (sai no build/publish do painel)
 
 ---
