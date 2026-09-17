@@ -154,6 +154,10 @@ export function ConversationList() {
     searchQuery,
     isLoading,
     tabCounts,
+    aiActiveFilter,
+    hasMore,
+    isLoadingMore,
+    loadMore,
     searchResults,
     isSearching,
     sortDirection,
@@ -272,6 +276,13 @@ export function ConversationList() {
   const source = isSearchMode ? searchResults : conversations;
   const filtered = source.filter((c) => {
     if (!isSearchMode && !statusMatchesTab(activeTab, c.status)) return false;
+    // Fila "IA cuidando": só abertas que a IA ainda conduz. Sem isto, uma
+    // conversa que vira 'pending' pelo realtime continuaria na lista da fila
+    // da IA — justamente a que acabou de sair dela.
+    if (!isSearchMode && aiActiveFilter !== null) {
+      if (c.ai_active !== aiActiveFilter) return false;
+      if (aiActiveFilter === true && c.status !== "open") return false;
+    }
     if (mineOnly && c.assigned_agent_id !== agent?.id) return false;
     return true;
   });
@@ -516,21 +527,37 @@ export function ConversationList() {
             <EmptyState tab={activeTab} />
           )
         ) : (
-          filtered.map((conv, i) => (
-            <div key={conv.id}>
-              {i > 0 && <div className="h-px mx-3 bg-border" />}
-              <ConversationItem
-                conv={conv}
-                isActive={conv.id === activeConversationId}
-                isSelected={selected.has(conv.id)}
-                selectionMode={selectionMode}
-                showStatus={isSearchMode}
-                agentMap={agentMap}
-                onSelect={() => handleSelectConversation(conv)}
-                onToggle={() => toggleOne(conv.id)}
-              />
-            </div>
-          ))
+          <>
+            {filtered.map((conv, i) => (
+              <div key={conv.id}>
+                {i > 0 && <div className="h-px mx-3 bg-border" />}
+                <ConversationItem
+                  conv={conv}
+                  isActive={conv.id === activeConversationId}
+                  isSelected={selected.has(conv.id)}
+                  selectionMode={selectionMode}
+                  showStatus={isSearchMode}
+                  agentMap={agentMap}
+                  onSelect={() => handleSelectConversation(conv)}
+                  onToggle={() => toggleOne(conv.id)}
+                />
+              </div>
+            ))}
+
+            {/* Paginação: a lista carrega 100 por vez. Sem isto o cabeçalho
+                dizia "130 Aberto" e 30 conversas não existiam para o operador. */}
+            {!isSearchMode && hasMore && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={loadMore}
+                disabled={isLoadingMore}
+                className="w-full mt-2 h-8 text-xs text-muted-foreground hover:text-foreground"
+              >
+                {isLoadingMore ? "Carregando…" : "Carregar mais conversas"}
+              </Button>
+            )}
+          </>
         )}
       </div>
     </div>

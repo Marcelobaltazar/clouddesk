@@ -5,9 +5,10 @@ import { ChatWidgetWelcome } from "./ChatWidgetWelcome";
 import { ChatWidgetThread } from "./ChatWidgetThread";
 import { ChatWidgetComposer } from "./ChatWidgetComposer";
 import { ChatWidgetConversationList } from "./ChatWidgetConversationList";
+import { ChatWidgetDuplicateCheck } from "./ChatWidgetDuplicateCheck";
 import { CSATFeedback } from "./CSATFeedback";
 import { configureWidgetApi, widgetApi, WidgetApiError, type TurnResult } from "@/lib/widget-api";
-import type { CloudDeskSettings, WidgetMessage } from "./types";
+import type { CloudDeskSettings, WidgetConversationSummary, WidgetMessage } from "./types";
 import type { ContactInfo } from "@/lib/contact-info";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -113,6 +114,29 @@ function localMessage(
   };
 }
 
+/** Janela em que um chamado aberto ainda "conta" como conversa em andamento.
+ *  Depois disso o assunto provavelmente esfriou e perguntar atrapalharia mais
+ *  do que ajudaria — o cliente abre o novo chamado direto. */
+const RECENT_OPEN_WINDOW_MS = 72 * 60 * 60 * 1000; // 72h
+
+/**
+ * Chamado recente em aberto do cliente, se houver — é ele que a tela de
+ * confirmação mostra antes de deixar abrir mais um. A lista já vem ordenada
+ * por atividade, então o primeiro que casar é o mais relevante.
+ */
+function findRecentOpenTicket(
+  list: WidgetConversationSummary[],
+): WidgetConversationSummary | null {
+  const cutoff = Date.now() - RECENT_OPEN_WINDOW_MS;
+  return (
+    list.find((c) => {
+      if (c.status === "resolved" || c.merged_into) return false;
+      const stamp = Date.parse(c.last_message_at ?? c.created_at);
+      return Number.isFinite(stamp) && stamp >= cutoff;
+    }) ?? null
+  );
+}
+
 function mergeMessages(current: WidgetMessage[], incoming: WidgetMessage[]): WidgetMessage[] {
   const seen = new Set(current.map((m) => m.id));
   const merged = [...current];
@@ -167,6 +191,8 @@ export function ChatWidget({ settings, embedUser }: Props) {
     setAgentConnected,
     markConversationRead,
     backToList,
+    duplicateCandidate,
+    setDuplicateCandidate,
   } = useWidgetStore();
 
   // Identidade efetiva: embed real (com hash) ou conta simulada do preview
@@ -373,7 +399,10 @@ export function ChatWidget({ settings, embedUser }: Props) {
       // trocar na hora, sem esperar a rede.
       setView("thread");
       setMessages([]);
-      if (summary) {
+      // Num chamado mesclado o resumo da lista descreve a thread ABSORVIDA, não
+      // a que vai abrir — pintar a tela com ele mostraria o assunto errado por
+      // um instante. Espera o gateway devolver a conversa de destino.
+      if (summary && !summary.merged_into) {
         setConversation({
           id: summary.id,
           status: summary.status,
@@ -423,7 +452,7 @@ export function ChatWidget({ settings, embedUser }: Props) {
   // ── Nova conversa: tela de boas-vindas com saudação personalizada ────────────
   // A conversa NÃO é criada aqui — só quando o cliente enviar a primeira
   // mensagem (mesma regra de sempre: nada de chamados vazios na inbox).
-  const startNewConversation = useCallback(async () => {
+  const beginNewConversation = useCallback(async () => {
     backToList();          // limpa thread/CSAT/estado do chamado anterior
     forceNewConversation.current = true;
     setView("thread");
@@ -441,6 +470,20 @@ export function ChatWidget({ settings, embedUser }: Props) {
       console.error("[Widget] Falha ao preparar nova conversa:", err);
     }
   }, [backToList, setView, setInfras, setMessages]);
+
+  // Prevenção de chamado duplicado: quem clica em "Nova conversa" já tendo um
+  // chamado recente em aberto passa antes pela tela de confirmação. É aqui que
+  // a duplicata é evitada — mesclar depois é sempre mais caro (junta SLA,
+  // prioridade e assunto de dois problemas possivelmente distintos, sem desfazer).
+  const startNewConversation = useCallback(async () => {
+    const candidate = findRecentOpenTicket(useWidgetStore.getState().conversations);
+    if (candidate) {
+      setDuplicateCandidate(candidate);
+      setView("confirm_new");
+      return;
+    }
+    await beginNewConversation();
+  }, [beginNewConversation, setDuplicateCandidate, setView]);
 
   // ── Realtime ────────────────────────────────────────────────────────────────
   // O canal `conv-live:{id}` é assinado UMA vez só, em useWidgetLiveUpdates
@@ -482,18 +525,35 @@ export function ChatWidget({ settings, embedUser }: Props) {
   if (!isOpen) return null;
 
   const inThread = view === "thread";
+  const inConfirmNew = view === "confirm_new";
 
   return (
     <div className="fixed bottom-24 right-6 z-[9998] w-[380px] max-w-[calc(100vw-2rem)] h-[550px] max-h-[calc(100vh-8rem)] rounded-xl shadow-2xl border border-border bg-card flex flex-col overflow-hidden animate-in slide-in-from-bottom-4 fade-in-0 duration-300 sm:w-[380px]">
       <ChatWidgetHeader
         widgetName={settings.widget_name}
         onlineAgents={2}
-        showBack={inThread}
+        showBack={inThread || inConfirmNew}
         onBack={backToList}
-        title={inThread ? conversation?.subject ?? "Nova conversa" : "Meus chamados"}
+        title={
+          inConfirmNew ? "Nova conversa"
+            : inThread ? conversation?.subject ?? "Nova conversa"
+            : "Meus chamados"
+        }
       />
 
-      {!inThread ? (
+      {inConfirmNew && duplicateCandidate ? (
+        <ChatWidgetDuplicateCheck
+          conversation={duplicateCandidate}
+          onContinue={() => {
+            setDuplicateCandidate(null);
+            void openConversation(duplicateCandidate.id);
+          }}
+          onCreateAnyway={() => {
+            setDuplicateCandidate(null);
+            void beginNewConversation();
+          }}
+        />
+      ) : !inThread ? (
         <ChatWidgetConversationList
           conversations={conversations}
           loading={!conversationsLoaded}

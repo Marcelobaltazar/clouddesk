@@ -8,8 +8,12 @@ import type {
 import type { ContactInfra } from "@/lib/contact-info";
 
 /** Telas do widget. 'list' é a inicial: o cliente volta horas/dias depois e
- *  precisa achar o chamado dele antes de qualquer outra coisa. */
-export type WidgetView = "list" | "thread";
+ *  precisa achar o chamado dele antes de qualquer outra coisa.
+ *
+ *  'confirm_new' é o passo que evita a duplicata na origem: quem clica em
+ *  "Nova conversa" já tendo um chamado recente em aberto vê primeiro qual é
+ *  esse chamado e escolhe entre continuar nele ou abrir outro de verdade. */
+export type WidgetView = "list" | "thread" | "confirm_new";
 
 /** Aviso flutuante acima da bolha quando chega resposta com o widget fechado. */
 export interface WidgetNotice {
@@ -44,6 +48,9 @@ interface WidgetState {
   /** Chamado que o cliente pediu para abrir de fora do painel (clique no aviso
    *  flutuante). O ChatWidget consome e zera assim que monta. */
   pendingOpenId: string | null;
+  /** Chamado recente em aberto exibido na tela 'confirm_new'. */
+  duplicateCandidate: WidgetConversationSummary | null;
+  setDuplicateCandidate: (conv: WidgetConversationSummary | null) => void;
   setOpen: (open: boolean) => void;
   toggleOpen: () => void;
   setView: (view: WidgetView) => void;
@@ -115,6 +122,7 @@ export const useWidgetStore = create<WidgetState>((set) => ({
   unreadCount: 0,
   notice: null,
   pendingOpenId: null,
+  duplicateCandidate: null,
   setOpen: (open) => {
     try { localStorage.setItem("clouddesk-widget-open", String(open)); } catch { /* localStorage indisponível */ }
     // Abrir o widget dispensa o aviso flutuante — ele já cumpriu o papel.
@@ -182,10 +190,12 @@ export const useWidgetStore = create<WidgetState>((set) => ({
   setUnreadCount: (unreadCount) => set({ unreadCount }),
   setNotice: (notice) => set({ notice }),
   setPendingOpenId: (pendingOpenId) => set({ pendingOpenId }),
+  setDuplicateCandidate: (duplicateCandidate) => set({ duplicateCandidate }),
   backToList: () =>
     set({
       view: "list",
       conversation: null,
+      duplicateCandidate: null,
       messages: [],
       // Estados que pertencem à thread que está sendo fechada — carregá-los
       // para a próxima conversa mostraria "atendente conectado" no chamado errado.

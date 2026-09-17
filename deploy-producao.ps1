@@ -113,7 +113,7 @@ Write-Host "`nDEPLOY CONCLUIDO" -ForegroundColor Green
 Write-Host @"
 
 Proximos passos manuais:
-  1. Publicar o painel (Lovable -> Share -> Publish) - o widget.js novo vai junto
+  1. Publicar o painel na Vercel - o widget.js novo (public/) vai junto
   2. Copiar o segredo de .widget-identity-secret.local para o backend do
      cloudfy.space como CLOUDDESK_WIDGET_SECRET
   3. Inserir o snippet do widget (ver WIDGET_INSTALL.md) e remover o Intercom

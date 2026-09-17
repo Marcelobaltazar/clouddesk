@@ -33,6 +33,9 @@ export interface WidgetConversationSummary {
   last_message_preview: string | null;
   last_message_sender: "contact" | "agent" | "bot" | "system" | null;
   unread_count: number;
+  /** Chamado absorvido por outro numa mesclagem: a linha vira um atalho
+   *  ("Juntado ao chamado anterior") para a thread onde o histórico está. */
+  merged_into?: string | null;
 }
 
 // Type alias (não interface) para ser atribuível a Json — ver WidgetMessageMetadata.
