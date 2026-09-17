@@ -67,6 +67,8 @@ interface InboxState {
   priorityInFilter: ConversationPriority[] | null;
   /** Filtro por tag de plano (max/ultra/advanced/starter) — usado pelas Visualizações. */
   planFilter: string | null;
+  /** Fila da IA: true = só conversas que a IA está conduzindo; null = indiferente. */
+  aiActiveFilter: boolean | null;
   /** Counts per status fetched from the DB — used for tab badges */
   tabCounts: Record<ConversationStatus, number>;
   /** Per-tab cache to avoid redundant reloads within a short window */
@@ -76,6 +78,9 @@ interface InboxState {
   isSearching: boolean;
   /** Ordenação da lista por última atividade (last_message_at). Persistida em localStorage. */
   sortDirection: SortDirection;
+  /** Ainda há conversas além das já carregadas? Liga o botão "Carregar mais". */
+  hasMore: boolean;
+  isLoadingMore: boolean;
 
   // Actions
   setActiveTab: (tab: ConversationStatus, clearPriority?: boolean) => void;
@@ -87,20 +92,28 @@ interface InboxState {
   setSortDirection: (direction: SortDirection) => void;
   setPriorityFilter: (priority: ConversationPriority | null) => void;
   setPriorityInFilter: (priorities: ConversationPriority[] | null) => void;
-  /** Aplica uma Visualização (status + prioridade + plano) de forma atômica e carrega. */
+  /** Aplica uma Visualização (status + prioridade + plano + fila da IA) de forma atômica e carrega. */
   applyView: (opts: {
     status: ConversationStatus;
     priority?: ConversationPriority | null;
     priorityIn?: ConversationPriority[] | null;
     plan?: string | null;
+    aiActive?: boolean | null;
   }) => void;
   loadConversations: (status: ConversationStatus, priority?: ConversationPriority | null, force?: boolean) => Promise<void>;
+  /** Carrega a próxima página da lista atual (mesmos filtros), anexando ao fim. */
+  loadMore: () => Promise<void>;
   refreshTabCounts: () => Promise<void>;
   upsertConversation: (raw: Record<string, unknown>) => Promise<void>;
   removeConversation: (id: string) => void;
 }
 
 const CACHE_TTL_MS = 30_000; // 30 seconds
+
+/** Tamanho da página da inbox. O cabeçalho mostra o total real; o que passa
+ *  daqui vem pelo botão "Carregar mais" — antes as conversas acima de 100
+ *  simplesmente não existiam para o operador. */
+const PAGE_SIZE = 100;
 
 // ─── Persistência da ordenação ────────────────────────────────────────────────
 // A preferência de ordem acompanha o operador entre sessões (como no Intercom),
@@ -147,6 +160,48 @@ function sortByActivity(list: Conversation[], direction: SortDirection): Convers
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+interface QueryFilters {
+  status: ConversationStatus;
+  priority?: ConversationPriority | null;
+  priorityIn?: ConversationPriority[] | null;
+  plan?: string | null;
+  aiActive?: boolean | null;
+}
+
+/**
+ * Monta a query da inbox a partir dos filtros ativos. Uma função só para que
+ * a primeira página e o "Carregar mais" NUNCA divirjam de filtro — divergir
+ * faria a segunda página trazer conversas que a primeira excluía.
+ */
+function buildConversationQuery(f: QueryFilters, sortDirection: SortDirection, from: number, to: number) {
+  let query = supabase
+    .from("desk_conversations")
+    .select("*")
+    // Ordena pela última mensagem — mesmo horário mostrado na linha da lista.
+    // "desc" = atividade mais recente primeiro; "asc" = mais antigas primeiro.
+    .order(SORT_COLUMN, { ascending: sortDirection === "asc", nullsFirst: false })
+    .range(from, to);
+
+  // "IA cuidando" é, por definição, o que NÃO está esperando humano: restringe
+  // a 'open' puro em vez do grupo open+pending.
+  if (f.aiActive === true) {
+    query = query.eq("status", "open").eq("ai_active", true);
+  } else {
+    query = f.status === "open"
+      ? query.in("status", ["open", "pending"])
+      : query.eq("status", f.status);
+    if (f.aiActive === false) query = query.eq("ai_active", false);
+  }
+
+  if (f.priorityIn?.length) query = query.in("priority", f.priorityIn);
+  else if (f.priority)      query = query.eq("priority", f.priority);
+
+  // Filtro por tag de plano/intenção (Visualizações) — desk_conversations.tags @> [tag]
+  if (f.plan) query = query.contains("tags", [f.plan]);
+
+  return query;
+}
 
 async function enrichConversations(
   rows: Record<string, unknown>[]
@@ -253,19 +308,23 @@ export const useInboxStore = create<InboxState>((set, get) => ({
   priorityFilter:       null,
   priorityInFilter:     null,
   planFilter:           null,
+  aiActiveFilter:       null,
   tabCounts:            { open: 0, pending: 0, snoozed: 0, resolved: 0 },
   _tabCache:            {},
   searchResults:        [],
   isSearching:          false,
   sortDirection:        readStoredSort(),
+  hasMore:              false,
+  isLoadingMore:        false,
 
   // ── Tab switching ────────────────────────────────────────────────────────────
   setActiveTab: (tab, clearPriority = false) => {
-    const { priorityFilter, priorityInFilter, planFilter, _tabCache, activeConversationId, conversations } = get();
+    const { priorityFilter, priorityInFilter, planFilter, aiActiveFilter, _tabCache, activeConversationId, conversations } = get();
     const newPriorityFilter   = clearPriority ? null : priorityFilter;
     const newPriorityInFilter = clearPriority ? null : priorityInFilter;
     const newPlanFilter       = clearPriority ? null : planFilter;
-    const hasFilter = !!newPriorityFilter || (newPriorityInFilter?.length ?? 0) > 0 || !!newPlanFilter;
+    const newAiActiveFilter   = clearPriority ? null : aiActiveFilter;
+    const hasFilter = !!newPriorityFilter || (newPriorityInFilter?.length ?? 0) > 0 || !!newPlanFilter || newAiActiveFilter !== null;
 
     // Clear active conversation if it doesn't belong to the new tab
     const activeConv = conversations.find((c) => c.id === activeConversationId);
@@ -277,12 +336,13 @@ export const useInboxStore = create<InboxState>((set, get) => ({
       priorityFilter: newPriorityFilter,
       priorityInFilter: newPriorityInFilter,
       planFilter: newPlanFilter,
+      aiActiveFilter: newAiActiveFilter,
     });
 
     // Serve from cache if fresh enough and no filter is active
     const cache = _tabCache[tab];
     if (!hasFilter && cache && Date.now() - cache.loadedAt < CACHE_TTL_MS) {
-      set({ conversations: cache.conversations });
+      set({ conversations: cache.conversations, hasMore: cache.conversations.length >= PAGE_SIZE });
       return;
     }
 
@@ -360,7 +420,7 @@ export const useInboxStore = create<InboxState>((set, get) => ({
   setPriorityInFilter: (priorities) => set({ priorityInFilter: priorities, priorityFilter: null }),
 
   // ── Aplica uma Visualização de forma atômica ──────────────────────────────────
-  applyView: ({ status, priority = null, priorityIn = null, plan = null }) => {
+  applyView: ({ status, priority = null, priorityIn = null, plan = null, aiActive = null }) => {
     const { activeConversationId, conversations } = get();
     const activeConv = conversations.find((c) => c.id === activeConversationId);
     const newActiveId = activeConv && statusMatchesTab(status, activeConv.status) ? activeConversationId : null;
@@ -373,21 +433,22 @@ export const useInboxStore = create<InboxState>((set, get) => ({
       priorityFilter: priorityIn?.length ? null : priority,
       priorityInFilter: priorityIn?.length ? priorityIn : null,
       planFilter: plan,
+      aiActiveFilter: aiActive,
     });
     get().loadConversations(status, priorityIn?.length ? null : priority, true);
   },
 
   // ── Load conversations for a tab ─────────────────────────────────────────────
   loadConversations: async (status, priority, force = false) => {
-    const { _tabCache, priorityInFilter, planFilter, sortDirection } = get();
-    const hasFilter = !!priority || (priorityInFilter?.length ?? 0) > 0 || !!planFilter;
+    const { _tabCache, priorityInFilter, planFilter, aiActiveFilter, sortDirection } = get();
+    const hasFilter = !!priority || (priorityInFilter?.length ?? 0) > 0 || !!planFilter || aiActiveFilter !== null;
 
     // Honour cache unless forced. Filtered loads bypass the cache entirely
     // (both read and write) so they never pollute the unfiltered tab list.
     if (!force && !hasFilter) {
       const cache = _tabCache[status];
       if (cache && Date.now() - cache.loadedAt < CACHE_TTL_MS) {
-        set({ conversations: cache.conversations });
+        set({ conversations: cache.conversations, hasMore: cache.conversations.length >= PAGE_SIZE });
         return;
       }
     }
@@ -395,47 +456,76 @@ export const useInboxStore = create<InboxState>((set, get) => ({
     set({ isLoading: true });
 
     // "Aberto" (estilo Intercom) = open + pending; demais abas são 1:1 com o status.
-    let query = supabase
-      .from("desk_conversations")
-      .select("*")
-      // Ordena pela última mensagem — mesmo horário mostrado na linha da lista.
-      // "desc" = atividade mais recente primeiro; "asc" = mais antigas primeiro.
-      .order(SORT_COLUMN, { ascending: sortDirection === "asc", nullsFirst: false })
-      .limit(100);
-    query = status === "open"
-      ? query.in("status", ["open", "pending"])
-      : query.eq("status", status);
-
-    if (priorityInFilter?.length) query = query.in("priority", priorityInFilter);
-    else if (priority)            query = query.eq("priority", priority);
-
-    // Filtro por tag de plano (Visualizações) — desk_conversations.tags @> [plan]
-    if (planFilter) query = query.contains("tags", [planFilter]);
-
-    const { data, error } = await query;
+    const { data, error } = await buildConversationQuery(
+      { status, priority, priorityIn: priorityInFilter, plan: planFilter, aiActive: aiActiveFilter },
+      sortDirection,
+      0,
+      PAGE_SIZE - 1,
+    );
 
     if (error || !data) {
-      set({ isLoading: false });
+      set({ isLoading: false, hasMore: false });
       console.error("[useInboxStore] loadConversations error:", error);
       return;
     }
 
     const enriched = await enrichConversations(data as Record<string, unknown>[]);
+    // Página cheia = provavelmente há mais. Uma página curta é o fim da lista.
+    const hasMore = data.length >= PAGE_SIZE;
 
     // Filtered results are transient — do not overwrite the tab cache with them.
     if (hasFilter) {
-      set({ conversations: enriched, isLoading: false });
+      set({ conversations: enriched, isLoading: false, hasMore });
       return;
     }
 
     set((s) => ({
       conversations: enriched,
       isLoading: false,
+      hasMore,
       _tabCache: {
         ...s._tabCache,
         [status]: { loadedAt: Date.now(), conversations: enriched },
       },
     }));
+  },
+
+  // ── Próxima página (botão "Carregar mais") ───────────────────────────────────
+  // Usa o MESMO buildConversationQuery da primeira página, só mudando o range —
+  // e deduplica por id, porque uma conversa que subiu de posição entre as duas
+  // requisições pode voltar repetida no offset seguinte.
+  loadMore: async () => {
+    const {
+      conversations, activeTab, priorityFilter, priorityInFilter, planFilter,
+      aiActiveFilter, sortDirection, isLoadingMore, hasMore,
+    } = get();
+    if (isLoadingMore || !hasMore) return;
+
+    set({ isLoadingMore: true });
+
+    const from = conversations.length;
+    const { data, error } = await buildConversationQuery(
+      { status: activeTab, priority: priorityFilter, priorityIn: priorityInFilter, plan: planFilter, aiActive: aiActiveFilter },
+      sortDirection,
+      from,
+      from + PAGE_SIZE - 1,
+    );
+
+    if (error || !data) {
+      set({ isLoadingMore: false });
+      console.error("[useInboxStore] loadMore error:", error);
+      return;
+    }
+
+    const known = new Set(conversations.map((c) => c.id));
+    const fresh = (data as Record<string, unknown>[]).filter((r) => !known.has(r.id as string));
+    const enriched = await enrichConversations(fresh);
+
+    set({
+      conversations: [...conversations, ...enriched],
+      isLoadingMore: false,
+      hasMore: data.length >= PAGE_SIZE,
+    });
   },
 
   // ── Fetch real counts from DB for all tabs ───────────────────────────────────

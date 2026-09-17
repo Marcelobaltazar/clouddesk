@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { Inbox, Users, BookOpen, Zap, Settings, Cloud, LogOut, Moon, Sun, Circle, Bell, BellOff, LayoutGrid, PanelLeft, Flame, BarChart3, UserCircle } from "lucide-react";
+import { Inbox, Users, BookOpen, Zap, Settings, Cloud, LogOut, Moon, Sun, Circle, Bell, BellOff, LayoutGrid, PanelLeft, Flame, BarChart3, UserCircle, Bot, ListChecks } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useAuthStore } from "@/stores/authStore";
 import { useTheme } from "@/lib/theme";
@@ -49,6 +49,30 @@ function planTagFromFilter(filters: DeskView["filters"]): string | null {
   return null;
 }
 
+/** Tag efetiva da view: genérica (intent:*) tem precedência sobre a de plano. */
+function tagFromFilter(filters: DeskView["filters"]): string | null {
+  return filters.tag ?? planTagFromFilter(filters);
+}
+
+/**
+ * Os dois eixos da sidebar. Misturá-los num bloco só é o que faz a conta
+ * "não fechar": uma conversa Advanced que está aguardando humano aparece nas
+ * duas — e deve mesmo, porque são recortes diferentes da MESMA conversa.
+ *
+ *  FILA     (eixo ESTADO)    — quem está com a bola. São mutuamente exclusivas.
+ *  SEGMENTO (eixo CLIENTE)   — de quem/do que se trata. Cruzam todas as filas.
+ */
+function isSegmentView(view: DeskView): boolean {
+  return !!tagFromFilter(view.filters);
+}
+
+/** Contagem de uma view: total do recorte + quantas dele esperam humano. */
+interface ViewCount {
+  total: number;
+  /** null = não se aplica (a view já filtra um status específico). */
+  pending: number | null;
+}
+
 // ─── Fixed nav items ──────────────────────────────────────────────────────────
 
 const primaryNav = [
@@ -90,7 +114,7 @@ export function AppSidebar() {
       return next;
     });
   };
-  const { conversations, activeTab, setActiveTab, loadConversations, setPriorityFilter, setPriorityInFilter, applyView } = useInboxStore();
+  const { conversations, tabCounts, refreshTabCounts, setPriorityFilter, setPriorityInFilter, applyView } = useInboxStore();
   const { isEnabled, toggle } = useNotifications();
   const location = useLocation();
 
@@ -99,13 +123,25 @@ export function AppSidebar() {
   const [priorityCount, setPriorityCount] = useState(0);
   const [priorityActive, setPriorityActive] = useState(false);
 
-  const openCount = activeTab === "open" ? conversations.length : 0;
+  // Total REAL de conversas em aberto (open + pending), igual ao cabeçalho da
+  // lista. Antes vinha de conversations.length, que é a lista JÁ FILTRADA: ao
+  // clicar numa Visualização o badge do Inbox passava a exibir o número da view.
+  const openCount = tabCounts.open + tabCounts.pending;
   const initials = agent?.name?.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase() ?? "?";
 
   // ── Dynamic views ────────────────────────────────────────────────────────────
   const [views, setViews] = useState<DeskView[]>([]);
-  const [viewCounts, setViewCounts] = useState<Record<string, number>>({});
+  const [viewCounts, setViewCounts] = useState<Record<string, ViewCount>>({});
   const [activeViewId, setActiveViewId] = useState<string | null>(null);
+  // Fila da IA: aberto + ai_active. É a outra metade de "Aguardando humano" —
+  // juntas, as duas filas cobrem tudo que está em aberto.
+  const [aiCount, setAiCount] = useState(0);
+  const [aiActive, setAiActive] = useState(false);
+
+  // Os dois eixos, separados na hora de renderizar. Uma view de estado (ex.:
+  // "Aguardando humano") é uma fila; uma com tag de plano/intenção é um segmento.
+  const queueViews   = views.filter((v) => !isSegmentView(v));
+  const segmentViews = views.filter(isSegmentView);
 
   const loadViews = useCallback(async () => {
     const { data, error } = await supabase
@@ -164,77 +200,116 @@ export function AppSidebar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadViews]);
 
-  // Contador de prioritários (open + high/urgent). Reconta quando a inbox muda.
+  // Contadores das filas fixas (prioritários + IA cuidando). Recontam quando a
+  // inbox muda e a cada evento realtime de desk_conversations.
   const refreshPriorityCount = useCallback(async () => {
-    const { count } = await supabase
-      .from("desk_conversations")
-      .select("id", { count: "exact", head: true })
-      .eq("status", "open")
-      .in("priority", PRIORITY_LEVELS);
-    setPriorityCount(count ?? 0);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    const [prio, ai] = await Promise.all([
+      supabase
+        .from("desk_conversations")
+        .select("id", { count: "exact", head: true })
+        .eq("status", "open")
+        .in("priority", PRIORITY_LEVELS),
+      supabase
+        .from("desk_conversations")
+        .select("id", { count: "exact", head: true })
+        .eq("status", "open")
+        .eq("ai_active", true),
+    ]);
+    setPriorityCount(prio.count ?? 0);
+    setAiCount(ai.count ?? 0);
+    // O badge do Inbox vive de tabCounts — sem isto ele congela no valor
+    // carregado quando a lista montou.
+    refreshTabCounts();
+  }, [refreshTabCounts]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     refreshPriorityCount();
   }, [refreshPriorityCount, conversations.length]);
 
-  function handlePriorityClick() {
-    setPriorityActive(true);
-    setActiveViewId(null);
+  /** Limpa o destaque das outras filas/views antes de aplicar a escolhida. */
+  function selectNav(kind: "priority" | "ai" | "view", viewId: string | null = null) {
+    setPriorityActive(kind === "priority");
+    setAiActive(kind === "ai");
+    setActiveViewId(viewId);
     navigate("/inbox");
+  }
+
+  function handlePriorityClick() {
+    selectNav("priority");
     // Prioritários = abertas com prioridade high OU urgent, sem filtro de plano.
     applyView({ status: "open", priorityIn: PRIORITY_LEVELS, plan: null });
   }
 
+  function handleAiQueueClick() {
+    selectNav("ai");
+    applyView({ status: "open", aiActive: true });
+  }
+
   async function fetchViewCounts(loaded: DeskView[]) {
-    const counts: Record<string, number> = {};
+    const counts: Record<string, ViewCount> = {};
+
+    // Uma contagem por view, com o MESMO filtro que o clique aplica — contador
+    // e lista nunca divergem. `onlyPending` produz o número âmbar do badge duplo.
+    const countFor = async (view: DeskView, onlyPending: boolean) => {
+      let query = supabase
+        .from("desk_conversations")
+        .select("id", { count: "exact", head: true });
+
+      const f = view.filters;
+
+      if (onlyPending) {
+        query = query.eq("status", "pending");
+      } else if (f.status) {
+        query = query.eq("status", f.status);
+      } else {
+        // Padrão = grupo "Aberto" (open + pending).
+        query = query.in("status", ["open", "pending"]);
+      }
+
+      if (f.priority) {
+        query = query.eq("priority", f.priority);
+      }
+
+      // Filtro por tag: genérico (f.tag, ex. "intent:cancelamento") ou plano
+      // (max/ultra/advanced/starter). A tag de plano é gravada na CRIAÇÃO da
+      // conversa pelo gateway e atualizada a cada turno da IA.
+      const tagFilter = tagFromFilter(f);
+      if (tagFilter) {
+        query = query.contains("tags", [tagFilter]);
+      }
+
+      const { count } = await query;
+      return count ?? 0;
+    };
 
     await Promise.all(
       loaded.map(async (view) => {
-        let query = supabase
-          .from("desk_conversations")
-          .select("id", { count: "exact", head: true });
-
-        const f = view.filters;
-
-        if (f.status) {
-          query = query.eq("status", f.status);
-        } else {
-          // Padrão = grupo "Aberto" (open + pending) — EXATAMENTE o que o clique
-          // na view lista. Contador e lista nunca divergem.
-          query = query.in("status", ["open", "pending"]);
-        }
-
-        if (f.priority) {
-          query = query.eq("priority", f.priority);
-        }
-
-        // Filtro por tag: genérico (f.tag, ex. "intent:cancelamento") ou plano
-        // (max/ultra/advanced/starter). A tag de plano é gravada na CRIAÇÃO da
-        // conversa pelo gateway e atualizada a cada turno da IA.
-        const tagFilter = f.tag ?? planTagFromFilter(f);
-        if (tagFilter) {
-          query = query.contains("tags", [tagFilter]);
-        }
-
-        const { count } = await query;
-        counts[view.id] = count ?? 0;
+        // O número âmbar ("esperando humano") só faz sentido em views que ainda
+        // não fixaram um status — numa view de resolvidas ele seria sempre 0.
+        const wantsPending = isSegmentView(view) && !view.filters.status;
+        const [total, pending] = await Promise.all([
+          countFor(view, false),
+          wantsPending ? countFor(view, true) : Promise.resolve(null),
+        ]);
+        counts[view.id] = { total, pending };
       })
     );
 
     setViewCounts(counts);
   }
 
-  function handleViewClick(view: DeskView) {
-    setActiveViewId(view.id);
-    setPriorityActive(false);
+  /** `onlyPending` = clique no número âmbar do badge duplo: mesma view, mas
+   *  recortada no que espera humano. */
+  function handleViewClick(view: DeskView, onlyPending = false) {
+    selectNav("view", view.id);
 
-    const targetStatus = (view.filters.status as "open" | "pending" | "snoozed" | "resolved" | undefined) ?? "open";
+    const targetStatus = onlyPending
+      ? "pending" as const
+      : (view.filters.status as "open" | "pending" | "snoozed" | "resolved" | undefined) ?? "open";
     const targetPriority = (view.filters.priority as "low" | "medium" | "high" | "urgent" | undefined) ?? null;
     // Tag genérica (ex.: intent:cancelamento) tem precedência sobre plano
-    const targetTag = view.filters.tag ?? planTagFromFilter(view.filters);
+    const targetTag = tagFromFilter(view.filters);
 
-    navigate("/inbox");
     // applyView define status + prioridade + tag atomicamente e recarrega,
     // sem a corrida que deixava a lista vazia.
     applyView({ status: targetStatus, priority: targetPriority, plan: targetTag });
@@ -279,6 +354,7 @@ export function AppSidebar() {
                 end={item.url === "/inbox"}
                 onClick={item.url === "/inbox" ? () => {
                   setPriorityActive(false);
+                  setAiActive(false);
                   setActiveViewId(null);
                   applyView({ status: "open" });
                 } : undefined}
@@ -335,6 +411,9 @@ export function AppSidebar() {
           {/* Divider before views */}
           <div className="my-2 border-t border-border/50" />
 
+          {/* ── FILAS: eixo ESTADO (quem está com a bola) ───────────────────── */}
+          {isOpen && <SectionLabel icon={ListChecks} text="Filas" />}
+
           {/* Prioritários — fixo (open + high/urgent) — item 4 */}
           <Tooltip>
             <TooltipTrigger asChild>
@@ -360,62 +439,58 @@ export function AppSidebar() {
             </TooltipContent>
           </Tooltip>
 
-          {/* Dynamic views section */}
-          {views.length > 0 && (
+          {/* IA cuidando — a outra metade de "Aguardando humano" */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={handleAiQueueClick}
+                className={cn(
+                  "w-full flex items-center gap-3 px-2 py-2 rounded-xl text-muted-foreground hover:bg-sidebar-accent hover:text-foreground transition-colors text-sm",
+                  aiActive && "bg-card card-selected text-foreground font-medium"
+                )}
+              >
+                <Bot className="h-5 w-5 shrink-0 text-indigo-400" />
+                {isOpen && <span className="whitespace-nowrap flex-1 text-left">IA cuidando</span>}
+                {isOpen && aiCount > 0 && (
+                  <span className="ml-auto text-xs text-muted-foreground tabular-nums">
+                    {aiCount}
+                  </span>
+                )}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="right">
+              <p>IA cuidando</p>
+              <p className="text-xs text-muted-foreground">{aiCount} abertas em que a IA ainda responde</p>
+            </TooltipContent>
+          </Tooltip>
+
+          {/* Views de estado (sem filtro de plano/tag) entram nas Filas */}
+          {queueViews.map((view) => (
+            <ViewRow
+              key={view.id}
+              view={view}
+              count={viewCounts[view.id]}
+              isActive={activeViewId === view.id}
+              isOpen={isOpen}
+              onOpen={() => handleViewClick(view)}
+              onOpenPending={() => handleViewClick(view, true)}
+            />
+          ))}
+
+          {/* ── SEGMENTOS: eixo CLIENTE (cruzam todas as filas) ─────────────── */}
+          {segmentViews.length > 0 && (
             <>
-              {isOpen && (
-                <div className="pt-2 pb-1">
-                  <div className="flex items-center gap-1.5 px-2">
-                    <LayoutGrid className="h-3 w-3 text-muted-foreground shrink-0" />
-                    <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider whitespace-nowrap">
-                      Visualizações
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              {views.map((view) => (
-                <Tooltip key={view.id}>
-                  <TooltipTrigger asChild>
-                    <button
-                      onClick={() => handleViewClick(view)}
-                      className={cn(
-                        "w-full flex items-center gap-3 px-2 py-2 rounded-xl text-muted-foreground hover:bg-sidebar-accent hover:text-foreground transition-colors text-sm",
-                        activeViewId === view.id && "bg-card card-selected text-foreground font-medium"
-                      )}
-                    >
-                      {/* Icon: colored dot when collapsed, emoji+dot when expanded */}
-                      <span
-                        className="h-5 w-5 rounded-full shrink-0 flex items-center justify-center text-sm"
-                        style={{ backgroundColor: `${view.color}25` }}
-                      >
-                        {view.emoji ? (
-                          <span className="text-xs leading-none">{view.emoji}</span>
-                        ) : (
-                          <span
-                            className="h-2 w-2 rounded-full"
-                            style={{ backgroundColor: view.color }}
-                          />
-                        )}
-                      </span>
-
-                      {isOpen && (
-                        <span className="whitespace-nowrap flex-1 text-left truncate">{view.name}</span>
-                      )}
-                      {isOpen && viewCounts[view.id] !== undefined && viewCounts[view.id] > 0 && (
-                        <span className="ml-auto text-xs text-muted-foreground tabular-nums">
-                          {viewCounts[view.id]}
-                        </span>
-                      )}
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent side="right">
-                    <p>{view.name}</p>
-                    {viewCounts[view.id] !== undefined && (
-                      <p className="text-xs text-muted-foreground">{viewCounts[view.id]} conversas</p>
-                    )}
-                  </TooltipContent>
-                </Tooltip>
+              {isOpen && <SectionLabel icon={LayoutGrid} text="Segmentos" />}
+              {segmentViews.map((view) => (
+                <ViewRow
+                  key={view.id}
+                  view={view}
+                  count={viewCounts[view.id]}
+                  isActive={activeViewId === view.id}
+                  isOpen={isOpen}
+                  onOpen={() => handleViewClick(view)}
+                  onOpenPending={() => handleViewClick(view, true)}
+                />
               ))}
             </>
           )}
@@ -508,5 +583,111 @@ export function AppSidebar() {
         </div>
       </aside>
     </TooltipProvider>
+  );
+}
+
+// ─── Sub-componentes ──────────────────────────────────────────────────────────
+
+/** Cabeçalho de um dos dois eixos ("Filas" / "Segmentos"). */
+function SectionLabel({ icon: Icon, text }: { icon: typeof LayoutGrid; text: string }) {
+  return (
+    <div className="pt-3 pb-1">
+      <div className="flex items-center gap-1.5 px-2">
+        <Icon className="h-3 w-3 text-muted-foreground shrink-0" />
+        <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider whitespace-nowrap">
+          {text}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Linha de uma Visualização na sidebar.
+ *
+ * Badge duplo (só em segmentos): "9 · 23" = 9 esperando humano, 23 em aberto
+ * no total. O âmbar é o acionável — é ele que responde "quanto trabalho meu
+ * tem aqui?". Clicar no âmbar abre a mesma view recortada em 'pending', então
+ * cada número continua batendo com a lista que ele abre.
+ */
+function ViewRow({
+  view,
+  count,
+  isActive,
+  isOpen,
+  onOpen,
+  onOpenPending,
+}: {
+  view: DeskView;
+  count: ViewCount | undefined;
+  isActive: boolean;
+  isOpen: boolean;
+  onOpen: () => void;
+  onOpenPending: () => void;
+}) {
+  const total   = count?.total ?? 0;
+  const pending = count?.pending ?? null;
+  // Sem nada esperando humano não há o que destacar — mostra só o total.
+  const showDual = pending !== null && pending > 0;
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        {/* div (e não button) porque o número âmbar é clicável por si só —
+            um <button> dentro de outro é HTML inválido. */}
+        <div
+          className={cn(
+            "w-full flex items-center gap-3 px-2 py-2 rounded-xl text-muted-foreground hover:bg-sidebar-accent hover:text-foreground transition-colors text-sm",
+            isActive && "bg-card card-selected text-foreground font-medium"
+          )}
+        >
+          <button
+            onClick={onOpen}
+            className="flex items-center gap-3 flex-1 min-w-0 text-left"
+          >
+            {/* Icon: colored dot when collapsed, emoji+dot when expanded */}
+            <span
+              className="h-5 w-5 rounded-full shrink-0 flex items-center justify-center text-sm"
+              style={{ backgroundColor: `${view.color}25` }}
+            >
+              {view.emoji ? (
+                <span className="text-xs leading-none">{view.emoji}</span>
+              ) : (
+                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: view.color }} />
+              )}
+            </span>
+            {isOpen && <span className="whitespace-nowrap flex-1 truncate">{view.name}</span>}
+          </button>
+
+          {isOpen && total > 0 && (
+            <span className="flex items-center gap-1 shrink-0 text-xs tabular-nums">
+              {showDual && (
+                <>
+                  <button
+                    onClick={onOpenPending}
+                    className="text-amber-500 font-semibold hover:underline"
+                    aria-label={`${pending} aguardando humano em ${view.name}`}
+                  >
+                    {pending}
+                  </button>
+                  <span className="text-muted-foreground/40">·</span>
+                </>
+              )}
+              <span className="text-muted-foreground">{total}</span>
+            </span>
+          )}
+        </div>
+      </TooltipTrigger>
+      <TooltipContent side="right">
+        <p>{view.name}</p>
+        {showDual ? (
+          <p className="text-xs text-muted-foreground">
+            <span className="text-amber-500">{pending} aguardando humano</span> de {total} em aberto
+          </p>
+        ) : (
+          <p className="text-xs text-muted-foreground">{total} conversas</p>
+        )}
+      </TooltipContent>
+    </Tooltip>
   );
 }
