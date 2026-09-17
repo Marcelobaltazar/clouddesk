@@ -1,4 +1,4 @@
-import { AlertCircle, Bot, MessageSquarePlus, MessagesSquare, User } from "lucide-react";
+import { AlertCircle, Bot, Merge, MessageSquarePlus, MessagesSquare, User } from "lucide-react";
 import type { WidgetConversationSummary } from "./types";
 
 interface Props {
@@ -67,6 +67,35 @@ function ConversationRow({
   const status = statusLabel(conversation.status);
   const unread = conversation.unread_count > 0;
   const isBot = conversation.last_message_sender === "bot";
+
+  // Chamado que foi juntado a outro: as mensagens migraram para a thread de
+  // destino. A linha continua aqui como atalho — sumir do nada faria o cliente
+  // que lembra de ter aberto dois achar que perdeu um.
+  if (conversation.merged_into) {
+    return (
+      <button
+        onClick={onOpen}
+        className="w-full text-left px-4 py-3 flex gap-3 hover:bg-accent/10 transition-colors duration-150 border-b border-border/60 opacity-70"
+      >
+        <div className="h-8 w-8 rounded-full flex items-center justify-center shrink-0 mt-0.5 bg-muted">
+          <Merge className="h-4 w-4 text-muted-foreground" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="flex-1 truncate text-sm font-medium text-foreground/70">
+              {conversation.subject || "Atendimento"}
+            </span>
+            <span className="text-[10px] text-muted-foreground shrink-0">
+              {formatWhen(conversation.last_message_at ?? conversation.created_at)}
+            </span>
+          </div>
+          <p className="text-xs text-muted-foreground mt-0.5 truncate">
+            Juntado ao chamado anterior — toque para abrir
+          </p>
+        </div>
+      </button>
+    );
+  }
 
   return (
     <button

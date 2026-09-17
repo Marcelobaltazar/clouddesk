@@ -71,6 +71,8 @@ interface ConversationRow {
   account_user_id: string | null;
   last_message_at: string | null;
   contact_last_read_at: string | null;
+  /** Preenchido quando esta conversa foi absorvida por outra (mesclagem). */
+  merged_into: string | null;
 }
 
 /** Linha da lista de chamados do cliente: conversa + prévia + não lidas. */
@@ -85,6 +87,9 @@ interface ConversationSummary extends Record<string, unknown> {
   last_message_preview: string | null;
   last_message_sender: string | null;
   unread_count: number;
+  /** Chamado absorvido por outro: a linha vira "Juntado ao chamado anterior"
+   *  e o clique abre a thread de destino, onde o histórico realmente está. */
+  merged_into: string | null;
 }
 
 interface MessageRow {
@@ -98,7 +103,7 @@ interface MessageRow {
   metadata: Record<string, unknown> | null;
 }
 
-const CONV_SELECT = 'id, status, created_at, subject, assigned_agent_id, ai_active, user_email, account_user_id, last_message_at, contact_last_read_at';
+const CONV_SELECT = 'id, status, created_at, subject, assigned_agent_id, ai_active, user_email, account_user_id, last_message_at, contact_last_read_at, merged_into';
 const MSG_SELECT = 'id, conversation_id, sender_type, content, created_at, ai_generated, is_private_note, metadata';
 
 const MAX_MESSAGE_CHARS = 4000;
@@ -138,22 +143,47 @@ function cleanForStorage(text: string): string {
 
 const serviceClient = newServiceClient;
 
-/** Carrega a conversa SOMENTE se pertence ao e-mail verificado. */
+/** Quantos saltos de mesclagem seguimos antes de desistir. Protege contra um
+ *  ciclo em merged_into (não deveria existir, mas um loop infinito aqui
+ *  derrubaria o gateway). */
+const MAX_MERGE_HOPS = 5;
+
+/**
+ * Carrega a conversa SOMENTE se pertence ao e-mail verificado.
+ *
+ * Se a conversa foi absorvida por outra, segue merged_into até a viva: o
+ * cliente que ainda tem a thread antiga aberta (ou clica nela na lista)
+ * continua escrevendo no lugar onde o operador realmente está lendo. Antes,
+ * uma conversa 'merged' era aceita normalmente e as mensagens caíam numa
+ * thread que a inbox do painel nem lista (ela só carrega open/pending).
+ */
 async function loadOwnedConversation(
   service: ServiceClient,
   conversationId: string,
   email: string,
 ): Promise<ConversationRow | null> {
   if (!UUID_RE.test(conversationId)) return null;
-  const { data, error } = await service
-    .from('desk_conversations')
-    .select(CONV_SELECT)
-    .eq('id', conversationId)
-    .maybeSingle();
-  if (error || !data) return null;
-  const row = data as unknown as ConversationRow;
-  if ((row.user_email ?? '').trim().toLowerCase() !== email) return null;
-  return row;
+
+  let id = conversationId;
+  for (let hop = 0; hop <= MAX_MERGE_HOPS; hop++) {
+    const { data, error } = await service
+      .from('desk_conversations')
+      .select(CONV_SELECT)
+      .eq('id', id)
+      .maybeSingle();
+    if (error || !data) return null;
+
+    const row = data as unknown as ConversationRow;
+    // A posse é checada em CADA salto: o destino também tem que ser do mesmo
+    // cliente (a Edge Function de merge já garante isso, mas não confiamos).
+    if ((row.user_email ?? '').trim().toLowerCase() !== email) return null;
+
+    if (row.status !== 'merged' || !row.merged_into) return row;
+    id = row.merged_into;
+  }
+
+  console.warn('[widget-api] cadeia de merge longa demais a partir de', conversationId);
+  return null;
 }
 
 async function findOpenConversation(
@@ -166,8 +196,11 @@ async function findOpenConversation(
   const { data, error } = await service
     .from('desk_conversations')
     .select(CONV_SELECT)
+    // 'merged' também está fora: uma conversa absorvida não tem mais mensagens
+    // (migraram para o destino) e não aparece na inbox do operador — devolvê-la
+    // como "a conversa aberta" fazia o cliente escrever no vazio.
+    .not('status', 'in', '("resolved","merged")')
     .ilike('user_email', emailPattern)
-    .neq('status', 'resolved')
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -317,6 +350,9 @@ async function listConversations(
       last_message_preview: last ? previewOf(last.content) : null,
       last_message_sender: last?.sender_type ?? null,
       unread_count: unreadByConv.get(row.id) ?? 0,
+      // Chamado mesclado continua na lista, mas como atalho para o destino —
+      // some do nada é pior: o cliente lembra que abriu dois e acha que perdeu um.
+      merged_into: row.status === 'merged' ? row.merged_into : null,
     };
   });
 }
