@@ -30,6 +30,7 @@ import {
   type ContactSubscription,
 } from './contact-info.ts';
 import type { BillingInfo } from './chargefy.ts';
+import { collectUrls, enforceLinkAllowlist } from './link-guard.ts';
 import { broadcastToConversation } from './broadcast.ts';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -122,7 +123,7 @@ const MAX_CONTACT_MESSAGE_CHARS = 4000;
 const MAX_NAME_CHARS = 80;
 
 const CONTROL_MARKERS_RE =
-  /\[\s*(?:TRANSFERIR|OFERECER_CREDENCIAIS|ILUSTRAR|OPCOES\s*:[^\]]*|META\s*:[^\]]*|ACTION\b[^\]]*)\s*\]/gi;
+  /\[\s*(?:TRANSFERIR|OFERECER_CREDENCIAIS|ILUSTRAR|FONTE\s*:[^\]]*|OPCOES\s*:[^\]]*|META\s*:[^\]]*|ACTION\b[^\]]*)\s*\]/gi;
 
 // Cabeçalhos internos do prompt — se aparecem numa mensagem de cliente, é
 // tentativa de injeção de contexto falso.
@@ -779,14 +780,15 @@ function buildSystemPrompt(
 
     if (kbMatches.length > 0) {
       parts.push('[ARTIGOS RELEVANTES]');
-      for (const kb of kbMatches) {
-        const url = kbArticleUrl(kb.source, kb.source_id, kb.id, kb.title);
+      // O artigo é identificado por NÚMERO, nunca por URL. O modelo não recebe
+      // link nenhum aqui — não dá para copiar errado nem "completar" um que
+      // pareça certo. Quem transforma [FONTE:n] em link é o servidor.
+      kbMatches.forEach((kb, i) => {
         parts.push(
-          `Artigo: ${kb.title}${kb.category ? ` (${kb.category})` : ''}\n` +
-          `URL: ${url ?? 'null'}\n` +
+          `Artigo #${i + 1}: ${kb.title}${kb.category ? ` (${kb.category})` : ''}\n` +
           `Conteúdo: ${kb.content}`,
         );
-      }
+      });
     }
 
     if (faqMatches.length > 0) {
@@ -858,11 +860,19 @@ Se o cliente tem APENAS plano(s) Starter ativo(s) (nenhuma assinatura ativa de A
 [BASE DE CONHECIMENTO — FONTE COMPLEMENTAR]
 Use o conteúdo abaixo COMBINADO com o bloco DADOS DO CLIENTE para responder. Os dois são fontes válidas. Se a pergunta for sobre dados específicos do cliente (status da infraestrutura, assinaturas dele etc.), priorize o bloco DADOS DO CLIENTE. Para perguntas gerais ou de como-fazer, use a base de conhecimento.
 
-Cada artigo abaixo tem um campo "URL". Quando você usar as informações de um artigo para montar a resposta, adicione no final da resposta:
+[LIMITE DO QUE VOCÊ PODE AFIRMAR]
+Sobre COMO FAZER algo na Cloudfy (configurar, integrar, acessar, cancelar, conectar serviços), você só pode afirmar o que estiver escrito nos blocos acima — artigos, snippets, FAQ ou DADOS DO CLIENTE. Seu conhecimento geral sobre n8n, Evolution API, Chatwoot, Docker etc. NÃO é fonte válida aqui: ele descreve o produto genérico, não a instalação da Cloudfy, e é assim que se entrega um passo a passo que não bate com o que o cliente vê na tela.
 
-📚 Fonte: [título do artigo](url)
+Se a base não cobre o que foi perguntado, NÃO improvise um procedimento. Diga com naturalidade que não tem esse passo a passo documentado, ofereça o que você de fato sabe (o que é possível, o que existe) e siga a regra de transferência. Uma resposta curta e honesta vale mais que um roteiro inventado — quando o cliente segue um passo que não existe, ele volta mais irritado e o problema chega no operador maior do que era.
 
-Inclua a fonte APENAS se o artigo realmente usado tiver uma URL (campo URL diferente de "null"). Se a URL for "null", NÃO cite a fonte daquele artigo. Nunca invente URLs nem use uma URL diferente da fornecida. Se usar mais de um artigo com URL, liste uma linha "📚 Fonte:" por artigo.
+[CITAR A FONTE — MARCADOR [FONTE:n]]
+Você NUNCA escreve URLs de artigo. Para citar um artigo, escreva o marcador com o número dele em uma linha própria no FINAL da resposta:
+
+[FONTE:1]
+
+O sistema troca o marcador pelo link real da Central de ajuda. Cite só os artigos que você realmente usou (um marcador por artigo, no máximo dois). Se não usou artigo nenhum, não escreva marcador.
+
+Isto vale para QUALQUER link: você não inventa, não adivinha e não "completa" endereços. Escrever uma URL que não veio dos blocos acima é um erro grave — ela é removida antes de chegar ao cliente e a resposta chega capenga.
 
 [IMAGEM ILUSTRATIVA — MARCADOR [ILUSTRAR]]
 Quando a resposta for um PASSO A PASSO VISUAL (o cliente perguntou "como faço/onde clico/onde acesso" algo na interface) E o artigo que você usou como base tiver imagens, adicione o marcador [ILUSTRAR] em uma linha própria no FINAL da resposta. O sistema vai anexar automaticamente 1 imagem ilustrativa do artigo — você NÃO escreve a URL da imagem, apenas o marcador.
@@ -885,6 +895,38 @@ const OFFER_CREDENTIALS_RE = /\[OFERECER_CREDENCIAIS\s*\]/i;
 // determinística da 1ª imagem do KB de maior similaridade que já esteja no NOSSO
 // Storage (migração feita — nada de URL do Intercom).
 const ILUSTRAR_RE = /\[ILUSTRAR\s*\]/i;
+
+// [FONTE:n] → o servidor troca pelo link real do n-ésimo artigo injetado neste
+// turno. O modelo nunca vê nem escreve a URL, então não tem como inventá-la.
+const FONTE_RE = /\[FONTE\s*:\s*(\d+)\s*\]/gi;
+
+/** Máximo de fontes por resposta — três linhas de "Fonte:" viram ruído. */
+const MAX_SOURCES = 2;
+
+/**
+ * Troca os marcadores [FONTE:n] pelas linhas "📚 Fonte: [título](url)" reais.
+ * Marcador fora da faixa, repetido, ou de artigo sem URL pública é descartado
+ * em silêncio — melhor uma resposta sem fonte que uma fonte que não abre.
+ */
+function resolveSourceMarkers(text: string, kbMatches: KBMatch[]): string {
+  const cited: string[] = [];
+  const seen = new Set<number>();
+
+  const stripped = text.replace(FONTE_RE, (_m, n: string) => {
+    const idx = Number(n) - 1;
+    const kb = kbMatches[idx];
+    if (!kb || seen.has(idx) || cited.length >= MAX_SOURCES) return '';
+    seen.add(idx);
+
+    const url = kbArticleUrl(kb.source, kb.source_id, kb.id, kb.title);
+    if (url) cited.push(`📚 Fonte: [${kb.title}](${url})`);
+    return '';
+  });
+
+  const body = stripped.replace(/\n{3,}/g, '\n\n').trim();
+  if (cited.length === 0) return body;
+  return `${body}\n\n${cited.join('\n')}`;
+}
 
 // Extrai a 1ª imagem markdown (só do nosso Storage) de um conteúdo de artigo.
 const MD_IMG_RE = /!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/g;
@@ -1115,6 +1157,8 @@ async function logInteraction(
     faqIds: string[];
     snippetIds: string[];
     draft: boolean;
+    /** URLs que o modelo inventou e o guard removeu. Vazio no caso normal. */
+    removedLinks?: string[];
   },
 ): Promise<void> {
   try {
@@ -1135,6 +1179,9 @@ async function logInteraction(
         sentiment: params.analysis?.sentiment ?? null,
         urgency: params.analysis?.urgency ?? null,
         draft: params.draft,
+        // Fica no log para virar número: quantas respostas por dia tentaram
+        // mandar link inventado. É assim que se mede se o prompt melhorou.
+        removed_links: params.removedLinks ?? [],
       },
     });
   } catch (e) {
@@ -1652,6 +1699,50 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
     }
   }
 
+  // ── Fontes e links ───────────────────────────────────────────────────────────
+  // Roda ANTES do retorno de draft: o rascunho que o operador revisa pode ser
+  // enviado como está, então ele precisa passar pelo mesmo crivo da resposta
+  // automática. Um link inventado num rascunho vira link inventado no cliente.
+
+  // [FONTE:n] → linha "📚 Fonte:" com o link real do artigo. Tem que rodar
+  // ANTES da limpeza de marcadores, que apagaria o marcador sem resolver.
+  reply = resolveSourceMarkers(reply, kbMatches);
+
+  // Cinto e suspensório: nenhum marcador de controle sai para o cliente.
+  reply = reply.replace(CONTROL_MARKERS_RE, '').replace(/\n{3,}/g, '\n\n').trim();
+
+  // Última barreira: o modelo só publica URL que já estava na entrada dele.
+  // A allow-list sai do próprio systemPrompt (artigos do RAG, dados do cliente,
+  // links de fatura, endereços da infra) mais as constantes fixas e os links de
+  // fonte que ACABAMOS de montar. O texto do cliente fica de fora de propósito:
+  // se entrasse, bastaria colar um link e pedir para a Luna repetir.
+  const removedLinks: string[] = [];
+  {
+    const allowed = [
+      ...collectUrls(systemPrompt),
+      ...kbMatches
+        .map((kb) => kbArticleUrl(kb.source, kb.source_id, kb.id, kb.title))
+        .filter((u): u is string => !!u),
+      HELP_CENTER_URL,
+      `${HELP_CENTER_URL}/ajuda`,
+      COMMUNITY_WHATSAPP_1,
+      COMMUNITY_WHATSAPP_2,
+      COMMUNITY_DISCORD,
+    ];
+
+    const guarded = enforceLinkAllowlist(reply, allowed);
+    removedLinks.push(...guarded.removed);
+    if (guarded.removed.length > 0) {
+      // Log alto de propósito: link inventado é defeito de resposta, não ruído.
+      // É por aqui que se descobre que o prompt voltou a escorregar.
+      console.warn(
+        `[AI] Link guard: ${guarded.removed.length} URL(s) inventada(s) removida(s) ` +
+        `da conversa ${conversationId}: ${guarded.removed.join(', ')}`,
+      );
+    }
+    reply = guarded.text;
+  }
+
   void logInteraction(supabase, {
     conversationId,
     model: llm.model,
@@ -1663,26 +1754,24 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
     faqIds: faqMatches.map((f) => f.id),
     snippetIds: snippetMatches.map((s) => s.id),
     draft: isDraft,
+    removedLinks,
   });
 
   // Modo draft: só devolve o texto limpo para o operador revisar.
   if (isDraft) {
-    const draftReply = reply.replace(TRANSFER_KEYWORD, '').trim();
     return {
       ...none,
-      reply: draftReply || 'Não consegui gerar uma sugestão para esta conversa.',
+      reply: reply || 'Não consegui gerar uma sugestão para esta conversa.',
     };
   }
 
   // Starter: se o modelo tentou transferir mesmo proibido, troca o marcador
-  // residual por orientação de autoatendimento.
-  if (isStarterClient && reply.includes(TRANSFER_KEYWORD)) {
+  // residual por orientação de autoatendimento. Texto nosso, links nossos —
+  // por isso vem DEPOIS do guard, sem precisar passar por ele.
+  if (isStarterClient && rawReply.includes(TRANSFER_KEYWORD)) {
     reply = `Não consegui resolver isso por aqui agora. Recomendo conferir nossa Central de ajuda em ${HELP_CENTER_URL}/ajuda ou pedir ajuda no nosso Discord: ${COMMUNITY_DISCORD}`;
     metadata = null;
   }
-
-  // Cinto e suspensório: nenhum marcador de controle sai para o cliente.
-  reply = reply.replace(CONTROL_MARKERS_RE, '').replace(/\n{3,}/g, '\n\n').trim();
 
   // Convite às comunidades — anexado server-side depois da limpeza, para não
   // ser removido junto com os marcadores nem virar decisão do modelo.
