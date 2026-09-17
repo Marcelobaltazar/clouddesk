@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { FunctionsHttpError } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
 import { useInboxStore } from "@/stores/useInboxStore";
 import { useConversationStore, type Message } from "@/stores/useConversationStore";
@@ -25,6 +26,34 @@ import { MergeDialog } from "./MergeDialog";
 interface SnoozeOption {
   label: string;
   resolve: () => Date;
+}
+
+// ─── Erro de Edge Function ──────────────────────────────────────────────────
+// supabase.functions.invoke devolve só "Edge Function returned a non-2xx status
+// code" — o motivo real está no corpo da resposta. Sem isso, qualquer falha da
+// IA (chave ausente, crédito esgotado, modelo inválido) vira a mesma mensagem
+// genérica e não dá para diagnosticar.
+
+async function describeFunctionError(error: Error): Promise<string> {
+  if (!(error instanceof FunctionsHttpError)) return error.message;
+
+  const status = error.context.status;
+  let detail = "";
+  try {
+    // O corpo só pode ser lido uma vez — lê como texto e tenta interpretar JSON.
+    const raw = await error.context.text();
+    try {
+      const body = JSON.parse(raw) as { error?: string; message?: string };
+      detail = body.error ?? body.message ?? raw;
+    } catch {
+      detail = raw;
+    }
+  } catch {
+    // corpo indisponível
+  }
+
+  detail = detail.trim().slice(0, 300);
+  return detail ? `HTTP ${status} — ${detail}` : `HTTP ${status}`;
 }
 
 const SNOOZE_OPTIONS: SnoozeOption[] = [
@@ -724,7 +753,9 @@ export function ConversationThread() {
         },
       );
 
-      if (error) throw new Error(error.message);
+      // O invoke devolve apenas "non-2xx status code"; o motivo real vem no corpo
+      // JSON da Edge Function (ex.: crédito da OpenRouter esgotado, chave ausente).
+      if (error) throw new Error(await describeFunctionError(error));
       if (!data?.reply) throw new Error("A IA não retornou sugestão");
 
       setMode("reply");
