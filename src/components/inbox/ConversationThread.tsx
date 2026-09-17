@@ -1009,6 +1009,12 @@ export function ConversationThread() {
         </TooltipProvider>
       </div>
 
+      {/* ── Aviso de chamados duplicados ── */}
+      <DuplicateTicketsBanner
+        conversationId={activeConversationId}
+        onMerge={() => setMergeOpen(true)}
+      />
+
       {/* ── Messages ── */}
       <div
         ref={scrollRef}
@@ -1433,6 +1439,108 @@ function MessagesSkeleton() {
           <Skeleton className={cn("h-10 rounded-lg", right ? "w-48" : "w-56")} />
         </div>
       ))}
+    </div>
+  );
+}
+
+// ─── DuplicateTicketsBanner ───────────────────────────────────────────────────
+
+interface DuplicateTicket {
+  id: string;
+  subject: string | null;
+  status: string;
+  last_message_at: string | null;
+}
+
+/**
+ * Avisa o operador quando o MESMO cliente tem outros chamados em aberto.
+ *
+ * É a camada de sugestão da política anti-duplicata: o sistema aponta o caso,
+ * mas quem decide mesclar é o operador. Mesclar automaticamente juntaria SLA,
+ * prioridade e assunto de problemas que podem ser distintos (fatura + infra
+ * fora do ar, por exemplo) — e não existe desmesclar.
+ */
+function DuplicateTicketsBanner({
+  conversationId,
+  onMerge,
+}: {
+  conversationId: string;
+  onMerge: () => void;
+}) {
+  const conversations = useInboxStore((s) => s.conversations);
+  const setActiveConversationId = useInboxStore((s) => s.setActiveConversationId);
+  const email = conversations.find((c) => c.id === conversationId)?.user_email ?? null;
+
+  const [others, setOthers] = useState<DuplicateTicket[]>([]);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    setExpanded(false);
+    if (!email) { setOthers([]); return; }
+
+    let cancelled = false;
+    // Escapa wildcards do LIKE — um e-mail com "_" não pode virar padrão de busca.
+    const pattern = email.replace(/([%_\\])/g, "\\$1");
+
+    supabase
+      .from("desk_conversations")
+      .select("id, subject, status, last_message_at")
+      .ilike("user_email", pattern)
+      .neq("id", conversationId)
+      .in("status", ["open", "pending"])
+      .order("last_message_at", { ascending: false, nullsFirst: false })
+      .limit(5)
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        if (error) {
+          // Silencioso: é um aviso auxiliar, não vale um toast de erro por cima
+          // do atendimento em andamento.
+          console.error("[DuplicateTicketsBanner]", error);
+          setOthers([]);
+          return;
+        }
+        setOthers((data ?? []) as DuplicateTicket[]);
+      });
+
+    return () => { cancelled = true; };
+  }, [conversationId, email]);
+
+  if (others.length === 0) return null;
+
+  return (
+    <div className="shrink-0 mx-5 mt-3 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+      <div className="flex items-center gap-2">
+        <GitMerge className="h-3.5 w-3.5 text-amber-500 shrink-0" />
+        <p className="text-[12px] text-foreground flex-1">
+          Este cliente tem {others.length} outro{others.length > 1 ? "s" : ""} chamado
+          {others.length > 1 ? "s" : ""} em aberto.
+        </p>
+        <button
+          onClick={() => setExpanded((v) => !v)}
+          className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+        >
+          {expanded ? "Ocultar" : "Ver"}
+        </button>
+        <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]" onClick={onMerge}>
+          Mesclar
+        </Button>
+      </div>
+
+      {expanded && (
+        <ul className="mt-2 space-y-1 border-t border-amber-500/20 pt-2">
+          {others.map((o) => (
+            <li key={o.id}>
+              <button
+                onClick={() => setActiveConversationId(o.id)}
+                className="w-full text-left text-[11px] text-muted-foreground hover:text-foreground transition-colors truncate"
+              >
+                #{o.id.slice(0, 8)} · {o.subject || "Sem assunto"}
+                {o.status === "pending" && " · aguardando humano"}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
