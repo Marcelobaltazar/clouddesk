@@ -33,10 +33,12 @@ import {
   UserCircle,
   Mail,
   MessageSquare,
+  Megaphone,
   Settings as SettingsIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { OutboundManager } from "@/components/outbound/OutboundManager";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -96,7 +98,7 @@ function formatMinutes(minutes: number): string {
 
 // A aba vive na URL (?tab=) para o menu do operador na sidebar conseguir abrir
 // "Minha conta" direto, e para o link ser compartilhável.
-const TABS = ["conta", "tags", "views", "sla"] as const;
+const TABS = ["conta", "tags", "views", "sla", "disparos"] as const;
 type TabValue = (typeof TABS)[number];
 
 export default function SettingsPage() {
@@ -105,7 +107,8 @@ export default function SettingsPage() {
   const tab: TabValue = param && TABS.includes(param) ? param : "conta";
 
   return (
-    <div className="h-full flex flex-col p-6 max-w-3xl mx-auto w-full">
+    // Disparos tem lista + métricas lado a lado — precisa de mais largura.
+    <div className={cn("h-full flex flex-col p-6 mx-auto w-full", tab === "disparos" ? "max-w-5xl" : "max-w-3xl")}>
       <div className="flex items-center gap-2 mb-6">
         <SettingsIcon className="h-5 w-5 text-muted-foreground" />
         <h1 className="text-xl font-semibold text-foreground">Configurações</h1>
@@ -129,6 +132,9 @@ export default function SettingsPage() {
           <TabsTrigger value="sla" className="gap-1.5">
             <Timer className="h-3.5 w-3.5" /> SLA
           </TabsTrigger>
+          <TabsTrigger value="disparos" className="gap-1.5">
+            <Megaphone className="h-3.5 w-3.5" /> Disparos
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="conta">
@@ -142,6 +148,9 @@ export default function SettingsPage() {
         </TabsContent>
         <TabsContent value="sla">
           <SlaTab />
+        </TabsContent>
+        <TabsContent value="disparos">
+          <OutboundManager />
         </TabsContent>
       </Tabs>
     </div>

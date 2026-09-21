@@ -4,8 +4,12 @@ import { ChatWidget } from "@/components/widget/ChatWidget";
 import { ChatWidgetNotice } from "@/components/widget/ChatWidgetNotice";
 import { useWidgetStore } from "@/components/widget/useWidgetStore";
 import { useWidgetLiveUpdates } from "@/components/widget/useWidgetLiveUpdates";
+import { OutboundClosedLayer } from "@/components/widget/outbound/OutboundClosedLayer";
+import { TourRunner } from "@/components/widget/outbound/TourRunner";
+import { useLoadCampaigns } from "@/components/widget/outbound/useOutbound";
 import { DEFAULT_SETTINGS } from "@/components/widget/types";
 import { supabase } from "@/integrations/supabase/client";
+import { configureWidgetApi } from "@/lib/widget-api";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import type { ContactInfo } from "@/lib/contact-info";
@@ -22,16 +26,20 @@ const mockSettings = {
 export default function WidgetPreview() {
   const { setAccount, setConversation, setMessages, setPendingOpenId, setOpen } = useWidgetStore();
 
-  // Mesma infra do embed: realtime + badge + aviso flutuante funcionando no
-  // preview, para dar para testar o fluxo de "operador respondeu" por aqui.
-  useWidgetLiveUpdates(true);
-
   const [emailInput, setEmailInput]   = useState(DEFAULT_EMAIL);
   const [activeEmail, setActiveEmail] = useState(DEFAULT_EMAIL);
   const [clientName, setClientName]   = useState("Caio Maciel Martens");
   const [stripeId, setStripeId]       = useState("cus_U22qgKOnfsRl5E");
   const [status, setStatus]           = useState<"idle" | "loading" | "ok" | "notfound" | "error">("idle");
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Mesma infra do embed: realtime + badge + aviso flutuante funcionando no
+  // preview, para dar para testar o fluxo de "operador respondeu" por aqui.
+  useWidgetLiveUpdates(true);
+  // Disparos: o preview usa o mesmo runtime do embed (popup, banner, tour).
+  // Só depois que a identidade do cliente simulado foi configurada (applyEmail);
+  // trocar o e-mail passa por "loading" e religa o hook, que recarrega.
+  useLoadCampaigns(status === "ok" || status === "notfound" || status === "error");
 
   // Apply a new email: fetch from get-contact-info and update widget account
   const applyEmail = async (email: string) => {
@@ -53,6 +61,10 @@ export default function WidgetPreview() {
       unreadCount: 0,
       notice: null,
       view: "list",
+      // Os disparos também são do cliente anterior.
+      campaigns: [],
+      campaignsLoaded: false,
+      activeTour: null,
     });
 
     try {
@@ -82,6 +94,9 @@ export default function WidgetPreview() {
         phone:             null,
         stripe_customer_id: customerId || null,
       });
+      // O ChatWidget só configura a API quando está aberto; o popup/tour dos
+      // Disparos precisam dela com o widget fechado também.
+      configureWidgetApi({ email: trimmed, name, accountUserId: fakeUuid });
 
       setStatus(data?.customer ? "ok" : "notfound");
     } catch {
@@ -93,8 +108,10 @@ export default function WidgetPreview() {
         name: trimmed, email: trimmed,
         phone: null, stripe_customer_id: null,
       });
+      configureWidgetApi({ email: trimmed, name: trimmed, accountUserId: fakeUuid });
     }
   };
+
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") applyEmail(emailInput);
@@ -204,6 +221,8 @@ export default function WidgetPreview() {
           setOpen(true);
         }}
       />
+      <OutboundClosedLayer />
+      <TourRunner />
       <ChatBubbleButton />
     </div>
   );

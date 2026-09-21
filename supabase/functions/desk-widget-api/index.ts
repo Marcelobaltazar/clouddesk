@@ -13,7 +13,7 @@
 //     precisa bater com o e-mail verificado)
 //
 // Ações: hello | bootstrap | conversations | start | send | messages | mark_read |
-//        csat | resend_credentials
+//        csat | resend_credentials | campaigns | campaign_event
 
 import { newServiceClient, type ServiceClient } from '../_shared/supabase.ts';
 import { corsHeaders } from '../_shared/cors.ts';
@@ -26,6 +26,7 @@ import {
 } from '../_shared/contact-info.ts';
 import { runAiPipeline, detectPlanTag, COMMUNITY_DISCORD, type MessageMetadata } from '../_shared/ai-pipeline.ts';
 import { broadcastToConversation } from '../_shared/broadcast.ts';
+import { loadEligibleCampaigns, trackCampaignEvent } from '../_shared/campaigns.ts';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -38,7 +39,9 @@ type WidgetAction =
   | 'messages'
   | 'mark_read'
   | 'csat'
-  | 'resend_credentials';
+  | 'resend_credentials'
+  | 'campaigns'
+  | 'campaign_event';
 
 interface WidgetApiRequest {
   action?: WidgetAction;
@@ -58,6 +61,11 @@ interface WidgetApiRequest {
    *  conversa"), em vez de reaproveitar o chamado aberto. Continua sujeito ao
    *  rate limit 'newconv'. */
   force_new?: boolean;
+  /** Disparos (campaign_event): qual disparo e o que o cliente fez nele. */
+  campaign_id?: string;
+  event?: string;
+  step?: number;
+  reaction?: string | null;
 }
 
 interface ConversationRow {
@@ -582,7 +590,7 @@ Deno.serve(async (req) => {
     const body: WidgetApiRequest = await req.json().catch(() => ({}));
     const action = body.action;
 
-    const validActions: WidgetAction[] = ['hello', 'bootstrap', 'conversations', 'start', 'send', 'messages', 'mark_read', 'csat', 'resend_credentials'];
+    const validActions: WidgetAction[] = ['hello', 'bootstrap', 'conversations', 'start', 'send', 'messages', 'mark_read', 'csat', 'resend_credentials', 'campaigns', 'campaign_event'];
     if (!action || !validActions.includes(action)) {
       return json({ error: 'Ação inválida' }, 400);
     }
@@ -618,6 +626,10 @@ Deno.serve(async (req) => {
       messages:           [{ name: 'list', max: 60, windowSeconds: 300 }],
       csat:               [{ name: 'csat', max: 10, windowSeconds: 3600 }],
       resend_credentials: [{ name: 'cred', max: 3, windowSeconds: 3600 }],
+      // Disparos: leitura a cada carga de página/foco; eventos a cada
+      // visualização/clique/passo de tour — tetos folgados, só contra abuso.
+      campaigns:          [{ name: 'camp', max: 60, windowSeconds: 300 }],
+      campaign_event:     [{ name: 'campev', max: 240, windowSeconds: 300 }],
     };
 
     const exceeded = await checkRateRules(service, email, RULES[action]);
@@ -821,6 +833,28 @@ Deno.serve(async (req) => {
       );
 
       return json({ success: true, message: sysMsg });
+    }
+
+    // ── Disparos (Avisos, Novidades, Banners, Tours) ────────────────────────────
+    if (action === 'campaigns') {
+      // Tudo que este cliente pode ver agora, com o estado dele em cada um.
+      // Chamado na carga da página (o popup e o tour rodam com o widget
+      // fechado) e ao voltar o foco para a aba.
+      const campaigns = await loadEligibleCampaigns(service, email);
+      return json({ campaigns, server_time: new Date().toISOString() });
+    }
+
+    if (action === 'campaign_event') {
+      const outcome = await trackCampaignEvent(
+        service,
+        body.campaign_id,
+        email,
+        body.event,
+        body.step,
+        body.reaction,
+      );
+      if (!outcome.ok) return json({ error: outcome.error }, outcome.status);
+      return json({ success: true });
     }
 
     return json({ error: 'Ação inválida' }, 400);

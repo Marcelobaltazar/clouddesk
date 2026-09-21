@@ -7,6 +7,20 @@ import { ChatWidgetComposer } from "./ChatWidgetComposer";
 import { ChatWidgetConversationList } from "./ChatWidgetConversationList";
 import { ChatWidgetDuplicateCheck } from "./ChatWidgetDuplicateCheck";
 import { CSATFeedback } from "./CSATFeedback";
+import { NewsFeed } from "./outbound/NewsFeed";
+import { NoticeCard } from "./outbound/NoticeCard";
+import { BannerStrip } from "./outbound/BannerStrip";
+import { WidgetTabBar } from "./outbound/WidgetTabBar";
+import { runBannerCta, runNoticeCta, startTour } from "./outbound/campaignActions";
+import {
+  countUnreadNews,
+  selectBanner,
+  selectListedTours,
+  selectNews,
+  selectNotices,
+  trackCampaign,
+  useCurrentHref,
+} from "./outbound/useOutbound";
 import { configureWidgetApi, widgetApi, WidgetApiError, type TurnResult } from "@/lib/widget-api";
 import type { CloudDeskSettings, WidgetConversationSummary, WidgetMessage } from "./types";
 import type { ContactInfo } from "@/lib/contact-info";
@@ -193,7 +207,19 @@ export function ChatWidget({ settings, embedUser }: Props) {
     backToList,
     duplicateCandidate,
     setDuplicateCandidate,
+    campaigns,
   } = useWidgetStore();
+
+  // ── Disparos (avisos, novidades, banners, tours) ────────────────────────────
+  // Já carregados pelo runtime do embed (o popup e o tour rodam com o widget
+  // fechado); aqui só escolhemos o que entra em cada lugar do painel aberto.
+  const href = useCurrentHref();
+  const notices = selectNotices(campaigns, href);
+  const banner = selectBanner(campaigns, href);
+  const newsUnread = countUnreadNews(campaigns);
+  // As abas só aparecem quando existe algo para mostrar em Novidades — sem
+  // disparos publicados, o widget fica exatamente como sempre foi.
+  const hasNewsTab = selectNews(campaigns).length > 0 || selectListedTours(campaigns).length > 0;
 
   // Identidade efetiva: embed real (com hash) ou conta simulada do preview
   // (sem hash — o gateway aceita via sessão de operador logado no painel).
@@ -522,10 +548,22 @@ export function ChatWidget({ settings, embedUser }: Props) {
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [conversation?.id]);
 
+  // Avisos e banner exibidos com o widget aberto contam como vistos.
+  const seenIds = notices.map((n) => n.id).concat(banner ? [banner.id] : []).join(",");
+  useEffect(() => {
+    if (!isOpen || (view !== "list" && view !== "news")) return;
+    for (const id of seenIds.split(",").filter(Boolean)) {
+      const c = useWidgetStore.getState().campaigns.find((x) => x.id === id);
+      if (c && !c.receipt?.seen) trackCampaign(id, "seen");
+    }
+  }, [isOpen, view, seenIds]);
+
   if (!isOpen) return null;
 
   const inThread = view === "thread";
   const inConfirmNew = view === "confirm_new";
+  const inNews = view === "news";
+  const inRoot = view === "list" || inNews;
 
   return (
     <div className="fixed bottom-24 right-6 z-[9998] w-[380px] max-w-[calc(100vw-2rem)] h-[550px] max-h-[calc(100vh-8rem)] rounded-xl shadow-2xl border border-border bg-card flex flex-col overflow-hidden animate-in slide-in-from-bottom-4 fade-in-0 duration-300 sm:w-[380px]">
@@ -537,9 +575,20 @@ export function ChatWidget({ settings, embedUser }: Props) {
         title={
           inConfirmNew ? "Nova conversa"
             : inThread ? conversation?.subject ?? "Nova conversa"
+            : inNews ? "Novidades"
             : "Meus chamados"
         }
       />
+
+      {/* Banner fixado no topo, só nas telas de raiz (a thread precisa do espaço). */}
+      {inRoot && banner && (
+        <BannerStrip
+          content={banner.content}
+          isTest={banner.is_test}
+          onCta={() => runBannerCta(banner.id, banner.content)}
+          onDismiss={() => trackCampaign(banner.id, "dismiss")}
+        />
+      )}
 
       {inConfirmNew && duplicateCandidate ? (
         <ChatWidgetDuplicateCheck
@@ -553,6 +602,8 @@ export function ChatWidget({ settings, embedUser }: Props) {
             void beginNewConversation();
           }}
         />
+      ) : inNews ? (
+        <NewsFeed onStartTour={(tour) => startTour(tour.id)} />
       ) : !inThread ? (
         <ChatWidgetConversationList
           conversations={conversations}
@@ -561,6 +612,23 @@ export function ChatWidget({ settings, embedUser }: Props) {
           onRetry={reloadConversations}
           onOpenConversation={openConversation}
           onNewConversation={startNewConversation}
+          header={
+            notices.length > 0 ? (
+              <div className="p-3 space-y-2 border-b border-border/60 bg-muted/20">
+                {notices.map((n) => (
+                  <NoticeCard
+                    key={n.id}
+                    content={n.content}
+                    sender={n.sender}
+                    variant="card"
+                    isTest={n.is_test}
+                    onCta={() => runNoticeCta(n.id, n.content)}
+                    onDismiss={() => trackCampaign(n.id, "dismiss")}
+                  />
+                ))}
+              </div>
+            ) : null
+          }
         />
       ) : !conversation && messages.length === 0 ? (
         <>
@@ -627,6 +695,14 @@ export function ChatWidget({ settings, embedUser }: Props) {
             </>
           )}
         </>
+      )}
+
+      {inRoot && hasNewsTab && (
+        <WidgetTabBar
+          active={inNews ? "news" : "list"}
+          newsUnread={newsUnread}
+          onChange={(tab) => setView(tab)}
+        />
       )}
 
       <div className="px-3 py-1.5 border-t border-border bg-muted/30">

@@ -11,6 +11,7 @@ import type {
   WidgetConversationSummary,
   WidgetMessage,
 } from "@/components/widget/types";
+import type { CampaignEvent, WidgetCampaign } from "@/lib/outbound";
 
 // ── Identidade ────────────────────────────────────────────────────────────────
 
@@ -79,6 +80,11 @@ export interface ResendResult {
   success: boolean;
   error?: string;
   message?: WidgetMessage | null;
+}
+
+export interface CampaignsResult {
+  campaigns: WidgetCampaign[];
+  server_time: string;
 }
 
 export class WidgetApiError extends Error {
@@ -193,5 +199,21 @@ export const widgetApi = {
   /** Reenvio de credenciais — disparado APENAS pelo clique do cliente. */
   resendCredentials(conversationId: string, infraId: string): Promise<ResendResult> {
     return call("resend_credentials", { conversation_id: conversationId, infra_id: infraId });
+  },
+
+  /** Disparos (avisos, novidades, banners, tours) que este cliente pode ver,
+   *  já com o estado dele em cada um (viu/clicou/fechou/concluiu). */
+  campaigns(): Promise<CampaignsResult> {
+    return call("campaigns");
+  },
+
+  /** Registra o que o cliente fez num disparo. Fire-and-forget na prática —
+   *  quem chama não deve bloquear a UI esperando a resposta. */
+  campaignEvent(
+    campaignId: string,
+    event: CampaignEvent,
+    extra: { step?: number; reaction?: string | null } = {},
+  ): Promise<{ success: boolean }> {
+    return call("campaign_event", { campaign_id: campaignId, event, ...extra });
   },
 };

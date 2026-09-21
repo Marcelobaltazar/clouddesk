@@ -5,6 +5,9 @@ import { ChatBubbleButton } from "@/components/widget/ChatBubbleButton";
 import { ChatWidgetNotice } from "@/components/widget/ChatWidgetNotice";
 import { useWidgetStore } from "@/components/widget/useWidgetStore";
 import { useWidgetLiveUpdates } from "@/components/widget/useWidgetLiveUpdates";
+import { OutboundClosedLayer } from "@/components/widget/outbound/OutboundClosedLayer";
+import { TourRunner } from "@/components/widget/outbound/TourRunner";
+import { useLoadCampaigns } from "@/components/widget/outbound/useOutbound";
 import { DEFAULT_SETTINGS } from "@/components/widget/types";
 import { configureWidgetApi, widgetApi } from "@/lib/widget-api";
 // CSS do widget como STRING (?inline): o Vite não emite/injeta CSS no build de
@@ -66,6 +69,10 @@ function EmbedRoot({ embedUser }: { embedUser: EmbedUser }) {
 
   useWidgetLiveUpdates(true);
 
+  // Disparos (avisos, novidades, banners, tours): carregados na carga da
+  // página porque o popup e o tour aparecem com o widget FECHADO.
+  useLoadCampaigns(true);
+
   // Clique no aviso flutuante: abre o widget já no chamado que respondeu.
   const handleNoticeOpen = (conversationId: string) => {
     setPendingOpenId(conversationId);
@@ -76,6 +83,8 @@ function EmbedRoot({ embedUser }: { embedUser: EmbedUser }) {
     <>
       <ChatBubbleButton />
       <ChatWidgetNotice onOpen={handleNoticeOpen} />
+      <OutboundClosedLayer />
+      <TourRunner />
       {isOpen && (
         <ChatWidget settings={DEFAULT_SETTINGS} embedUser={embedUser} />
       )}

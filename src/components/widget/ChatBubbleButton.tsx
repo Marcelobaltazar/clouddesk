@@ -1,8 +1,12 @@
 import { MessageCircle, X } from "lucide-react";
 import { useWidgetStore } from "./useWidgetStore";
+import { countUnreadNews } from "./outbound/useOutbound";
 
 export function ChatBubbleButton() {
   const { isOpen, toggleOpen, unreadCount } = useWidgetStore();
+  // Novidade não lida: ponto discreto. O número vermelho continua reservado
+  // para respostas da equipe — uma coisa é suporte, a outra é marketing.
+  const newsUnread = useWidgetStore((s) => countUnreadNews(s.campaigns));
 
   return (
     <button
@@ -20,6 +24,12 @@ export function ChatBubbleButton() {
           <span className="absolute -top-2 -right-2 h-5 w-5 rounded-full bg-destructive text-destructive-foreground text-[10px] font-bold flex items-center justify-center animate-in zoom-in-50">
             {unreadCount > 9 ? "9+" : unreadCount}
           </span>
+        )}
+        {!isOpen && unreadCount === 0 && newsUnread > 0 && (
+          <span
+            className="absolute -top-1.5 -right-1.5 h-3 w-3 rounded-full bg-amber-400 ring-2 ring-primary animate-in zoom-in-50"
+            aria-label={`${newsUnread} novidade${newsUnread > 1 ? "s" : ""}`}
+          />
         )}
       </div>
     </button>

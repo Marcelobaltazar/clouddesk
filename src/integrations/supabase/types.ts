@@ -566,6 +566,119 @@ export type Database = {
         }
         Relationships: []
       }
+      desk_campaign_receipts: {
+        Row: {
+          campaign_id: string
+          clicked_at: string | null
+          completed_at: string | null
+          dismissed_at: string | null
+          email: string
+          first_seen_at: string
+          last_seen_at: string
+          reaction: string | null
+          seen_count: number
+          step_reached: number | null
+        }
+        Insert: {
+          campaign_id: string
+          clicked_at?: string | null
+          completed_at?: string | null
+          dismissed_at?: string | null
+          email: string
+          first_seen_at?: string
+          last_seen_at?: string
+          reaction?: string | null
+          seen_count?: number
+          step_reached?: number | null
+        }
+        Update: {
+          campaign_id?: string
+          clicked_at?: string | null
+          completed_at?: string | null
+          dismissed_at?: string | null
+          email?: string
+          first_seen_at?: string
+          last_seen_at?: string
+          reaction?: string | null
+          seen_count?: number
+          step_reached?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "desk_campaign_receipts_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "desk_campaigns"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      desk_campaigns: {
+        Row: {
+          audience: Json
+          content: Json
+          created_at: string
+          created_by: string | null
+          ends_at: string | null
+          id: string
+          name: string
+          priority: number
+          published_at: string | null
+          sender_agent_id: string | null
+          starts_at: string | null
+          status: string
+          type: string
+          updated_at: string
+        }
+        Insert: {
+          audience?: Json
+          content?: Json
+          created_at?: string
+          created_by?: string | null
+          ends_at?: string | null
+          id?: string
+          name: string
+          priority?: number
+          published_at?: string | null
+          sender_agent_id?: string | null
+          starts_at?: string | null
+          status?: string
+          type: string
+          updated_at?: string
+        }
+        Update: {
+          audience?: Json
+          content?: Json
+          created_at?: string
+          created_by?: string | null
+          ends_at?: string | null
+          id?: string
+          name?: string
+          priority?: number
+          published_at?: string | null
+          sender_agent_id?: string | null
+          starts_at?: string | null
+          status?: string
+          type?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "desk_campaigns_created_by_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "desk_agents"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "desk_campaigns_sender_agent_id_fkey"
+            columns: ["sender_agent_id"]
+            isOneToOne: false
+            referencedRelation: "desk_agents"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       desk_contact_notes: {
         Row: {
           account_user_id: string
@@ -1446,7 +1559,27 @@ export type Database = {
       }
     }
     Views: {
-      [_ in never]: never
+      desk_campaign_stats: {
+        Row: {
+          campaign_id: string | null
+          clicked: number | null
+          completed: number | null
+          dismissed: number | null
+          last_seen_at: string | null
+          reactions: Json | null
+          seen: number | null
+          started: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "desk_campaign_receipts_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "desk_campaigns"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Functions: {
       get_agent_org_id: { Args: never; Returns: string }

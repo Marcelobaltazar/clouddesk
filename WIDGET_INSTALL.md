@@ -103,13 +103,43 @@ Inserir **apenas em páginas autenticadas**, depois do login e antes do script d
 
 ---
 
+## Disparos (Avisos, Novidades, Banners e Tours guiados)
+
+Tudo é criado em **Configurações › Disparos** no painel — nenhum código no
+cloudfy.space precisa mudar. O widget já carrega os disparos elegíveis na
+carga da página e mostra popup/banner/tour mesmo com o bubble fechado.
+
+**Só uma coisa ajuda muito os tours:** marque os elementos importantes do app
+com `data-tour`, para o seletor não quebrar quando o CSS mudar:
+
+```html
+<button data-tour="nova-instancia">Nova instância</button>
+```
+
+No editor do tour, basta escrever `nova-instancia` no campo "Elemento a
+destacar" (um seletor CSS completo também funciona). Passo em outra página:
+preencha "Página deste passo" com o caminho (ex.: `/app/instancias`) — o card
+oferece "Ir para a página" e o tour continua de onde parou depois da navegação
+(o progresso fica no `localStorage` do navegador do cliente).
+
+**Testar antes de publicar:** no editor, em "Enviar teste para", adicione o
+e-mail da SUA conta na Cloudfy. Você vê o disparo no app real com a etiqueta
+"Prévia", mesmo em rascunho. Para rever um tour que você já concluiu no teste,
+use "Rever" na aba Novidades do widget (ou limpe `clouddesk-tour-done:*` no
+localStorage).
+
+**Segmentação por página** (`/app/infra/*`, `*evolution*`): avaliada no
+navegador do cliente, então funciona com navegação sem recarregar.
+
+---
+
 ## Comandos para deploy
 
 ```powershell
 # 0. Login com a conta dona do projeto (clouddesk@cloudfy.host)
 npx supabase login
 
-# 1. Aplicar a migration de segurança (RLS + rate limiting)
+# 1. Aplicar as migrations pendentes (segurança/RLS, rate limiting, Disparos…)
 npx supabase db push --linked
 
 # 2. Configurar o segredo de identidade (uma vez)

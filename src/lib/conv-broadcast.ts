@@ -27,7 +27,18 @@ export async function broadcastConvUpdated(
   payload: ConvUpdatedPayload,
 ): Promise<void> {
   if (!conversationId || Object.keys(payload).length === 0) return;
+  await broadcastRealtime(`conv-live:${conversationId}`, "conv_updated", payload);
+}
 
+/**
+ * Publica um evento num tópico de broadcast pelo endpoint REST do Realtime.
+ * Genérico: a inbox usa para `conv-live:{id}`, os Disparos para `outbound-live`.
+ */
+export async function broadcastRealtime(
+  topic: string,
+  event: string,
+  payload: object,
+): Promise<void> {
   try {
     const { data: { session } } = await supabase.auth.getSession();
     const token = session?.access_token ?? SUPABASE_KEY;
@@ -40,21 +51,14 @@ export async function broadcastConvUpdated(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        messages: [
-          {
-            topic: `conv-live:${conversationId}`,
-            event: "conv_updated",
-            payload,
-            private: false,
-          },
-        ],
+        messages: [{ topic, event, payload, private: false }],
       }),
     });
 
     if (!res.ok) {
-      console.warn(`[conv-broadcast] HTTP ${res.status} ao publicar conv_updated`);
+      console.warn(`[broadcast] HTTP ${res.status} ao publicar ${event} em ${topic}`);
     }
   } catch (err) {
-    console.warn("[conv-broadcast] falhou:", err);
+    console.warn("[broadcast] falhou:", err);
   }
 }

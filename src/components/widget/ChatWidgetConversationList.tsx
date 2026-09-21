@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { AlertCircle, Bot, Merge, MessageSquarePlus, MessagesSquare, User } from "lucide-react";
 import type { WidgetConversationSummary } from "./types";
 
@@ -9,6 +10,8 @@ interface Props {
   onRetry?: () => void;
   onOpenConversation: (id: string) => void;
   onNewConversation: () => void;
+  /** Conteúdo acima da lista, dentro da área de rolagem (avisos dos Disparos). */
+  header?: ReactNode;
 }
 
 // ── Formatação de data relativa (pt-BR) ───────────────────────────────────────
@@ -176,6 +179,7 @@ export function ChatWidgetConversationList({
   onRetry,
   onOpenConversation,
   onNewConversation,
+  header,
 }: Props) {
   // Erro tem prioridade sobre o empty state: dizer "nenhum chamado ainda" para
   // quem TEM chamados é pior do que admitir a falha.
@@ -184,11 +188,12 @@ export function ChatWidgetConversationList({
 
   return (
     <>
-      <div className="flex-1 overflow-y-auto scrollbar-thin">
+      <div className="flex-1 overflow-y-auto scrollbar-thin flex flex-col">
+        {header}
         {loading && conversations.length === 0 ? (
           <ListSkeleton />
         ) : showError ? (
-          <div className="h-full flex flex-col items-center justify-center px-6 text-center gap-3">
+          <div className="flex-1 flex flex-col items-center justify-center px-6 py-8 text-center gap-3">
             <div className="h-12 w-12 rounded-full bg-destructive/10 flex items-center justify-center">
               <AlertCircle className="h-6 w-6 text-destructive" />
             </div>
@@ -210,7 +215,7 @@ export function ChatWidgetConversationList({
             )}
           </div>
         ) : isEmpty ? (
-          <div className="h-full flex flex-col items-center justify-center px-6 text-center gap-3">
+          <div className="flex-1 flex flex-col items-center justify-center px-6 py-8 text-center gap-3">
             <div className="h-12 w-12 rounded-full bg-primary/10 flex items-center justify-center">
               <MessagesSquare className="h-6 w-6 text-primary" />
             </div>
@@ -222,13 +227,15 @@ export function ChatWidgetConversationList({
             </div>
           </div>
         ) : (
-          conversations.map((conversation) => (
-            <ConversationRow
-              key={conversation.id}
-              conversation={conversation}
-              onOpen={() => onOpenConversation(conversation.id)}
-            />
-          ))
+          <div>
+            {conversations.map((conversation) => (
+              <ConversationRow
+                key={conversation.id}
+                conversation={conversation}
+                onOpen={() => onOpenConversation(conversation.id)}
+              />
+            ))}
+          </div>
         )}
       </div>
 

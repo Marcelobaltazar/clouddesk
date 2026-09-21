@@ -364,6 +364,10 @@ CREATE TABLE desk_activity_log (
   created_at      TIMESTAMPTZ DEFAULT now()
 );
 
+-- Disparos (Avisos, Novidades, Banners, Tours) — ver seção 8 "Disparos (Outbound)"
+-- desk_campaigns / desk_campaign_receipts / view desk_campaign_stats
+-- (migration 20260921000000_outbound_campaigns.sql)
+
 -- Índices
 CREATE INDEX idx_desk_conv_status ON desk_conversations(status);
 CREATE INDEX idx_desk_conv_assigned ON desk_conversations(assigned_agent_id);
@@ -993,6 +997,49 @@ window.CloudDeskSettings = {
 8. Ao resolver → mostra CSAT (😞😐😊)
 ```
 
+### Disparos (Outbound) — Avisos, Novidades, Banners e Tours guiados
+
+Comunicação proativa dentro do bubble, gerenciada em **Configurações › Disparos**
+(equivalente ao "Saídas" do Intercom: Post, News item, Banner, Tour). Nada de código
+para publicar.
+
+**Modelo** (`supabase/migrations/20260921000000_outbound_campaigns.sql`):
+
+| Tabela / view | Papel |
+|---|---|
+| `desk_campaigns` | Um registro por disparo. `type` ∈ notice/news/banner/tour; `content` e `audience` em JSONB (contrato em `src/lib/outbound.ts`, espelho Deno em `_shared/campaigns.ts`). `status` ∈ draft/active/paused/archived — "Agendado"/"Encerrado" são **derivados** de `starts_at`/`ends_at`, não estados próprios. |
+| `desk_campaign_receipts` | Uma linha por (disparo, e-mail): viu/clicou/fechou/concluiu, `step_reached` do tour, `reaction`. Fonte tanto do "não mostrar de novo" quanto das métricas (**pessoas únicas**, não impressões). Só o gateway escreve, via `desk_campaign_track()` (service role). |
+| `desk_campaign_stats` | View `security_invoker` agregando receipts para a lista do painel. |
+
+**Público** (`audience`): `segment` (all/with_plan/without_plan/plans), `plans[]`, `infra`
+(any/active/blocked/none), `new_customer_days`, `url_pattern` e `test_emails`. Plano e
+infra são avaliados **server-side** com o mesmo `detectPlanTag` da IA; `url_pattern` é
+avaliado **no widget** (o app do host navega sem recarregar — `useCurrentHref`).
+`test_emails` veem o disparo mesmo em rascunho, com etiqueta "Prévia" — é o "enviar
+teste para mim". A estimativa "≈ N clientes" do editor vem da Edge Function
+`desk-campaigns-admin` (varre o Supabase de produção da Cloudfy, cache 5 min) e usa a
+**mesma** `matchesAudience` do gateway.
+
+**Widget** (`src/components/widget/outbound/`):
+- Ações novas do gateway `desk-widget-api`: `campaigns` (elegíveis + estado do cliente)
+  e `campaign_event` (seen/click/dismiss/complete/step/react). Carregados na carga da
+  página (`useLoadCampaigns` no `EmbedRoot`) porque popup e tour rodam com o widget
+  **fechado**; recarrega ao voltar o foco e no broadcast `outbound-live` que o painel
+  publica ao publicar/pausar (`notifyCampaignsChanged`).
+- Com o widget fechado aparece **no máximo uma coisa** (`OutboundClosedLayer`): aviso de
+  resposta da equipe > popup de aviso > pílula de banner. Tour em andamento esconde tudo.
+- Aberto: banner sob o header (só nas telas de raiz), avisos como cards no topo da lista,
+  aba **Novidades** (feed + reações + tours "Iniciar/Rever"). A barra de abas só existe
+  quando há algo em Novidades — sem disparos o widget fica como sempre foi.
+- Tour (`TourOverlay` + `TourRunner`): spotlight por máscara SVG **sem capturar
+  cliques** (é assim que "avançar por clique" funciona), card posicionado por
+  `positionCard`, espera o elemento até 6 s (MutationObserver), aceita seletor CSS ou o
+  valor de `data-tour="..."`. Progresso em `localStorage` (`clouddesk-tour:{id}`) para
+  retomar após navegação; `clouddesk-tour-done:{id}` evita reabrir antes do receipt
+  voltar. Auto-start: uma tentativa por carga de página, 1,5 s após a carga.
+- Os cards são **os mesmos componentes** no widget e na prévia do editor
+  (`CampaignPreview`, com `data-theme="light"` para mostrar a paleta que o cliente vê).
+
 ---
 
 ## 9. EDGE FUNCTIONS
@@ -1036,6 +1083,16 @@ Auth:   Apenas operadores
 Flow:   Avalia routing rules contra mensagem de teste
 Output: { matched_rule: {...} | null, action: string }
 Uso:    Preview de regras na tela Settings > Escalonamento
+```
+
+### desk-campaigns-admin
+```
+Input:  { action: 'audience_estimate', audience: CampaignAudience }
+Auth:   Apenas operadores
+Flow:   Varre account + infrastructure do Supabase de produção (read-only, paginado,
+        cache 5 min) e aplica matchesAudience — mesma lógica do gateway
+Output: { matched, total, by_plan }
+Uso:    "≈ N clientes vão ver" no editor de Disparos
 ```
 
 ### desk-generate-embedding
