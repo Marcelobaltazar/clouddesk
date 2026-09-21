@@ -3,10 +3,35 @@
  * O bundle IIFE do widget é injetado no cloudfy.space, que não tem o CSS do app.
  * Sem este arquivo importado no entry, o Vite não gera nem injeta os estilos
  * Tailwind e o widget aparece SEM estilo nenhum. É importado com `?inline` em
- * widget-embed/index.tsx e o texto resultante é injetado num <style> no bootstrap.
+ * widget-embed/index.tsx e o texto resultante é injetado num <style> DENTRO do
+ * Shadow DOM do widget.
+ *
+ * Por que Shadow DOM: o cloudfy.space usa os mesmos nomes de variáveis shadcn
+ * (--background, --primary, --border...) em :root/.dark. Injetado no <head>,
+ * este CSS vencia o do app e trocava as cores do produto inteiro — e o app
+ * precisava de um remendo em runtime reescrevendo nossos seletores. Dentro do
+ * shadow, nenhuma regra daqui alcança o host: `:root`/`body`/`*` do preflight
+ * só valem para a árvore do widget, e as variáveis vivem em `:host`.
  *
  * Reaproveita a MESMA fonte do app (index.css) — Tailwind base/components/utilities
  * + todas as variáveis de tema (--primary, --bubble-bot, etc.), que as classes do
  * widget usam via hsl(var(--...)). Mantém uma única fonte de verdade de tema.
  */
 @import "../index.css";
+
+/* O host do shadow herda tipografia e cor do <body> do site (tamanho de fonte,
+ * cor branca do modo escuro, letter-spacing...). `all: initial` corta essa
+ * herança; o que o widget precisa é redeclarado aqui. Variáveis CSS não são
+ * afetadas por `all` — as nossas (definidas em :host no index.css) continuam
+ * valendo e vencem as do host por estarem declaradas no próprio elemento. */
+:host {
+  all: initial;
+  display: block;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  color: hsl(var(--foreground));
+  text-align: left;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}

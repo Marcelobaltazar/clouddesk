@@ -5,10 +5,13 @@
 @tailwind utilities;
 
 @layer base {
-  /* [data-theme="light"]: força a paleta clara numa subárvore — é como a
+  /* :host — o widget embedado vive num Shadow DOM: lá dentro `:root` não
+     existe, então as variáveis precisam estar no host do shadow. Fora de um
+     shadow, `:host` não casa com nada.
+     [data-theme="light"]: força a paleta clara numa subárvore — é como a
      prévia dos Disparos mostra o widget do jeito que o CLIENTE vê (o site do
      host não tem a classe .dark), mesmo com o painel no tema escuro. */
-  :root, [data-theme="light"] {
+  :root, :host, [data-theme="light"] {
     /* Paleta clara — fundo cinza-quente, painéis brancos, texto quase-preto */
     --background: 72 14% 93%;
     --foreground: 0 0% 10%;
