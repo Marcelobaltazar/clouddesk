@@ -11,8 +11,8 @@ import { useLoadCampaigns } from "@/components/widget/outbound/useOutbound";
 import { DEFAULT_SETTINGS } from "@/components/widget/types";
 import { configureWidgetApi, widgetApi } from "@/lib/widget-api";
 // CSS do widget como STRING (?inline): o Vite não emite/injeta CSS no build de
-// biblioteca (IIFE). Injetamos manualmente no bootstrap para o widget ter estilo
-// no site host (que não tem o CSS do app). Ver widget.css.
+// biblioteca (IIFE). Injetamos manualmente no bootstrap, DENTRO do Shadow DOM do
+// widget — nunca no <head> do host (ver widget.css para o porquê).
 import widgetCss from "./widget.css?inline";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -123,20 +123,28 @@ function EmbedRoot({ embedUser }: { embedUser: EmbedUser }) {
     return;
   }
 
-  // Injeta o CSS do widget uma única vez. Sem isto o widget renderiza sem estilo
-  // (o site host não tem o CSS do app). Guard por id evita duplicar em re-init.
-  if (!document.getElementById("clouddesk-widget-style")) {
-    const style = document.createElement("style");
-    style.id = "clouddesk-widget-style";
-    style.textContent = widgetCss;
-    document.head.appendChild(style);
-  }
+  // Re-init (script carregado duas vezes): reaproveita o host existente.
+  document.getElementById("clouddesk-widget-root")?.remove();
 
+  // Shadow DOM = isolamento total de CSS nos dois sentidos: o CSS do widget não
+  // alcança o site host (que usa os mesmos nomes de variáveis shadcn) e o CSS
+  // do host não bagunça o widget. O id fica no HOST do shadow — é o que o
+  // destroy() e o motor de tour conhecem.
   const container = document.createElement("div");
   container.id = "clouddesk-widget-root";
   document.body.appendChild(container);
 
-  const root = ReactDOM.createRoot(container);
+  const shadow = container.attachShadow({ mode: "open" });
+  const style = document.createElement("style");
+  style.id = "clouddesk-widget-style";
+  style.textContent = widgetCss;
+  shadow.appendChild(style);
+
+  const mount = document.createElement("div");
+  mount.id = "clouddesk-widget-app";
+  shadow.appendChild(mount);
+
+  const root = ReactDOM.createRoot(mount);
   root.render(
     <React.StrictMode>
       <EmbedRoot embedUser={embedUser} />

@@ -47,8 +47,10 @@ describe("TourOverlay", () => {
         onNavigate={() => {}}
       />,
     );
-    // Recorte do spotlight (rect com rx) presente na máscara
-    expect(document.querySelector("mask rect[rx]")).not.toBeNull();
+    // Recorte do spotlight: path evenodd com o furo (dois subcaminhos) + borda pulsante
+    const path = document.querySelector("svg path[fill-rule='evenodd']");
+    expect(path?.getAttribute("d")).toMatch(/Z.+Z$/);
+    expect(document.querySelector("svg rect[rx]")).not.toBeNull();
     fireEvent.click(screen.getByText("Próximo"));
     expect(onStepChange).toHaveBeenCalledWith(1);
   });

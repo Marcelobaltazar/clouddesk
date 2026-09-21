@@ -226,6 +226,26 @@ function positionCard(
   }
 }
 
+/**
+ * Caminho SVG do escurecimento: o viewport inteiro com um furo arredondado no
+ * alvo. Com fill-rule evenodd o segundo subcaminho vira o recorte.
+ */
+function overlayPath(spot: { x: number; y: number; w: number; h: number } | null): string {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const outer = `M0 0H${vw}V${vh}H0Z`;
+  if (!spot) return outer;
+  const r = Math.min(SPOT_RADIUS, spot.w / 2, spot.h / 2);
+  const { x, y, w, h } = spot;
+  const hole =
+    `M${x + r} ${y}` +
+    `H${x + w - r}A${r} ${r} 0 0 1 ${x + w} ${y + r}` +
+    `V${y + h - r}A${r} ${r} 0 0 1 ${x + w - r} ${y + h}` +
+    `H${x + r}A${r} ${r} 0 0 1 ${x} ${y + h - r}` +
+    `V${y + r}A${r} ${r} 0 0 1 ${x + r} ${y}Z`;
+  return outer + hole;
+}
+
 // ─── Overlay ──────────────────────────────────────────────────────────────────
 
 export function TourOverlay({ tour, stepIndex, onStepChange, onComplete, onSkip, onNavigate }: Props) {
@@ -337,17 +357,16 @@ export function TourOverlay({ tour, stepIndex, onStepChange, onComplete, onSkip,
   return (
     <div id="clouddesk-tour-root" className="fixed inset-0 z-[10000] pointer-events-none">
       {/* Escurecimento com recorte no alvo. pointer-events: none — a página
-          continua clicável (necessário para "avançar por clique"). */}
+          continua clicável (necessário para "avançar por clique").
+          Um único path com fill-rule evenodd (retângulo externo + retângulo
+          arredondado interno) em vez de <mask>: referência url(#id) dentro
+          de Shadow DOM tem histórico de falhas entre navegadores. */}
       <svg className="absolute inset-0 h-full w-full" aria-hidden="true">
-        <defs>
-          <mask id="clouddesk-tour-mask">
-            <rect x="0" y="0" width="100%" height="100%" fill="white" />
-            {showSpot && spot && (
-              <rect x={spot.x} y={spot.y} width={spot.w} height={spot.h} rx={SPOT_RADIUS} fill="black" />
-            )}
-          </mask>
-        </defs>
-        <rect x="0" y="0" width="100%" height="100%" fill="rgba(15, 17, 23, 0.55)" mask="url(#clouddesk-tour-mask)" />
+        <path
+          d={overlayPath(showSpot && spot ? spot : null)}
+          fill="rgba(15, 17, 23, 0.55)"
+          fillRule="evenodd"
+        />
         {showSpot && spot && (
           <rect
             x={spot.x} y={spot.y} width={spot.w} height={spot.h} rx={SPOT_RADIUS}
