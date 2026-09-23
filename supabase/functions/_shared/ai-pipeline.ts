@@ -865,12 +865,17 @@ Sobre COMO FAZER algo na Cloudfy (configurar, integrar, acessar, cancelar, conec
 
 Se a base não cobre o que foi perguntado, NÃO improvise um procedimento. Diga com naturalidade que não tem esse passo a passo documentado, ofereça o que você de fato sabe (o que é possível, o que existe) e siga a regra de transferência. Uma resposta curta e honesta vale mais que um roteiro inventado — quando o cliente segue um passo que não existe, ele volta mais irritado e o problema chega no operador maior do que era.
 
-[CITAR A FONTE — MARCADOR [FONTE:n]]
-Você NUNCA escreve URLs de artigo. Para citar um artigo, escreva o marcador com o número dele em uma linha própria no FINAL da resposta:
+[CITAR A FONTE — MARCADOR [FONTE:n] — OBRIGATÓRIO]
+Se QUALQUER artigo da lista acima sustentou a sua resposta, você é OBRIGADA a citá-lo. O marcador vira o link clicável do artigo na Central de ajuda, e é por ele que o cliente abre o passo a passo completo — com as imagens, os detalhes e as telas que não cabem em três parágrafos. Responder sobre um tema que TEM artigo e não mandar o link é resposta pela metade: o cliente fica sem o passo a passo e alguém da equipe acaba mandando o link à mão depois de você.
+
+Você NUNCA escreve a URL. Escreva só o marcador, com o número do artigo, em uma linha própria no FINAL da resposta:
 
 [FONTE:1]
 
-O sistema troca o marcador pelo link real da Central de ajuda. Cite só os artigos que você realmente usou (um marcador por artigo, no máximo dois). Se não usou artigo nenhum, não escreva marcador.
+Regras:
+- Usou o Artigo #2 para responder? Termine com [FONTE:2]. Sem exceção.
+- Um marcador por artigo, no máximo dois — cite os que realmente sustentaram a resposta, não a lista inteira.
+- Só fica sem marcador quando nenhum artigo tem a ver com a pergunta (saudação, status da infra do cliente, cobrança, papo solto).
 
 Isto vale para QUALQUER link: você não inventa, não adivinha e não "completa" endereços. Escrever uma URL que não veio dos blocos acima é um erro grave — ela é removida antes de chegar ao cliente e a resposta chega capenga.
 
@@ -904,11 +909,19 @@ const FONTE_RE = /\[FONTE\s*:\s*(\d+)\s*\]/gi;
 const MAX_SOURCES = 2;
 
 /**
+ * Similaridade mínima para o servidor citar sozinho um artigo que o modelo
+ * esqueceu de citar. Bem acima do piso de recuperação (0.5) de propósito: num
+ * marcador existe um "usei este artigo" dito pelo modelo para confiar; aqui só
+ * existe o número, então só entra artigo claramente sobre a pergunta.
+ */
+const AUTO_SOURCE_MIN_SIMILARITY = 0.62;
+
+/**
  * Troca os marcadores [FONTE:n] pelas linhas "📚 Fonte: [título](url)" reais.
  * Marcador fora da faixa, repetido, ou de artigo sem URL pública é descartado
  * em silêncio — melhor uma resposta sem fonte que uma fonte que não abre.
  */
-function resolveSourceMarkers(text: string, kbMatches: KBMatch[]): string {
+function resolveSourceMarkers(text: string, kbMatches: KBMatch[]): { text: string; cited: number } {
   const cited: string[] = [];
   const seen = new Set<number>();
 
@@ -924,8 +937,35 @@ function resolveSourceMarkers(text: string, kbMatches: KBMatch[]): string {
   });
 
   const body = stripped.replace(/\n{3,}/g, '\n\n').trim();
-  if (cited.length === 0) return body;
-  return `${body}\n\n${cited.join('\n')}`;
+  if (cited.length === 0) return { text: body, cited: 0 };
+  return { text: `${body}\n\n${cited.join('\n')}`, cited: cited.length };
+}
+
+/**
+ * Rede de segurança do [FONTE:n]. Quando a Central tem um artigo claramente
+ * sobre o que foi perguntado e o modelo respondeu sem marcador nenhum, o link
+ * vai junto mesmo assim. Uma instrução no prompt ("citar é obrigatório") é
+ * justamente o que o modelo deixa cair num turno ruim, e o preço disso é o
+ * operador colando o link da Central à mão depois que a Luna já respondeu.
+ * O endereço é montado pelo servidor, a partir de um artigo que a própria
+ * busca recuperou — continua valendo a regra de ouro: o modelo nunca escolhe
+ * uma URL.
+ */
+function ensureSourceLink(text: string, kbMatches: KBMatch[]): string {
+  if (!text) return text;
+
+  const best = [...kbMatches].sort((a, b) => b.similarity - a.similarity)[0];
+  if (!best || best.similarity < AUTO_SOURCE_MIN_SIMILARITY) return text;
+
+  const url = kbArticleUrl(best.source, best.source_id, best.id, best.title);
+  // Sem URL pública, ou o texto já manda o cliente para este artigo: não mexer.
+  if (!url || text.includes(url)) return text;
+
+  console.log(
+    `[AI] Fonte automática: "${best.title}" (similaridade ${best.similarity.toFixed(2)}) — ` +
+    'o modelo respondeu sem [FONTE:n]',
+  );
+  return `${text}\n\n📚 Fonte: [${best.title}](${url})`;
 }
 
 // Extrai a 1ª imagem markdown (só do nosso Storage) de um conteúdo de artigo.
@@ -1706,10 +1746,19 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
 
   // [FONTE:n] → linha "📚 Fonte:" com o link real do artigo. Tem que rodar
   // ANTES da limpeza de marcadores, que apagaria o marcador sem resolver.
-  reply = resolveSourceMarkers(reply, kbMatches);
+  const sources = resolveSourceMarkers(reply, kbMatches);
+  reply = sources.text;
 
   // Cinto e suspensório: nenhum marcador de controle sai para o cliente.
   reply = reply.replace(CONTROL_MARKERS_RE, '').replace(/\n{3,}/g, '\n\n').trim();
+
+  // Respondeu sobre um tema que a Central cobre e não citou nada? O servidor
+  // cita por ela. Fora quando a resposta não é uma resposta: no handoff o texto
+  // é descartado, e com botão de credenciais na tela o próximo passo do cliente
+  // é o clique, não a leitura de um artigo.
+  if (!should_handoff && !metadata?.credential_actions && sources.cited === 0) {
+    reply = ensureSourceLink(reply, kbMatches);
+  }
 
   // Última barreira: o modelo só publica URL que já estava na entrada dele.
   // A allow-list sai do próprio systemPrompt (artigos do RAG, dados do cliente,
