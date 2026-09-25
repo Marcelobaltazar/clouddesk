@@ -1004,7 +1004,14 @@ function buildKnowledgeSection(knowledge: KnowledgeContext): string {
     parts.push('[SNIPPETS — RESPOSTAS OFICIAIS DA EQUIPE — FONTE PRIORITÁRIA]');
     parts.push('Respostas curtas e validadas pela equipe. Quando um snippet responde a pergunta, ele manda — prefira-o ao conteúdo dos artigos.');
     for (const sn of knowledge.snippets) {
-      parts.push(`Snippet: ${sn.title}${sn.category ? ` (${sn.category})` : ''}\nConteúdo: ${sn.content}`);
+      // Link dentro do snippet é parte da resposta oficial (ex.: página de
+      // preços). Sem destacar, o modelo parafraseava "acesse nossa página"
+      // e deixava o link de fora (medido nos cenários de 25/09/2026).
+      const links = [...new Set(collectUrls(sn.content))];
+      parts.push(
+        `Snippet: ${sn.title}${sn.category ? ` (${sn.category})` : ''}\nConteúdo: ${sn.content}` +
+        (links.length > 0 ? `\nLink(s) desta resposta oficial — envie ao cliente, exatamente assim: ${links.join(' ')}` : ''),
+      );
     }
   }
 
