@@ -61,7 +61,8 @@ Deno.serve(async (req) => {
   }
 
   try {
-    if (!isServiceRoleRequest(req) && !(await verifyOperator(req))) {
+    // Operador primeiro: é o caminho de todo artigo salvo no painel.
+    if (!(await verifyOperator(req)) && !(await isServiceRoleRequest(req))) {
       return json({ error: 'Apenas operadores autenticados podem indexar artigos' }, 401);
     }
 
