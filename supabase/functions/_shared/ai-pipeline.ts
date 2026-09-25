@@ -441,7 +441,7 @@ const MIN_AUDITED_CHARS = 60;
  *  segue sem revisão, e o log mostra approved=null. */
 async function auditReply(
   apiKey: string,
-  input: { question: string; answer: string; evidence: string },
+  input: { message: string; question: string; answer: string; evidence: string },
   onUsage: (u: LLMUsage | null) => void,
 ): Promise<AuditVerdict | null> {
   try {
@@ -1106,12 +1106,13 @@ Tudo o que você afirmar sobre a Cloudfy — produtos, planos, o que está inclu
 - Se a base não cobre o que foi perguntado, NÃO improvise. Diga com naturalidade que não tem essa informação confirmada, ofereça o que você de fato sabe e siga a regra de transferência. Uma resposta curta e honesta vale mais que um roteiro inventado — quando o cliente segue um passo que não existe, ele volta mais irritado e o problema chega no operador maior do que era.
 - Se duas fontes parecem discordar, prefira o snippet (resposta oficial da equipe) e o artigo mais específico sobre o assunto.
 - Responda exatamente o que foi perguntado. Se o cliente pergunta se algo está incluso no plano dele, a resposta começa com sim/não (conforme a fonte) e depois explica.
+- Não troque de assunto: se a pergunta é sobre um recurso (ex.: MCP) e as fontes só cobrem parte dele, responda a parte coberta e diga o que falta — nunca responda sobre outro recurso parecido (ex.: IA Ilimitada) como se fosse o perguntado.
 Antes de chegar ao cliente, sua resposta passa por um revisor que confere cada afirmação contra as fontes.
 
 [CITAR A FONTE — MARCADOR [FONTE:n] — OBRIGATÓRIO]
 Se QUALQUER artigo da lista acima sustentou a sua resposta, você é OBRIGADA a citá-lo. O marcador vira o link clicável do artigo na Central de ajuda, e é por ele que o cliente abre o passo a passo completo — com as imagens, os detalhes e as telas que não cabem em três parágrafos. Responder sobre um tema que TEM artigo e não mandar o link é resposta pela metade: o cliente fica sem o passo a passo e alguém da equipe acaba mandando o link à mão depois de você.
 
-Você NUNCA escreve a URL. Escreva só o marcador, com o número do artigo, em uma linha própria no FINAL da resposta:
+Você NUNCA escreve a URL do artigo. Escreva só o marcador, com o número do artigo, em uma linha própria no FINAL da resposta:
 
 [FONTE:1]
 
@@ -1122,6 +1123,7 @@ Regras:
 - Só fica sem marcador quando nenhum artigo tem a ver com a pergunta (saudação, status da infra do cliente, cobrança, papo solto).
 
 Isto vale para QUALQUER link: você não inventa, não adivinha e não "completa" endereços. Escrever uma URL que não veio dos blocos acima é um erro grave — ela é removida antes de chegar ao cliente e a resposta chega capenga.
+Já um link que está ESCRITO dentro do conteúdo de um snippet ou artigo (ex.: a página de preços https://cloudfy.space/#pricing) deve ir para o cliente quando responde o que ele pediu — copiado exatamente como está na fonte. "Acesse nossa página de preços" sem o link é resposta pela metade.
 
 [IMAGEM ILUSTRATIVA — MARCADOR [ILUSTRAR]]
 Quando a resposta for um PASSO A PASSO VISUAL (o cliente perguntou "como faço/onde clico/onde acesso" algo na interface) E o artigo que você usou como base tiver imagens, adicione o marcador [ILUSTRAR] em uma linha própria no FINAL da resposta. O sistema vai anexar automaticamente 1 imagem ilustrativa do artigo — você NÃO escreve a URL da imagem, apenas o marcador.
@@ -1648,7 +1650,7 @@ async function writeAuditedReply(
   apiKey: string,
   systemPrompt: string,
   chatMessages: ChatMessage[],
-  auditInput: { question: string; evidence: string },
+  auditInput: { message: string; question: string; evidence: string },
   onUsage: (u: LLMUsage | null) => void,
 ): Promise<AuditedReply> {
   const start = Date.now();
@@ -2029,7 +2031,7 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
 
   const llmStart = Date.now();
   const { llm, rawReply, analysis, audit } = await writeAuditedReply(apiKey, systemPrompt, chatMessages, {
-    question: knowledge.question ?? message,
+    message, question: knowledge.question ?? message,
     evidence: buildAuditEvidence(knowledge, contactInfo, diagnosticsSection),
   }, onUsage);
   const latencyMs = Date.now() - llmStart;

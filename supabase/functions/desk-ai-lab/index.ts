@@ -78,7 +78,7 @@ Deno.serve(async (req) => {
     const systemPrompt = P.buildSystemPrompt(knowledge, DEMO_CLIENT.customer?.name, DEMO_CLIENT, turns.length === 0, '') +
       `\n${P.META_INSTRUCTION()}`;
     const out = await P.writeAuditedReply(apiKey, systemPrompt, [...turns, { role: 'user', content: message }], {
-      question: knowledge.question ?? message,
+      message, question: knowledge.question ?? message,
       evidence: P.buildAuditEvidence(knowledge, DEMO_CLIENT, ''),
     }, onUsage);
     const t2 = Date.now();

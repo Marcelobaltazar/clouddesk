@@ -34,21 +34,32 @@ const FUNCTION_URL = `${SUPABASE_URL}/functions/v1/desk-embed-article`;
 
 type Table = 'desk_knowledge_base' | 'desk_ai_snippets';
 
+type BatchResponse = { ok?: boolean; chunks?: number; next?: number | null; hash?: string; error?: string };
+
+/** Um lote, com até 3 tentativas: o Supabase devolve 546 (limite de recursos)
+ *  de forma intermitente, e o lote é idempotente. */
+async function invokeBatch(body: Record<string, unknown>): Promise<BatchResponse> {
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetch(FUNCTION_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${SUPABASE_KEY}` },
+      body: JSON.stringify(body),
+    }).catch(() => null);
+    const data = res ? await res.json().catch(() => ({})) as BatchResponse : {};
+    if (res?.ok && data.ok) return data;
+    const transient = !res || res.status >= 500;
+    if (attempt >= 3 || !transient) throw new Error(data.error ?? `HTTP ${res?.status ?? 'sem resposta'}`);
+    await new Promise((r) => setTimeout(r, 1500 * attempt));
+  }
+}
+
 /** A função indexa em lotes (limite de CPU): repete até next = null. */
 async function reindex(table: Table, id: string): Promise<number> {
   let offset: number | null = 0;
   let hash: string | undefined;
   let chunks = 0;
   while (offset !== null) {
-    const res = await fetch(FUNCTION_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${SUPABASE_KEY}` },
-      body: JSON.stringify({ table, id, offset, hash }),
-    });
-    const body = await res.json().catch(() => ({})) as {
-      ok?: boolean; chunks?: number; next?: number | null; hash?: string; error?: string;
-    };
-    if (!res.ok || !body.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+    const body = await invokeBatch({ table, id, offset, hash });
     chunks = body.chunks ?? 0;
     hash = body.hash;
     offset = body.next ?? null;

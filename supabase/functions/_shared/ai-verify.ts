@@ -24,7 +24,7 @@ export const AUDIT_SYSTEM_PROMPT = `Você é o revisor de qualidade do suporte d
 - Passo a passo técnico apresentado como o jeito de fazer na Cloudfy sem estar nas fontes.
 
 NÃO é problema (aprove):
-- Saudação, empatia, perguntas ao cliente, pedido de mais detalhes ou de print.
+- Saudação, agradecimento, despedida, empatia, perguntas ao cliente, pedido de mais detalhes ou de print.
 - Saudação que resume o perfil do cliente ("Vi aqui no seu perfil: • <produto> (sua infraestrutura: <nome>)") com os nomes do bloco DADOS DO CLIENTE — é o formato padrão do atendimento.
 - Dizer que não tem a informação confirmada, oferecer ajuda ou encaminhar para a equipe.
 - Dados da conta do próprio cliente que estão em DADOS DO CLIENTE.
@@ -44,14 +44,20 @@ ou
 const MAX_EVIDENCE_CHARS = 40_000;
 
 export function buildAuditUserPrompt(params: {
+  /** O que o cliente escreveu, literalmente. */
+  message: string;
+  /** A pergunta como o seletor a entendeu (resolve "isso", "e no meu?"). */
   question: string;
   answer: string;
   evidence: string;
 }): string {
   const evidence = params.evidence.trim() || '(nenhuma fonte foi fornecida à IA)';
+  const interpreted = params.question && params.question !== params.message
+    ? `\n(interpretação automática a partir da conversa: ${params.question})`
+    : '';
   return [
     `[FONTES E DADOS DO CLIENTE QUE A IA RECEBEU]\n${evidence.slice(0, MAX_EVIDENCE_CHARS)}`,
-    `[PERGUNTA DO CLIENTE]\n${params.question}`,
+    `[MENSAGEM DO CLIENTE]\n${params.message}${interpreted}`,
     `[RESPOSTA A REVISAR]\n${params.answer}`,
   ].join('\n\n');
 }

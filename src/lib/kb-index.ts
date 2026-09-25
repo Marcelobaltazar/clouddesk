@@ -56,6 +56,27 @@ async function describeInvokeError(error: Error): Promise<string> {
   }
 }
 
+/** Tentativas por lote. O Supabase devolve 546 (limite de recursos) de forma
+ *  intermitente — na reindexação de 25/09/2026, 3 de 128 documentos falharam
+ *  assim e passaram na segunda tentativa. Lote é idempotente: repetir é seguro. */
+const MAX_ATTEMPTS = 3;
+
+function isTransient(error: Error): boolean {
+  if (error instanceof FunctionsHttpError) return error.context.status >= 500;
+  return true; // erro de rede / função fora do ar
+}
+
+type BatchResponse = { ok?: boolean; chunks?: number; next?: number | null; hash?: string; error?: string };
+
+async function invokeBatch(body: Record<string, unknown>): Promise<BatchResponse> {
+  for (let attempt = 1; ; attempt++) {
+    const { data, error } = await supabase.functions.invoke<BatchResponse>("desk-embed-article", { body });
+    if (!error) return data ?? {};
+    if (attempt >= MAX_ATTEMPTS || !isTransient(error)) throw new Error(await describeInvokeError(error));
+    await new Promise((r) => setTimeout(r, 1500 * attempt));
+  }
+}
+
 /**
  * Indexa um documento inteiro, lote a lote. `onProgress(feitos, total)` é
  * chamado a cada lote. Lança Error com a mensagem real em caso de falha.
@@ -70,12 +91,8 @@ export async function indexDocument(
   let total = 0;
 
   while (offset !== null) {
-    const { data, error } = await supabase.functions.invoke<{
-      ok?: boolean; chunks?: number; next?: number | null; hash?: string; error?: string;
-    }>("desk-embed-article", { body: { table, id, offset, hash } });
-
-    if (error) throw new Error(await describeInvokeError(error));
-    if (!data?.ok) throw new Error(data?.error ?? "Resposta inválida da indexação");
+    const data = await invokeBatch({ table, id, offset, hash });
+    if (!data.ok) throw new Error(data.error ?? "Resposta inválida da indexação");
 
     total = data.chunks ?? 0;
     hash = data.hash;
