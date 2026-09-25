@@ -93,6 +93,17 @@ export async function verifyOperator(req: Request): Promise<string | null> {
 }
 
 /**
+ * true quando a chamada vem com a service role key deste projeto — scripts de
+ * manutenção (ex.: scripts/reindex-kb.ts). Nunca exposta no front.
+ */
+export function isServiceRoleRequest(req: Request): boolean {
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  const auth = req.headers.get('Authorization') ?? '';
+  if (!serviceKey || !auth.startsWith('Bearer ')) return false;
+  return timingSafeEqual(auth.slice('Bearer '.length).trim(), serviceKey);
+}
+
+/**
  * Resolve a identidade de uma chamada do widget.
  *
  * Ordem:

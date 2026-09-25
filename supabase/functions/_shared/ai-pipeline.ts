@@ -32,6 +32,21 @@ import {
 import type { BillingInfo } from './chargefy.ts';
 import { collectUrls, enforceLinkAllowlist } from './link-guard.ts';
 import { broadcastToConversation } from './broadcast.ts';
+import {
+  retrieveKnowledge,
+  type ConversationTurn,
+  type Coverage,
+  type RankedDoc,
+  type RetrievalResult,
+  type SearchHit,
+} from './ai-retrieval.ts';
+import {
+  AUDIT_SYSTEM_PROMPT,
+  buildAuditUserPrompt,
+  buildCorrectionInstruction,
+  parseAuditVerdict,
+  type AuditVerdict,
+} from './ai-verify.ts';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -89,17 +104,15 @@ interface MessageRow {
 interface KBMatch {
   id: string;
   title: string;
+  /** Conteúdo original (com imagens — o [ILUSTRAR] tira a imagem daqui). */
   content: string;
+  /** O que vai para o prompt: sem imagens, e só os trechos relevantes quando
+   *  o artigo é longo demais para ir inteiro. */
+  promptText: string;
   category: string | null;
   source: string | null;
   source_id: string | null;
-  similarity: number;
-}
-
-interface FAQMatch {
-  id: string;
-  question: string;
-  answer: string;
+  /** Ordem de relevância decidida pelo seletor (maior = mais relevante). */
   similarity: number;
 }
 
@@ -108,7 +121,16 @@ interface SnippetMatch {
   title: string;
   content: string;
   category: string | null;
-  similarity: number;
+}
+
+/** Tudo o que a base de conhecimento entrega para um turno. */
+interface KnowledgeContext {
+  articles: KBMatch[];
+  snippets: SnippetMatch[];
+  /** 'sem_busca' = a mensagem não pede a base (saudação, dados da conta). */
+  coverage: Coverage | 'desconhecida' | 'sem_busca';
+  /** Pergunta reescrita pelo seletor, quando difere da mensagem. */
+  question: string | null;
 }
 
 interface OpenAIChatResponse {
@@ -140,6 +162,15 @@ export const _test = {
   communityInviteFor: (ctx: InviteContext) => communityInviteFor(ctx),
   COMMUNITY_INVITE_FIRST: () => COMMUNITY_INVITE_FIRST,
   COMMUNITY_INVITE: () => COMMUNITY_INVITE,
+  // Etapas com LLM, para o teste ponta a ponta local (base real + OpenRouter)
+  // montar o turno com o mesmo código da produção.
+  consultKnowledge: (...a: Parameters<typeof consultKnowledge>) => consultKnowledge(...a),
+  writeAuditedReply: (...a: Parameters<typeof writeAuditedReply>) => writeAuditedReply(...a),
+  buildSystemPrompt: (...a: Parameters<typeof buildSystemPrompt>) => buildSystemPrompt(...a),
+  buildAuditEvidence: (...a: Parameters<typeof buildAuditEvidence>) => buildAuditEvidence(...a),
+  resolveSourceMarkers: (...a: Parameters<typeof resolveSourceMarkers>) => resolveSourceMarkers(...a),
+  ensureSourceLink: (...a: Parameters<typeof ensureSourceLink>) => ensureSourceLink(...a),
+  META_INSTRUCTION: () => META_INSTRUCTION,
 };
 
 export function sanitizeContactText(text: string): string {
@@ -336,40 +367,101 @@ interface ChatMessage {
   content: string | ChatContentPart[];
 }
 
+interface LLMOptions {
+  /** Default: LLM_MODEL. */
+  model?: string;
+  /** Default: 0.7 (conversa livre, ex.: resumo de conversa). */
+  temperature?: number;
+  maxTokens?: number;
+  /** Aborta a chamada depois disso. Sem valor: sem limite. */
+  timeoutMs?: number;
+}
+
+const MAIN_MODEL = Deno.env.get('LLM_MODEL') ?? 'google/gemini-2.5-flash';
+/** Modelo do seletor e do revisor. Mesmo da resposta, salvo configuração. */
+const AUX_MODEL = Deno.env.get('LLM_MODEL_FAST') ?? MAIN_MODEL;
+/** Resposta ao cliente: baixa para seguir a fonte em vez de "criar". */
+const ANSWER_TEMPERATURE = 0.3;
+/** Seletor e revisor não podem segurar o atendimento: estourou, segue sem eles. */
+const AUX_TIMEOUT_MS = 15_000;
+
 async function callLLM(
   apiKey: string,
   systemPrompt: string,
   messages: ChatMessage[],
+  opts: LLMOptions = {},
 ): Promise<LLMResult> {
-  const model = Deno.env.get('LLM_MODEL') ?? 'google/gemini-2.5-flash';
+  const model = opts.model ?? MAIN_MODEL;
+  const controller = new AbortController();
+  const timer = opts.timeoutMs ? setTimeout(() => controller.abort(), opts.timeoutMs) : null;
 
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://cloudfy.host',
-      'X-Title': 'CloudDesk',
-    },
-    body: JSON.stringify({
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://cloudfy.host',
+        'X-Title': 'CloudDesk',
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'system', content: systemPrompt }, ...messages],
+        temperature: opts.temperature ?? 0.7,
+        max_tokens: opts.maxTokens ?? 768,
+        usage: { include: true },
+      }),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`OpenRouter chat error ${res.status}: ${err}`);
+    }
+
+    const data: OpenAIChatResponse & { usage?: LLMUsage } = await res.json();
+    return {
+      content: data.choices[0]?.message?.content ?? '',
       model,
-      messages: [{ role: 'system', content: systemPrompt }, ...messages],
-      temperature: 0.7,
-      max_tokens: 768,
-      usage: { include: true },
-    }),
-  });
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`OpenRouter chat error ${res.status}: ${err}`);
+      usage: data.usage ?? null,
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
   }
+}
 
-  const data: OpenAIChatResponse & { usage?: LLMUsage } = await res.json();
+/** Abaixo disso a resposta não tem afirmação a conferir ("Por nada! 😊"). */
+const MIN_AUDITED_CHARS = 60;
+
+/** Revisor (ai-verify.ts). null = não rodou ou não deu para ler — a resposta
+ *  segue sem revisão, e o log mostra approved=null. */
+async function auditReply(
+  apiKey: string,
+  input: { question: string; answer: string; evidence: string },
+  onUsage: (u: LLMUsage | null) => void,
+): Promise<AuditVerdict | null> {
+  try {
+    const r = await callLLM(apiKey, AUDIT_SYSTEM_PROMPT, [{ role: 'user', content: buildAuditUserPrompt(input) }], {
+      model: AUX_MODEL, temperature: 0, maxTokens: 1200, timeoutMs: AUX_TIMEOUT_MS,
+    });
+    onUsage(r.usage);
+    const verdict = parseAuditVerdict(r.content);
+    if (!verdict) console.warn('[AI] Revisor devolveu JSON inválido — resposta segue sem revisão');
+    return verdict;
+  } catch (e) {
+    console.warn('[AI] Revisor falhou — resposta segue sem revisão:', e instanceof Error ? e.message : e);
+    return null;
+  }
+}
+
+/** Soma o consumo de todas as chamadas de um turno (seletor, resposta, revisor). */
+function addUsage(total: LLMUsage | null, more: LLMUsage | null): LLMUsage | null {
+  if (!more) return total;
+  if (!total) return { ...more };
   return {
-    content: data.choices[0].message.content,
-    model,
-    usage: data.usage ?? null,
+    prompt_tokens: (total.prompt_tokens ?? 0) + (more.prompt_tokens ?? 0),
+    completion_tokens: (total.completion_tokens ?? 0) + (more.completion_tokens ?? 0),
+    total_tokens: (total.total_tokens ?? 0) + (more.total_tokens ?? 0),
   };
 }
 
@@ -448,6 +540,130 @@ async function generateEmbedding(text: string): Promise<number[]> {
   const input = text.slice(0, 2000);
   const output = await embeddingSession.run(input, { mean_pool: true, normalize: true });
   return output as number[];
+}
+
+// ─── Base de conhecimento: busca e carga dos documentos ───────────────────────
+// A lógica de busca (fusão, seletor, busca recursiva) está em ai-retrieval.ts.
+// Aqui ficam só as pontas que falam com o banco.
+
+const HYBRID_MATCH_COUNT = 20;
+
+/**
+ * Busca híbrida de UMA consulta. Se a função nova não existir ou os trechos
+ * ainda não tiverem sido gerados (janela entre a migration e a reindexação),
+ * cai na busca antiga por artigo inteiro — pior, mas nunca "sem base".
+ */
+async function hybridSearch(
+  supabase: ServiceClient,
+  queryText: string,
+  embedding: number[] | null,
+): Promise<SearchHit[]> {
+  const { data, error } = await supabase.rpc('desk_kb_hybrid_search', {
+    query_text: queryText,
+    query_embedding: embedding,
+    match_count: HYBRID_MATCH_COUNT,
+  });
+  if (!error && Array.isArray(data) && data.length > 0) return data as SearchHit[];
+
+  console.warn(
+    `[RAG] busca híbrida ${error ? `falhou (${error.message})` : 'sem trechos indexados'} — usando a busca por artigo inteiro`,
+  );
+  return legacySearch(supabase, embedding);
+}
+
+async function legacySearch(supabase: ServiceClient, embedding: number[] | null): Promise<SearchHit[]> {
+  if (!embedding) return [];
+  const [kbRes, snRes] = await Promise.all([
+    supabase.rpc('match_knowledge_base', { query_embedding: embedding, match_threshold: 0, match_count: 10 }),
+    supabase.rpc('match_ai_snippets', { query_embedding: embedding, match_threshold: 0, match_count: 5 }),
+  ]);
+  const toHit = (docType: 'article' | 'snippet') =>
+    (row: { id: string; title: string; content: string; similarity: number }, i: number): SearchHit => ({
+      chunk_id: `legacy:${row.id}`,
+      doc_type: docType,
+      doc_id: row.id,
+      chunk_index: 0,
+      title: row.title,
+      heading: null,
+      content: row.content,
+      vec_rank: i + 1,
+      vec_similarity: row.similarity,
+      text_rank: null,
+      text_score: null,
+    });
+  return [
+    ...((kbRes.data ?? []) as Array<{ id: string; title: string; content: string; similarity: number }>).map(toHit('article')),
+    ...((snRes.data ?? []) as Array<{ id: string; title: string; content: string; similarity: number }>).map(toHit('snippet')),
+  ];
+}
+
+/** Teto de um artigo no prompt. Os da Central têm até ~8 mil caracteres; só
+ *  os Termos & Condições (17 mil) passam disso. */
+const MAX_ARTICLE_PROMPT_CHARS = 7000;
+
+function stripImages(raw: string): string {
+  return String(raw ?? '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/** Texto do artigo para o prompt: inteiro quando cabe; senão, o começo e os
+ *  trechos que a busca encontrou (na ordem do artigo). */
+function articlePromptText(raw: string, doc: RankedDoc | undefined): string {
+  const text = stripImages(raw);
+  if (text.length <= MAX_ARTICLE_PROMPT_CHARS || !doc) return text.slice(0, MAX_ARTICLE_PROMPT_CHARS);
+  const matched = doc.chunks
+    .filter((c) => c.content !== doc.title && !c.chunk_id.startsWith('legacy:'))
+    .slice(0, 4)
+    .sort((a, b) => a.chunk_index - b.chunk_index)
+    .map((c) => c.content);
+  if (matched.length === 0) return text.slice(0, MAX_ARTICLE_PROMPT_CHARS);
+  return `${text.slice(0, 1500)}\n[…]\n${matched.join('\n[…]\n')}`.slice(0, MAX_ARTICLE_PROMPT_CHARS);
+}
+
+/** Carrega o conteúdo completo dos documentos aprovados, na ordem do seletor. */
+async function loadKnowledge(supabase: ServiceClient, retrieval: RetrievalResult): Promise<KnowledgeContext> {
+  const coverage: KnowledgeContext['coverage'] = retrieval.needsKnowledge ? retrieval.coverage : 'sem_busca';
+  const question = retrieval.question && retrieval.question !== retrieval.queries[0] ? retrieval.question : null;
+  const docs = retrieval.docs;
+  if (docs.length === 0) return { articles: [], snippets: [], coverage, question };
+
+  const articleIds = docs.filter((d) => d.doc_type === 'article').map((d) => d.doc_id);
+  const snippetIds = docs.filter((d) => d.doc_type === 'snippet').map((d) => d.doc_id);
+
+  const [artRes, snRes] = await Promise.all([
+    articleIds.length > 0
+      ? supabase.from('desk_knowledge_base')
+          .select('id, title, content, category, source, source_id')
+          .in('id', articleIds)
+          .eq('is_published', true)
+      : Promise.resolve({ data: [], error: null }),
+    snippetIds.length > 0
+      ? supabase.from('desk_ai_snippets').select('id, title, content, category').in('id', snippetIds)
+      : Promise.resolve({ data: [], error: null }),
+  ]);
+  if (artRes.error) console.warn('[RAG] carga de artigos falhou:', artRes.error.message);
+  if (snRes.error) console.warn('[RAG] carga de snippets falhou:', snRes.error.message);
+
+  type ArticleRow = Omit<KBMatch, 'promptText' | 'similarity'>;
+  const artById = new Map(((artRes.data ?? []) as ArticleRow[]).map((a) => [a.id, a]));
+  const snById = new Map(((snRes.data ?? []) as SnippetMatch[]).map((s) => [s.id, s]));
+
+  const articles: KBMatch[] = [];
+  const snippets: SnippetMatch[] = [];
+  docs.forEach((doc, i) => {
+    if (doc.doc_type === 'article') {
+      const a = artById.get(doc.doc_id);
+      if (a) articles.push({ ...a, promptText: articlePromptText(a.content, doc), similarity: 1 - i / 100 });
+    } else {
+      const s = snById.get(doc.doc_id);
+      if (s) snippets.push(s);
+    }
+  });
+
+  return { articles, snippets, coverage, question };
 }
 
 // ─── Diagnóstico determinístico da infraestrutura ─────────────────────────────
@@ -751,10 +967,61 @@ function isStarterOnlyClient(contactInfo?: ContactInfoResult | null): boolean {
   return !hasNonStarter;
 }
 
+/** O que a busca concluiu, dito à IA antes das fontes. É o que a autoriza a
+ *  dizer "não tenho isso documentado" em vez de preencher o buraco. */
+function coverageNote(knowledge: KnowledgeContext): string {
+  switch (knowledge.coverage) {
+    case 'total':
+      return 'A busca na base encontrou conteúdo que responde esta pergunta. Responda com base nele.';
+    case 'parcial':
+      return 'As fontes abaixo cobrem só PARTE da pergunta. Responda a parte coberta e diga com clareza o que você não tem confirmado.';
+    case 'nenhuma':
+      return 'A busca na base de conhecimento NÃO encontrou conteúdo sobre esta pergunta. Não responda de memória nada sobre a Cloudfy: diga que não encontrou essa informação na base e siga a regra de transferência.';
+    case 'sem_busca':
+      return 'Esta mensagem não pede informação da base (saudação, confirmação ou dados da conta do cliente).';
+    default:
+      return 'As fontes abaixo vieram de uma busca automática e podem não ser todas relevantes: use só o que responde de fato a pergunta.';
+  }
+}
+
+/**
+ * Fontes da base para o prompt. É a MESMA string que o revisor recebe como
+ * evidência — se ela mudar num lugar e não no outro, o revisor passa a
+ * reprovar o que a IA tinha direito de dizer.
+ */
+function buildKnowledgeSection(knowledge: KnowledgeContext): string {
+  const parts: string[] = [coverageNote(knowledge)];
+
+  if (knowledge.question) {
+    parts.push(`Pergunta do cliente, como entendida pelo sistema a partir da conversa: "${knowledge.question}"`);
+  }
+
+  if (knowledge.snippets.length > 0) {
+    parts.push('[SNIPPETS — RESPOSTAS OFICIAIS DA EQUIPE — FONTE PRIORITÁRIA]');
+    parts.push('Respostas curtas e validadas pela equipe. Quando um snippet responde a pergunta, ele manda — prefira-o ao conteúdo dos artigos.');
+    for (const sn of knowledge.snippets) {
+      parts.push(`Snippet: ${sn.title}${sn.category ? ` (${sn.category})` : ''}\nConteúdo: ${sn.content}`);
+    }
+  }
+
+  if (knowledge.articles.length > 0) {
+    parts.push('[ARTIGOS DA CENTRAL DE AJUDA]');
+    // O artigo é identificado por NÚMERO, nunca por URL. O modelo não recebe
+    // link nenhum aqui — não dá para copiar errado nem "completar" um que
+    // pareça certo. Quem transforma [FONTE:n] em link é o servidor.
+    knowledge.articles.forEach((kb, i) => {
+      parts.push(
+        `Artigo #${i + 1}: ${kb.title}${kb.category ? ` (${kb.category})` : ''}\n` +
+        `Conteúdo: ${kb.promptText}`,
+      );
+    });
+  }
+
+  return parts.join('\n\n---\n\n');
+}
+
 function buildSystemPrompt(
-  kbMatches: KBMatch[],
-  faqMatches: FAQMatch[],
-  snippetMatches: SnippetMatch[],
+  knowledge: KnowledgeContext,
   clientName?: string,
   contactInfo?: ContactInfoResult | null,
   isFirstMessage?: boolean,
@@ -764,42 +1031,7 @@ function buildSystemPrompt(
     ? `\n[CLIENTE]\nVocê está atendendo: ${clientName}. Cumprimente-o pelo nome na primeira mensagem.\n`
     : '';
 
-  let contextSection: string;
-  if (kbMatches.length === 0 && faqMatches.length === 0 && snippetMatches.length === 0) {
-    contextSection = 'Nenhum conteúdo relevante encontrado na base de conhecimento para esta pergunta.';
-  } else {
-    const parts: string[] = [];
-
-    if (snippetMatches.length > 0) {
-      parts.push('[SNIPPETS — REFERÊNCIA RÁPIDA PRIORITÁRIA]');
-      parts.push('Use estes snippets como fonte PREFERENCIAL. São respostas curtas e canônicas validadas pela equipe — prefira-os ao conteúdo dos artigos quando houver sobreposição.');
-      for (const sn of snippetMatches) {
-        parts.push(`Snippet: ${sn.title}${sn.category ? ` (${sn.category})` : ''}\nConteúdo: ${sn.content}`);
-      }
-    }
-
-    if (kbMatches.length > 0) {
-      parts.push('[ARTIGOS RELEVANTES]');
-      // O artigo é identificado por NÚMERO, nunca por URL. O modelo não recebe
-      // link nenhum aqui — não dá para copiar errado nem "completar" um que
-      // pareça certo. Quem transforma [FONTE:n] em link é o servidor.
-      kbMatches.forEach((kb, i) => {
-        parts.push(
-          `Artigo #${i + 1}: ${kb.title}${kb.category ? ` (${kb.category})` : ''}\n` +
-          `Conteúdo: ${kb.content}`,
-        );
-      });
-    }
-
-    if (faqMatches.length > 0) {
-      parts.push('[PERGUNTAS FREQUENTES RELEVANTES]');
-      for (const faq of faqMatches) {
-        parts.push(`P: ${faq.question}\nR: ${faq.answer}`);
-      }
-    }
-
-    contextSection = parts.join('\n\n---\n\n');
-  }
+  const contextSection = buildKnowledgeSection(knowledge);
 
   const contactContext = buildClientContext(contactInfo ?? null);
 
@@ -840,8 +1072,8 @@ ${clientSection}${contactContext}${diagnosticsSection ?? ''}${firstMessageInstru
 [REGRA DE TRANSFERÊNCIA — OBRIGATÓRIA]
 NÃO transfira para humano por padrão. Antes de pensar em transferir, siga esta ordem:
 
-1. Se a pergunta puder ser respondida pelos DADOS DO CLIENTE ou pela base de conhecimento, responda normalmente.
-2. Se for uma dúvida genérica (não técnica) que você consegue responder com bom senso, responda você mesma — não transfira.
+1. Se a pergunta puder ser respondida pelos DADOS DO CLIENTE ou pelas FONTES da base de conhecimento, responda normalmente.
+2. Se a base NÃO cobre a pergunta, não invente e não transfira de imediato: diga que não tem essa informação confirmada e pergunte se o cliente quer que você encaminhe para a equipe (cliente só Starter: oriente a Central de ajuda e o Discord, conforme a regra do plano Starter). Se ele disser que sim, isso é pedido explícito — caso (a) abaixo.
 3. Se for uma pergunta completamente fora do contexto de suporte da Cloudfy (ex.: "onde comprar coca-cola", receitas, assuntos pessoais, notícias), NÃO transfira: responda educadamente que você só pode ajudar com questões relacionadas à Cloudfy (infraestrutura, n8n, Evolution API, assinaturas, etc.) e ofereça ajuda nesses temas.
 
 Você DEVE responder APENAS com a palavra-chave ${TRANSFER_KEYWORD} SOMENTE em um destes casos:
@@ -857,13 +1089,17 @@ Se o cliente tem APENAS plano(s) Starter ativo(s) (nenhuma assinatura ativa de A
 
 ---
 
-[BASE DE CONHECIMENTO — FONTE COMPLEMENTAR]
-Use o conteúdo abaixo COMBINADO com o bloco DADOS DO CLIENTE para responder. Os dois são fontes válidas. Se a pergunta for sobre dados específicos do cliente (status da infraestrutura, assinaturas dele etc.), priorize o bloco DADOS DO CLIENTE. Para perguntas gerais ou de como-fazer, use a base de conhecimento.
+[FONTES — BASE DE CONHECIMENTO + DADOS DO CLIENTE]
+Suas únicas fontes sobre a Cloudfy são as FONTES da base de conhecimento (no fim deste prompt) e o bloco DADOS DO CLIENTE. Para dados específicos do cliente (status da infraestrutura, assinaturas, cobrança), use DADOS DO CLIENTE. Para dúvidas sobre produto, planos e como fazer, use as FONTES.
 
-[LIMITE DO QUE VOCÊ PODE AFIRMAR]
-Sobre COMO FAZER algo na Cloudfy (configurar, integrar, acessar, cancelar, conectar serviços), você só pode afirmar o que estiver escrito nos blocos acima — artigos, snippets, FAQ ou DADOS DO CLIENTE. Seu conhecimento geral sobre n8n, Evolution API, Chatwoot, Docker etc. NÃO é fonte válida aqui: ele descreve o produto genérico, não a instalação da Cloudfy, e é assim que se entrega um passo a passo que não bate com o que o cliente vê na tela.
-
-Se a base não cobre o que foi perguntado, NÃO improvise um procedimento. Diga com naturalidade que não tem esse passo a passo documentado, ofereça o que você de fato sabe (o que é possível, o que existe) e siga a regra de transferência. Uma resposta curta e honesta vale mais que um roteiro inventado — quando o cliente segue um passo que não existe, ele volta mais irritado e o problema chega no operador maior do que era.
+[REGRA DE OURO — FATOS SOBRE A CLOUDFY]
+Tudo o que você afirmar sobre a Cloudfy — produtos, planos, o que está incluso em cada plano, preços, limites, disponibilidade, prazos, políticas e passo a passo no console — precisa estar escrito nas FONTES ou nos DADOS DO CLIENTE. O que não está escrito ali, você não sabe.
+- NUNCA diga que um produto ou recurso foi descontinuado, não existe, não está incluso, é cobrado à parte ou está indisponível sem uma fonte dizendo exatamente isso. A ausência de informação NÃO é informação.
+- Seu conhecimento geral sobre n8n, Evolution API, Chatwoot, Docker, Claude, ChatGPT etc. NÃO é fonte sobre a Cloudfy: ele descreve o produto genérico, não a instalação da Cloudfy, e é assim que se entrega um passo a passo que não bate com o que o cliente vê na tela.
+- Se a base não cobre o que foi perguntado, NÃO improvise. Diga com naturalidade que não tem essa informação confirmada, ofereça o que você de fato sabe e siga a regra de transferência. Uma resposta curta e honesta vale mais que um roteiro inventado — quando o cliente segue um passo que não existe, ele volta mais irritado e o problema chega no operador maior do que era.
+- Se duas fontes parecem discordar, prefira o snippet (resposta oficial da equipe) e o artigo mais específico sobre o assunto.
+- Responda exatamente o que foi perguntado. Se o cliente pergunta se algo está incluso no plano dele, a resposta começa com sim/não (conforme a fonte) e depois explica.
+Antes de chegar ao cliente, sua resposta passa por um revisor que confere cada afirmação contra as fontes.
 
 [CITAR A FONTE — MARCADOR [FONTE:n] — OBRIGATÓRIO]
 Se QUALQUER artigo da lista acima sustentou a sua resposta, você é OBRIGADA a citá-lo. O marcador vira o link clicável do artigo na Central de ajuda, e é por ele que o cliente abre o passo a passo completo — com as imagens, os detalhes e as telas que não cabem em três parágrafos. Responder sobre um tema que TEM artigo e não mandar o link é resposta pela metade: o cliente fica sem o passo a passo e alguém da equipe acaba mandando o link à mão depois de você.
@@ -888,7 +1124,23 @@ Use [ILUSTRAR] SOMENTE quando:
 
 NÃO use [ILUSTRAR] em: perguntas conceituais ("o que é X"), dúvidas rápidas, saudações, status do cliente, ou quando não há artigo relevante. No máximo UMA imagem por resposta. Na dúvida, não use.
 
+---
+
+[FONTES DA BASE DE CONHECIMENTO]
 ${contextSection}`;
+}
+
+/** Evidência entregue ao revisor: exatamente o que a IA recebeu como fonte. */
+function buildAuditEvidence(
+  knowledge: KnowledgeContext,
+  contactInfo: ContactInfoResult | null,
+  diagnosticsSection: string,
+): string {
+  return [
+    buildClientContext(contactInfo).trim() || '--- DADOS DO CLIENTE ---\n(não disponíveis)',
+    diagnosticsSection.trim(),
+    `[FONTES DA BASE DE CONHECIMENTO]\n${buildKnowledgeSection(knowledge)}`,
+  ].filter(Boolean).join('\n\n');
 }
 
 // ─── Reply marker parsing ─────────────────────────────────────────────────────
@@ -907,14 +1159,6 @@ const FONTE_RE = /\[FONTE\s*:\s*(\d+)\s*\]/gi;
 
 /** Máximo de fontes por resposta — três linhas de "Fonte:" viram ruído. */
 const MAX_SOURCES = 2;
-
-/**
- * Similaridade mínima para o servidor citar sozinho um artigo que o modelo
- * esqueceu de citar. Bem acima do piso de recuperação (0.5) de propósito: num
- * marcador existe um "usei este artigo" dito pelo modelo para confiar; aqui só
- * existe o número, então só entra artigo claramente sobre a pergunta.
- */
-const AUTO_SOURCE_MIN_SIMILARITY = 0.62;
 
 /**
  * Troca os marcadores [FONTE:n] pelas linhas "📚 Fonte: [título](url)" reais.
@@ -950,21 +1194,24 @@ function resolveSourceMarkers(text: string, kbMatches: KBMatch[]): { text: strin
  * O endereço é montado pelo servidor, a partir de um artigo que a própria
  * busca recuperou — continua valendo a regra de ouro: o modelo nunca escolhe
  * uma URL.
+ *
+ * Só cita o artigo que o SELETOR aprovou como resposta (cobertura total ou
+ * parcial). Um limiar de similaridade não serve: com o gte-small quase tudo
+ * passa de 0.8, e foi assim que a pergunta "o MCP está incluso no meu plano?"
+ * saiu com o link de "como revogar o acesso do MCP".
  */
-function ensureSourceLink(text: string, kbMatches: KBMatch[]): string {
+function ensureSourceLink(text: string, knowledge: KnowledgeContext): string {
   if (!text) return text;
+  if (knowledge.coverage !== 'total' && knowledge.coverage !== 'parcial') return text;
 
-  const best = [...kbMatches].sort((a, b) => b.similarity - a.similarity)[0];
-  if (!best || best.similarity < AUTO_SOURCE_MIN_SIMILARITY) return text;
+  const best = knowledge.articles[0];
+  if (!best) return text;
 
   const url = kbArticleUrl(best.source, best.source_id, best.id, best.title);
   // Sem URL pública, ou o texto já manda o cliente para este artigo: não mexer.
   if (!url || text.includes(url)) return text;
 
-  console.log(
-    `[AI] Fonte automática: "${best.title}" (similaridade ${best.similarity.toFixed(2)}) — ` +
-    'o modelo respondeu sem [FONTE:n]',
-  );
+  console.log(`[AI] Fonte automática: "${best.title}" (cobertura ${knowledge.coverage}) — o modelo respondeu sem [FONTE:n]`);
   return `${text}\n\n📚 Fonte: [${best.title}](${url})`;
 }
 
@@ -1184,6 +1431,37 @@ async function autoResolve(
   }
 }
 
+interface RetrievalLog {
+  question: string;
+  queries: string[];
+  rounds: number;
+  coverage: KnowledgeContext['coverage'];
+  selected: string[];
+  candidates: string[];
+  latency_ms: number;
+}
+
+interface AuditLog {
+  approved: boolean | null;
+  problems: string[];
+  rewritten: boolean;
+  latency_ms: number;
+}
+
+function retrievalLog(retrieval: RetrievalResult | null, knowledge: KnowledgeContext, latencyMs: number): RetrievalLog | null {
+  if (!retrieval) return null;
+  const label = (d: RankedDoc) => `${d.doc_type === 'snippet' ? 'snippet' : 'artigo'}: ${d.title}`;
+  return {
+    question: retrieval.question,
+    queries: retrieval.queries,
+    rounds: retrieval.rounds,
+    coverage: knowledge.coverage,
+    selected: retrieval.docs.map(label),
+    candidates: retrieval.candidates.map(label),
+    latency_ms: latencyMs,
+  };
+}
+
 async function logInteraction(
   supabase: ServiceClient,
   params: {
@@ -1194,11 +1472,14 @@ async function logInteraction(
     wasEscalated: boolean;
     analysis: MessageAnalysis | null;
     kbIds: string[];
-    faqIds: string[];
     snippetIds: string[];
     draft: boolean;
     /** URLs que o modelo inventou e o guard removeu. Vazio no caso normal. */
     removedLinks?: string[];
+    /** Como a base foi consultada neste turno (null nos guards determinísticos). */
+    retrieval?: RetrievalLog | null;
+    /** Veredito do revisor (null quando não rodou). */
+    audit?: AuditLog | null;
   },
 ): Promise<void> {
   try {
@@ -1213,8 +1494,12 @@ async function logInteraction(
       was_escalated: params.wasEscalated,
       context_sources: {
         kb: params.kbIds,
-        faq: params.faqIds,
         snippets: params.snippetIds,
+        // Por que a resposta saiu assim: o que foi buscado, o que o seletor
+        // aprovou e o que o revisor apontou. É por aqui que se investiga uma
+        // resposta ruim (SELECT context_sources->'retrieval' ...).
+        retrieval: params.retrieval ?? null,
+        audit: params.audit ?? null,
         intent: params.analysis?.intent ?? null,
         sentiment: params.analysis?.sentiment ?? null,
         urgency: params.analysis?.urgency ?? null,
@@ -1277,6 +1562,129 @@ function parseReplyMarkers(
 
   const hasMetadata = !!metadata.quick_replies || !!metadata.credential_actions || !!metadata.attachments;
   return { text, metadata: hasMetadata ? metadata : null };
+}
+
+// ─── Etapas do turno com LLM ──────────────────────────────────────────────────
+// Separadas do runAiPipeline para o teste ponta a ponta local rodar exatamente
+// o mesmo código (ver _test).
+
+function toConversationTurns(history: MessageRow[]): ConversationTurn[] {
+  return history
+    .filter((m) => m.sender_type !== 'system')
+    .map((m) => ({
+      role: m.sender_type === 'contact' ? 'user' as const : 'assistant' as const,
+      content: m.sender_type === 'contact' ? sanitizeContactText(m.content) : String(m.content ?? ''),
+    }));
+}
+
+interface KnowledgeTurn {
+  retrieval: RetrievalResult | null;
+  knowledge: KnowledgeContext;
+  ms: number;
+}
+
+/** Busca híbrida + seletor + busca recursiva, e carga dos documentos aprovados.
+ *  Nunca lança: sem base, a IA ainda responde (e diz que não encontrou). */
+async function consultKnowledge(
+  supabase: ServiceClient,
+  apiKey: string,
+  message: string,
+  turns: ConversationTurn[],
+  onUsage: (u: LLMUsage | null) => void,
+): Promise<KnowledgeTurn> {
+  const start = Date.now();
+  try {
+    const retrieval = await retrieveKnowledge({
+      embed: generateEmbedding,
+      search: (q, emb) => hybridSearch(supabase, q, emb),
+      select: async (system, user) => {
+        const r = await callLLM(apiKey, system, [{ role: 'user', content: user }], {
+          model: AUX_MODEL, temperature: 0, maxTokens: 1200, timeoutMs: AUX_TIMEOUT_MS,
+        });
+        onUsage(r.usage);
+        return r.content;
+      },
+      log: (m) => console.log(m),
+    }, message, turns);
+    const knowledge = await loadKnowledge(supabase, retrieval);
+    console.log(
+      `[RAG] cobertura=${knowledge.coverage} rodadas=${retrieval.rounds} ` +
+      `aprovados=[${retrieval.docs.map((d) => d.title).join(' | ')}] ` +
+      `pergunta="${retrieval.question.slice(0, 80)}" ${Date.now() - start}ms`,
+    );
+    return { retrieval, knowledge, ms: Date.now() - start };
+  } catch (e) {
+    console.warn('[RAG] falhou — respondendo sem base de conhecimento:', e instanceof Error ? e.message : e);
+    return {
+      retrieval: null,
+      knowledge: { articles: [], snippets: [], coverage: 'desconhecida', question: null },
+      ms: Date.now() - start,
+    };
+  }
+}
+
+interface AuditedReply {
+  llm: LLMResult;
+  /** Resposta sem o bloco META (ainda com os demais marcadores). */
+  rawReply: string;
+  analysis: MessageAnalysis | null;
+  audit: AuditLog | null;
+}
+
+/**
+ * Gera a resposta e passa pelo revisor. Transferência não é revisada (o texto
+ * é descartado). Reprovada, a resposta é reescrita UMA vez com os apontamentos
+ * — sem segunda revisão, para não dobrar o tempo de resposta no caso raro.
+ */
+async function writeAuditedReply(
+  apiKey: string,
+  systemPrompt: string,
+  chatMessages: ChatMessage[],
+  auditInput: { question: string; evidence: string },
+  onUsage: (u: LLMUsage | null) => void,
+): Promise<AuditedReply> {
+  const start = Date.now();
+  let llm = await callLLM(apiKey, systemPrompt, chatMessages, { temperature: ANSWER_TEMPERATURE });
+  onUsage(llm.usage);
+
+  let { text: rawReply, analysis } = parseMetaBlock(llm.content);
+  console.log(`[AI] Reply: "${rawReply.substring(0, 80)}" meta=${JSON.stringify(analysis)} latency=${Date.now() - start}ms`);
+
+  const answerForAudit = rawReply.replace(CONTROL_MARKERS_RE, '').replace(/\n{3,}/g, '\n\n').trim();
+  if (rawReply.includes(TRANSFER_KEYWORD) || answerForAudit.length < MIN_AUDITED_CHARS) {
+    return { llm, rawReply, analysis, audit: null };
+  }
+
+  const auditStart = Date.now();
+  const verdict = await auditReply(apiKey, { ...auditInput, answer: answerForAudit }, onUsage);
+  const audit: AuditLog = { approved: verdict?.approved ?? null, problems: verdict?.problems ?? [], rewritten: false, latency_ms: 0 };
+
+  if (verdict && !verdict.approved) {
+    console.warn(`[AI] Revisor reprovou a resposta: ${verdict.problems.join(' | ')}`);
+    try {
+      const retry = await callLLM(
+        apiKey,
+        systemPrompt + buildCorrectionInstruction(answerForAudit, verdict.problems),
+        chatMessages,
+        { temperature: ANSWER_TEMPERATURE },
+      );
+      onUsage(retry.usage);
+      const parsed = parseMetaBlock(retry.content);
+      if (parsed.text) {
+        llm = retry;
+        rawReply = parsed.text;
+        analysis = parsed.analysis ?? analysis;
+        audit.rewritten = true;
+        console.log(`[AI] Reescrita após revisão: "${rawReply.substring(0, 80)}"`);
+      }
+    } catch (e) {
+      // Sem reescrita a resposta original segue: melhor que o cliente sem
+      // resposta nenhuma, e o apontamento fica no log para a equipe.
+      console.warn('[AI] Reescrita após revisão falhou — mantendo a original:', e instanceof Error ? e.message : e);
+    }
+  }
+  audit.latency_ms = Date.now() - auditStart;
+  return { llm, rawReply, analysis, audit };
 }
 
 // ─── Pipeline ─────────────────────────────────────────────────────────────────
@@ -1453,7 +1861,7 @@ export async function runAiPipeline(
     void applyAnalysis(supabase, conversationId, syntheticAnalysis);
     void logInteraction(supabase, {
       conversationId, model, usage: null, latencyMs: 0, wasEscalated: true,
-      analysis: syntheticAnalysis, kbIds: [], faqIds: [], snippetIds: [], draft: false,
+      analysis: syntheticAnalysis, kbIds: [], snippetIds: [], draft: false,
     });
     return { reply, should_handoff: true, skip_handoff_notice: true, blocked: false, auto_resolved: false, reopened, metadata: null };
   };
@@ -1541,54 +1949,15 @@ export async function runAiPipeline(
       })
     : Promise.resolve([] as ProbeResult[]);
 
-  // ── Step 2: busca semântica (RAG) ────────────────────────────────────────────
-  let kbMatches: KBMatch[] = [];
-  let faqMatches: FAQMatch[] = [];
-  let snippetMatches: SnippetMatch[] = [];
+  // ── Step 2: base de conhecimento (busca híbrida + seletor + busca recursiva) ──
+  // Ver ai-retrieval.ts. Roda em paralelo com o probe de infra.
+  let usage: LLMUsage | null = null;
+  const onUsage = (u: LLMUsage | null) => { usage = addUsage(usage, u); };
 
-  try {
-    const embedding = await generateEmbedding(message);
-
-    const [kbRes, faqRes, snippetRes] = await Promise.all([
-      supabase.rpc('match_knowledge_base', {
-        query_embedding: embedding,
-        match_threshold: 0.5,
-        match_count: 5,
-      }),
-      supabase.rpc('match_faq', {
-        query_embedding: embedding,
-        match_threshold: 0.5,
-        match_count: 3,
-      }),
-      supabase.rpc('match_ai_snippets', {
-        query_embedding: embedding,
-        match_threshold: 0.5,
-        match_count: 3,
-      }),
-    ]);
-
-    if (kbRes.error) {
-      console.warn('[AI] KB search failed:', kbRes.error.message);
-    } else {
-      kbMatches = (kbRes.data ?? []) as KBMatch[];
-    }
-
-    if (faqRes.error) {
-      console.warn('[AI] FAQ search failed:', faqRes.error.message);
-    } else {
-      faqMatches = (faqRes.data ?? []) as FAQMatch[];
-    }
-
-    if (snippetRes.error) {
-      console.warn('[AI] Snippet search failed:', snippetRes.error.message);
-    } else {
-      snippetMatches = (snippetRes.data ?? []) as SnippetMatch[];
-    }
-
-    console.log(`[AI] RAG: ${snippetMatches.length} snippets, ${kbMatches.length} KB articles, ${faqMatches.length} FAQs`);
-  } catch (embedErr) {
-    console.warn('[AI] Embedding/search failed — responding without KB context:', embedErr);
-  }
+  const { retrieval, knowledge, ms: retrievalMs } = await consultKnowledge(
+    supabase, apiKey, message, toConversationTurns(history), onUsage,
+  );
+  const kbMatches = knowledge.articles;
 
   // Diagnóstico de infra (P1) — aguarda o probe iniciado em paralelo com o RAG
   const probeResults = await probePromise;
@@ -1599,7 +1968,7 @@ export async function runAiPipeline(
 
   // ── Step 3: prompt + LLM ─────────────────────────────────────────────────────
   const clientName = contactInfo?.customer?.name || fallbackName;
-  let systemPrompt = buildSystemPrompt(kbMatches, faqMatches, snippetMatches, clientName, contactInfo, isFirstMessage, diagnosticsSection);
+  let systemPrompt = buildSystemPrompt(knowledge, clientName, contactInfo, isFirstMessage, diagnosticsSection);
   systemPrompt += `\n${META_INSTRUCTION}`;
 
   if (imageUrl) {
@@ -1651,12 +2020,11 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
   chatMessages.push({ role: 'user', content: userContent });
 
   const llmStart = Date.now();
-  const llm = await callLLM(apiKey, systemPrompt, chatMessages);
+  const { llm, rawReply, analysis, audit } = await writeAuditedReply(apiKey, systemPrompt, chatMessages, {
+    question: knowledge.question ?? message,
+    evidence: buildAuditEvidence(knowledge, contactInfo, diagnosticsSection),
+  }, onUsage);
   const latencyMs = Date.now() - llmStart;
-
-  const { text: replyWithoutMeta, analysis } = parseMetaBlock(llm.content);
-  const rawReply = replyWithoutMeta;
-  console.log(`[AI] Reply: "${rawReply.substring(0, 80)}" meta=${JSON.stringify(analysis)} latency=${latencyMs}ms`);
 
   const isStarterClient = isStarterOnlyClient(contactInfo);
   const should_handoff = !isDraft && !isStarterClient && rawReply.includes(TRANSFER_KEYWORD);
@@ -1757,7 +2125,7 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
   // é descartado, e com botão de credenciais na tela o próximo passo do cliente
   // é o clique, não a leitura de um artigo.
   if (!should_handoff && !metadata?.credential_actions && sources.cited === 0) {
-    reply = ensureSourceLink(reply, kbMatches);
+    reply = ensureSourceLink(reply, knowledge);
   }
 
   // Última barreira: o modelo só publica URL que já estava na entrada dele.
@@ -1795,15 +2163,16 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
   void logInteraction(supabase, {
     conversationId,
     model: llm.model,
-    usage: llm.usage,
-    latencyMs,
+    usage,
+    latencyMs: latencyMs + retrievalMs,
     wasEscalated: should_handoff,
     analysis,
     kbIds: kbMatches.map((k) => k.id),
-    faqIds: faqMatches.map((f) => f.id),
-    snippetIds: snippetMatches.map((s) => s.id),
+    snippetIds: knowledge.snippets.map((s) => s.id),
     draft: isDraft,
     removedLinks,
+    retrieval: retrievalLog(retrieval, knowledge, retrievalMs),
+    audit,
   });
 
   // Modo draft: só devolve o texto limpo para o operador revisar.
