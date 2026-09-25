@@ -93,6 +93,37 @@ export async function verifyOperator(req: Request): Promise<string | null> {
 }
 
 /**
+ * true quando a chamada vem com uma chave de serviço deste projeto — scripts
+ * de manutenção (ex.: scripts/reindex-kb.ts). Nunca exposta no front.
+ *
+ * Comparar com SUPABASE_SERVICE_ROLE_KEY não basta: o projeto tem a chave em
+ * dois formatos (JWT legado, que o CLI entrega, e sb_secret_, que o runtime
+ * pode injetar), e o script pode chegar com qualquer um. Então a prova é pela
+ * capacidade: só chave de serviço lista usuários na API admin do Auth.
+ */
+export async function isServiceRoleRequest(req: Request): Promise<boolean> {
+  const auth = req.headers.get('Authorization') ?? '';
+  if (!auth.startsWith('Bearer ')) return false;
+  const token = auth.slice('Bearer '.length).trim();
+  if (!token) return false;
+
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (serviceKey && timingSafeEqual(token, serviceKey)) return true;
+
+  const supabaseUrl = Deno.env.get('SUPABASE_URL');
+  if (!supabaseUrl) return false;
+  try {
+    const res = await fetch(`${supabaseUrl}/auth/v1/admin/users?page=1&per_page=1`, {
+      headers: { apikey: token, Authorization: `Bearer ${token}` },
+    });
+    await res.body?.cancel();
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Resolve a identidade de uma chamada do widget.
  *
  * Ordem:

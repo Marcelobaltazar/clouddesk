@@ -33,15 +33,19 @@ import {
   X,
   Cpu,
   Sparkles,
+  Loader2,
+  AlertTriangle,
 } from "lucide-react";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
+import type { IndexStatusFields, KbIndexTable } from "@/lib/kb-index";
 import { cn } from "@/lib/utils";
+import { indexDocument, indexState } from "@/lib/kb-index";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-interface Article {
+interface Article extends IndexStatusFields {
   id: string;
   title: string;
   content: string;
@@ -50,17 +54,25 @@ interface Article {
   is_published: boolean;
   created_at: string;
   updated_at: string;
-  embedding: unknown;
 }
 
-interface Snippet {
+interface Snippet extends IndexStatusFields {
   id: string;
   title: string;
   content: string;
   category: string | null;
   created_at: string;
-  embedding: unknown;
 }
+
+/** Documento cujo índice não está em dia com o texto (ver kb-index.ts). */
+interface PendingDoc {
+  table: KbIndexTable;
+  id: string;
+  title: string;
+}
+
+/** Update/delete que o RLS barrou volta "sucesso" com zero linhas. */
+const NO_ROW_MESSAGE = "Nenhum registro foi alterado. Confira se você está logado como operador e recarregue a página.";
 
 type FilterStatus = "all" | "published" | "draft";
 type ActiveTab = "articles" | "snippets";
@@ -83,7 +95,6 @@ export default function Knowledge() {
   const [sheetOpen, setSheetOpen]         = useState(false);
   const [editing, setEditing]             = useState<Article | null>(null);
   const [saving, setSaving]               = useState(false);
-  const [embedding, setEmbedding]         = useState(false);
   const [form, setForm] = useState({ title: "", content: "", category: "", is_published: false });
   const [deleteTarget, setDeleteTarget]   = useState<Article | null>(null);
   const [deleting, setDeleting]           = useState(false);
@@ -95,10 +106,16 @@ export default function Knowledge() {
   const [snippetSheetOpen, setSnippetSheetOpen] = useState(false);
   const [editingSnippet, setEditingSnippet] = useState<Snippet | null>(null);
   const [savingSnippet, setSavingSnippet] = useState(false);
-  const [embeddingSnippet, setEmbeddingSnippet] = useState(false);
   const [snippetForm, setSnippetForm]     = useState({ title: "", content: "", category: "" });
   const [deleteSnippetTarget, setDeleteSnippetTarget] = useState<Snippet | null>(null);
   const [deletingSnippet, setDeletingSnippet] = useState(false);
+
+  // ── Índice da IA ────────────────────────────────────────────────────────────
+  // id → rótulo de progresso ("Indexando 2/5") dos documentos sendo indexados.
+  const [indexing, setIndexing]           = useState<Record<string, string>>({});
+  // Tudo (artigos + snippets) cujo índice não bate com o texto atual.
+  const [pendingIndex, setPendingIndex]   = useState<PendingDoc[]>([]);
+  const [bulkIndexing, setBulkIndexing]   = useState(false);
 
   // ── Load articles (paginação real no servidor via .range) ─────────────────────
   // Busca, filtros e paginação são aplicados na própria query: nunca carregamos a
@@ -108,7 +125,7 @@ export default function Knowledge() {
 
     let query = supabase
       .from("desk_knowledge_base")
-      .select("id, title, content, category, tags, is_published, created_at, updated_at, embedding", { count: "exact" })
+      .select("id, title, content, category, tags, is_published, created_at, updated_at, content_hash, indexed_hash, index_chunks, index_error, indexed_at", { count: "exact" })
       .order("updated_at", { ascending: false });
 
     const q = search.trim();
@@ -136,7 +153,7 @@ export default function Knowledge() {
     setSnippetsLoading(true);
     const { data, error } = await supabase
       .from("desk_ai_snippets")
-      .select("id, title, content, category, created_at, embedding")
+      .select("id, title, content, category, created_at, content_hash, indexed_hash, index_chunks, index_error, indexed_at")
       .order("created_at", { ascending: false });
 
     if (error) {
@@ -172,6 +189,83 @@ export default function Knowledge() {
   }, []);
 
   useEffect(() => { loadStats(); }, [loadStats]);
+
+  // ── Saúde do índice da IA (base inteira, não só a página atual) ──────────────
+  // ~130 linhas leves (sem conteúdo): cabe carregar tudo.
+  const loadIndexHealth = useCallback(async () => {
+    const cols = "id, title, content_hash, indexed_hash, index_chunks, index_error, indexed_at";
+    const [arts, snips] = await Promise.all([
+      supabase.from("desk_knowledge_base").select(cols),
+      supabase.from("desk_ai_snippets").select(cols),
+    ]);
+    if (arts.error || snips.error) {
+      console.warn("[Knowledge] saúde do índice:", arts.error?.message ?? snips.error?.message);
+      return;
+    }
+    const pending = (table: KbIndexTable) => (row: IndexStatusFields & { id: string; title: string }) =>
+      indexState(row) === "indexed" ? [] : [{ table, id: row.id, title: row.title }];
+    setPendingIndex([
+      ...(arts.data ?? []).flatMap(pending("desk_knowledge_base")),
+      ...(snips.data ?? []).flatMap(pending("desk_ai_snippets")),
+    ]);
+  }, []);
+
+  useEffect(() => { loadIndexHealth(); }, [loadIndexHealth]);
+
+  /**
+   * (Re)indexa um documento para a IA, lote a lote, com o progresso no selo da
+   * linha. Falha SEMPRE aparece — antes o reindex ao salvar era silencioso, e o
+   * artigo seguia "Indexado" com o texto antigo.
+   */
+  const runIndex = async (table: KbIndexTable, id: string, opts: { quietSuccess?: boolean } = {}) => {
+    setIndexing((m) => ({ ...m, [id]: "Indexando…" }));
+    try {
+      const { chunks } = await indexDocument(table, id, (done, total) =>
+        setIndexing((m) => ({ ...m, [id]: total > 0 ? `Indexando ${Math.min(done, total)}/${total}` : "Indexando…" })),
+      );
+      if (!opts.quietSuccess) {
+        toast.success("Índice da IA atualizado", { description: `${chunks} trecho(s) prontos para a IA consultar` });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Erro inesperado";
+      console.warn("[Knowledge] indexação falhou:", msg);
+      toast.error(
+        table === "desk_knowledge_base" ? "A IA não conseguiu indexar o artigo" : "A IA não conseguiu indexar o snippet",
+        { description: `${msg} — use o botão de indexar na linha para tentar de novo.` },
+      );
+    } finally {
+      setIndexing(({ [id]: _done, ...rest }) => rest);
+      if (table === "desk_knowledge_base") await loadArticles();
+      else await loadSnippets();
+      await loadIndexHealth();
+    }
+  };
+
+  const indexAllPending = async () => {
+    const queue = pendingIndex;
+    if (queue.length === 0) return;
+    setBulkIndexing(true);
+    const toastId = toast.loading(`Indexando 0/${queue.length}…`);
+    const failed: string[] = [];
+    for (const [i, doc] of queue.entries()) {
+      try {
+        await indexDocument(doc.table, doc.id);
+      } catch (err) {
+        failed.push(`${doc.title}: ${err instanceof Error ? err.message : "erro"}`);
+      }
+      toast.loading(`Indexando ${i + 1}/${queue.length}…`, { id: toastId });
+    }
+    if (failed.length > 0) {
+      toast.error(`${queue.length - failed.length} indexado(s), ${failed.length} com erro`, {
+        id: toastId,
+        description: failed.slice(0, 3).join(" · "),
+      });
+    } else {
+      toast.success(`${queue.length} documento(s) indexado(s) para a IA`, { id: toastId });
+    }
+    setBulkIndexing(false);
+    await Promise.all([loadArticles(), loadSnippets(), loadIndexHealth()]);
+  };
 
   // Lista exibida = página atual já filtrada no servidor.
   const filtered = articles;
@@ -209,11 +303,14 @@ export default function Knowledge() {
     };
 
     let savedId: string | null = editing?.id ?? null;
-    let saveError: unknown = null;
+    let saveError: { message: string } | null = null;
 
+    // `.select("id")` em tudo: sem permissão, o Supabase responde "sucesso" com
+    // zero linhas — sem conferir, o painel dizia "salvo" e a IA seguia com o
+    // texto antigo.
     if (editing) {
-      const { error } = await supabase.from("desk_knowledge_base").update(payload).eq("id", editing.id);
-      saveError = error;
+      const { data, error } = await supabase.from("desk_knowledge_base").update(payload).eq("id", editing.id).select("id");
+      saveError = error ?? (data?.length ? null : { message: NO_ROW_MESSAGE });
     } else {
       const { data, error } = await supabase.from("desk_knowledge_base").insert(payload).select("id").single();
       saveError = error;
@@ -221,8 +318,7 @@ export default function Knowledge() {
     }
 
     if (saveError) {
-      const err = saveError as { message: string };
-      toast.error("Erro ao salvar artigo", { description: err.message });
+      toast.error("Erro ao salvar artigo", { description: saveError.message });
       setSaving(false);
       return;
     }
@@ -233,40 +329,16 @@ export default function Knowledge() {
     loadArticles();
     loadStats();
 
-    if (savedId) generateArticleEmbedding(savedId, `${payload.title}\n\n${payload.content}`, { silent: true });
-  };
-
-  const generateArticleEmbedding = async (id: string, content: string, opts?: { silent?: boolean }) => {
-    setEmbedding(true);
-    try {
-      const { data, error: fnErr } = await supabase.functions.invoke("desk-embed-article", {
-        body: { id, content, table: "desk_knowledge_base" },
-      });
-      // Edge Functions devolvem 4xx/5xx como erro do invoke OU como { error } no corpo.
-      const bodyErr = (data as { error?: string } | null)?.error;
-      if (fnErr || bodyErr) {
-        const msg = bodyErr ?? fnErr?.message ?? "Falha desconhecida";
-        console.warn("[Knowledge] Embedding failed:", msg);
-        if (!opts?.silent) toast.error("Erro ao gerar índice do artigo", { description: msg });
-      } else {
-        if (!opts?.silent) toast.success("Índice semântico gerado");
-        await loadArticles();
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Erro inesperado";
-      console.warn("[Knowledge] Embedding error:", msg);
-      if (!opts?.silent) toast.error("Erro ao gerar índice do artigo", { description: msg });
-    } finally {
-      setEmbedding(false);
-    }
+    // O sucesso já foi avisado acima; do índice só o erro interessa.
+    if (savedId) runIndex("desk_knowledge_base", savedId, { quietSuccess: true });
   };
 
   const handleTogglePublish = async (article: Article) => {
     const next = !article.is_published;
-    const { error } = await supabase.from("desk_knowledge_base")
-      .update({ is_published: next, updated_at: new Date().toISOString() }).eq("id", article.id);
-    if (error) {
-      toast.error("Erro ao alterar status", { description: error.message });
+    const { data, error } = await supabase.from("desk_knowledge_base")
+      .update({ is_published: next, updated_at: new Date().toISOString() }).eq("id", article.id).select("id");
+    if (error || !data?.length) {
+      toast.error("Erro ao alterar status", { description: error?.message ?? NO_ROW_MESSAGE });
     } else {
       toast.success(next ? "Artigo publicado" : "Artigo despublicado");
       setArticles((prev) => prev.map((a) => (a.id === article.id ? { ...a, is_published: next } : a)));
@@ -277,14 +349,16 @@ export default function Knowledge() {
   const handleDelete = async () => {
     if (!deleteTarget) return;
     setDeleting(true);
-    const { error } = await supabase.from("desk_knowledge_base").delete().eq("id", deleteTarget.id);
-    if (error) {
-      toast.error("Erro ao excluir artigo", { description: error.message });
+    const { data, error } = await supabase.from("desk_knowledge_base").delete().eq("id", deleteTarget.id).select("id");
+    if (error || !data?.length) {
+      toast.error("Erro ao excluir artigo", { description: error?.message ?? NO_ROW_MESSAGE });
     } else {
-      toast.success("Artigo excluído");
+      // Os trechos da IA saem junto (FK ON DELETE CASCADE em desk_kb_chunks).
+      toast.success("Artigo excluído", { description: "A IA deixa de usá-lo imediatamente." });
       setArticles((prev) => prev.filter((a) => a.id !== deleteTarget.id));
       setTotalCount((c) => Math.max(0, c - 1));
       loadStats();
+      loadIndexHealth();
     }
     setDeleting(false);
     setDeleteTarget(null);
@@ -316,11 +390,11 @@ export default function Knowledge() {
     };
 
     let savedId: string | null = editingSnippet?.id ?? null;
-    let saveError: unknown = null;
+    let saveError: { message: string } | null = null;
 
     if (editingSnippet) {
-      const { error } = await supabase.from("desk_ai_snippets").update(payload).eq("id", editingSnippet.id);
-      saveError = error;
+      const { data, error } = await supabase.from("desk_ai_snippets").update(payload).eq("id", editingSnippet.id).select("id");
+      saveError = error ?? (data?.length ? null : { message: NO_ROW_MESSAGE });
     } else {
       const { data, error } = await supabase.from("desk_ai_snippets").insert(payload).select("id").single();
       saveError = error;
@@ -328,8 +402,7 @@ export default function Knowledge() {
     }
 
     if (saveError) {
-      const err = saveError as { message: string };
-      toast.error("Erro ao salvar snippet", { description: err.message });
+      toast.error("Erro ao salvar snippet", { description: saveError.message });
       setSavingSnippet(false);
       return;
     }
@@ -339,42 +412,19 @@ export default function Knowledge() {
     setSnippetSheetOpen(false);
     loadSnippets();
 
-    if (savedId) generateSnippetEmbedding(savedId, `${payload.title}\n\n${payload.content}`, { silent: true });
-  };
-
-  const generateSnippetEmbedding = async (id: string, content: string, opts?: { silent?: boolean }) => {
-    setEmbeddingSnippet(true);
-    try {
-      const { data, error: fnErr } = await supabase.functions.invoke("desk-embed-article", {
-        body: { id, content, table: "desk_ai_snippets" },
-      });
-      const bodyErr = (data as { error?: string } | null)?.error;
-      if (fnErr || bodyErr) {
-        const msg = bodyErr ?? fnErr?.message ?? "Falha desconhecida";
-        console.warn("[Snippets] Embedding failed:", msg);
-        if (!opts?.silent) toast.error("Erro ao indexar snippet", { description: msg });
-      } else {
-        if (!opts?.silent) toast.success("Snippet indexado");
-        await loadSnippets();
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Erro inesperado";
-      console.warn("[Snippets] Embedding error:", msg);
-      if (!opts?.silent) toast.error("Erro ao indexar snippet", { description: msg });
-    } finally {
-      setEmbeddingSnippet(false);
-    }
+    if (savedId) runIndex("desk_ai_snippets", savedId, { quietSuccess: true });
   };
 
   const handleDeleteSnippet = async () => {
     if (!deleteSnippetTarget) return;
     setDeletingSnippet(true);
-    const { error } = await supabase.from("desk_ai_snippets").delete().eq("id", deleteSnippetTarget.id);
-    if (error) {
-      toast.error("Erro ao excluir snippet", { description: error.message });
+    const { data, error } = await supabase.from("desk_ai_snippets").delete().eq("id", deleteSnippetTarget.id).select("id");
+    if (error || !data?.length) {
+      toast.error("Erro ao excluir snippet", { description: error?.message ?? NO_ROW_MESSAGE });
     } else {
-      toast.success("Snippet excluído");
+      toast.success("Snippet excluído", { description: "A IA deixa de usá-lo imediatamente." });
       setSnippets((prev) => prev.filter((s) => s.id !== deleteSnippetTarget.id));
+      loadIndexHealth();
     }
     setDeletingSnippet(false);
     setDeleteSnippetTarget(null);
@@ -396,15 +446,30 @@ export default function Knowledge() {
               </p>
             </div>
           </div>
-          {activeTab === "articles" ? (
-            <Button size="sm" onClick={openNew} className="gap-1.5">
-              <Plus className="h-4 w-4" /> Novo Artigo
-            </Button>
-          ) : (
-            <Button size="sm" onClick={openNewSnippet} className="gap-1.5">
-              <Plus className="h-4 w-4" /> Novo Snippet
-            </Button>
-          )}
+          <div className="flex items-center gap-2">
+            {pendingIndex.length > 0 && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={indexAllPending}
+                disabled={bulkIndexing}
+                className="gap-1.5 border-amber-500/40 text-amber-500 hover:text-amber-400"
+                title={pendingIndex.slice(0, 8).map((d) => d.title).join("\n")}
+              >
+                {bulkIndexing ? <Loader2 className="h-4 w-4 animate-spin" /> : <AlertTriangle className="h-4 w-4" />}
+                {bulkIndexing ? "Indexando…" : `Indexar pendentes (${pendingIndex.length})`}
+              </Button>
+            )}
+            {activeTab === "articles" ? (
+              <Button size="sm" onClick={openNew} className="gap-1.5">
+                <Plus className="h-4 w-4" /> Novo Artigo
+              </Button>
+            ) : (
+              <Button size="sm" onClick={openNewSnippet} className="gap-1.5">
+                <Plus className="h-4 w-4" /> Novo Snippet
+              </Button>
+            )}
+          </div>
         </div>
 
         {/* Stats row (articles only) */}
@@ -515,7 +580,8 @@ export default function Knowledge() {
                     onEdit={() => openEdit(article)}
                     onTogglePublish={() => handleTogglePublish(article)}
                     onDelete={() => setDeleteTarget(article)}
-                    onRegenerate={() => generateArticleEmbedding(article.id, `${article.title}\n\n${article.content}`)}
+                    onRegenerate={() => runIndex("desk_knowledge_base", article.id)}
+                    indexingLabel={indexing[article.id]}
                   />
                 ))}
               </div>
@@ -581,7 +647,8 @@ export default function Knowledge() {
                     snippet={s}
                     onEdit={() => openEditSnippet(s)}
                     onDelete={() => setDeleteSnippetTarget(s)}
-                    onRegenerate={() => generateSnippetEmbedding(s.id, `${s.title}\n\n${s.content}`)}
+                    onRegenerate={() => runIndex("desk_ai_snippets", s.id)}
+                    indexingLabel={indexing[s.id]}
                   />
                 ))}
               </div>
@@ -627,7 +694,7 @@ export default function Knowledge() {
             </div>
           </div>
           <SheetFooter className="px-6 py-4 border-t border-border shrink-0 flex items-center justify-between gap-2">
-            {embedding ? <p className="text-[11px] text-muted-foreground animate-pulse">Gerando embedding...</p> : <span />}
+            <span />
             <div className="flex gap-2">
               <Button variant="outline" onClick={() => setSheetOpen(false)}>Cancelar</Button>
               <Button onClick={handleSave} disabled={saving}>{saving ? "Salvando..." : editing ? "Salvar alterações" : "Criar artigo"}</Button>
@@ -668,7 +735,7 @@ export default function Knowledge() {
             </div>
           </div>
           <SheetFooter className="px-6 py-4 border-t border-border shrink-0 flex items-center justify-between gap-2">
-            {embeddingSnippet ? <p className="text-[11px] text-muted-foreground animate-pulse">Indexando snippet...</p> : <span />}
+            <span />
             <div className="flex gap-2">
               <Button variant="outline" onClick={() => setSnippetSheetOpen(false)}>Cancelar</Button>
               <Button onClick={handleSaveSnippet} disabled={savingSnippet}>{savingSnippet ? "Salvando..." : editingSnippet ? "Salvar alterações" : "Criar snippet"}</Button>
@@ -724,16 +791,18 @@ function ArticleRow({
   onTogglePublish,
   onDelete,
   onRegenerate,
+  indexingLabel,
 }: {
   article: Article;
   onEdit: () => void;
   onTogglePublish: () => void;
   onDelete: () => void;
   onRegenerate: () => void;
+  indexingLabel?: string;
 }) {
   const preview = article.content.replace(/[#*`>-]/g, "").slice(0, 140).trim();
   const updatedAt = format(new Date(article.updated_at), "dd MMM yyyy", { locale: ptBR });
-  const hasEmbedding = article.embedding != null;
+  const inSync = indexState(article) === "indexed";
 
   return (
     <div className="px-6 py-4 hover:bg-surface transition-colors group flex items-start gap-4">
@@ -747,7 +816,7 @@ function ArticleRow({
             <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2 leading-relaxed">{preview || "Sem conteúdo"}</p>
           </div>
           <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-            <Button variant="ghost" size="icon" className={cn("h-7 w-7", hasEmbedding ? "text-muted-foreground hover:text-primary" : "text-amber-500 hover:text-amber-400")} onClick={onRegenerate} title={hasEmbedding ? "Regenerar embedding" : "Gerar embedding (ausente)"}>
+            <Button variant="ghost" size="icon" className={cn("h-7 w-7", inSync ? "text-muted-foreground hover:text-primary" : "text-amber-500 hover:text-amber-400")} onClick={onRegenerate} disabled={!!indexingLabel} title="Indexar de novo para a IA">
               <Cpu className="h-3.5 w-3.5" />
             </Button>
             <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-foreground" onClick={onTogglePublish} title={article.is_published ? "Despublicar" : "Publicar"}>
@@ -765,10 +834,7 @@ function ArticleRow({
           <Badge variant="outline" className={cn("text-[10px] h-4 px-1.5 border", article.is_published ? "text-emerald-500 border-emerald-500/30 bg-emerald-500/5" : "text-muted-foreground border-border")}>
             {article.is_published ? "Publicado" : "Rascunho"}
           </Badge>
-          <Badge variant="outline" className={cn("text-[10px] h-4 px-1.5 border gap-0.5", hasEmbedding ? "text-primary border-primary/30 bg-primary/5" : "text-amber-500 border-amber-500/30 bg-amber-500/5")}>
-            <Cpu className="h-2.5 w-2.5" />
-            {hasEmbedding ? "Indexado" : "Sem índice"}
-          </Badge>
+          <IndexBadge doc={article} indexingLabel={indexingLabel} />
           {article.category && (
             <Badge variant="outline" className="text-[10px] h-4 px-1.5 text-muted-foreground">{article.category}</Badge>
           )}
@@ -786,15 +852,17 @@ function SnippetRow({
   onEdit,
   onDelete,
   onRegenerate,
+  indexingLabel,
 }: {
   snippet: Snippet;
   onEdit: () => void;
   onDelete: () => void;
   onRegenerate: () => void;
+  indexingLabel?: string;
 }) {
   const preview = snippet.content.slice(0, 160).trim();
   const createdAt = format(new Date(snippet.created_at), "dd MMM yyyy", { locale: ptBR });
-  const hasEmbedding = snippet.embedding != null;
+  const inSync = indexState(snippet) === "indexed";
 
   return (
     <div className="px-6 py-4 hover:bg-surface transition-colors group flex items-start gap-4">
@@ -808,7 +876,7 @@ function SnippetRow({
             <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2 leading-relaxed font-mono">{preview || "Sem conteúdo"}</p>
           </div>
           <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-            <Button variant="ghost" size="icon" className={cn("h-7 w-7", hasEmbedding ? "text-muted-foreground hover:text-primary" : "text-amber-500 hover:text-amber-400")} onClick={onRegenerate} title={hasEmbedding ? "Regenerar índice semântico" : "Gerar índice (ausente)"}>
+            <Button variant="ghost" size="icon" className={cn("h-7 w-7", inSync ? "text-muted-foreground hover:text-primary" : "text-amber-500 hover:text-amber-400")} onClick={onRegenerate} disabled={!!indexingLabel} title="Indexar de novo para a IA">
               <Cpu className="h-3.5 w-3.5" />
             </Button>
             <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-foreground" onClick={onEdit} title="Editar">
@@ -823,10 +891,7 @@ function SnippetRow({
           <Badge variant="outline" className="text-[10px] h-4 px-1.5 border text-indigo-500 border-indigo-500/30 bg-indigo-500/5">
             Somente IA
           </Badge>
-          <Badge variant="outline" className={cn("text-[10px] h-4 px-1.5 border gap-0.5", hasEmbedding ? "text-primary border-primary/30 bg-primary/5" : "text-amber-500 border-amber-500/30 bg-amber-500/5")}>
-            <Cpu className="h-2.5 w-2.5" />
-            {hasEmbedding ? "Indexado" : "Sem índice"}
-          </Badge>
+          <IndexBadge doc={snippet} indexingLabel={indexingLabel} />
           {snippet.category && (
             <Badge variant="outline" className="text-[10px] h-4 px-1.5 text-muted-foreground">{snippet.category}</Badge>
           )}
@@ -838,6 +903,49 @@ function SnippetRow({
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Selo do índice da IA. "Indexado" só quando os trechos são do texto ATUAL. */
+function IndexBadge({ doc, indexingLabel }: { doc: IndexStatusFields; indexingLabel?: string }) {
+  if (indexingLabel) {
+    return (
+      <Badge variant="outline" className="text-[10px] h-4 px-1.5 border gap-1 text-primary border-primary/30 bg-primary/5">
+        <Loader2 className="h-2.5 w-2.5 animate-spin" />
+        {indexingLabel}
+      </Badge>
+    );
+  }
+
+  const indexedAt = doc.indexed_at ? format(new Date(doc.indexed_at), "dd/MM/yyyy HH:mm") : null;
+  const view = {
+    indexed: {
+      text: doc.index_chunks ? `Indexado · ${doc.index_chunks} trechos` : "Indexado",
+      cls: "text-primary border-primary/30 bg-primary/5",
+      hint: `A IA consulta a versão atual${indexedAt ? ` (indexada em ${indexedAt})` : ""}.`,
+    },
+    stale: {
+      text: "Índice desatualizado",
+      cls: "text-amber-500 border-amber-500/30 bg-amber-500/5",
+      hint: "O texto mudou depois da última indexação: a IA ainda consulta a versão antiga. Clique em indexar.",
+    },
+    error: {
+      text: "Erro no índice",
+      cls: "text-rose-500 border-rose-500/30 bg-rose-500/5",
+      hint: `A última indexação falhou: ${doc.index_error ?? "motivo desconhecido"}`,
+    },
+    missing: {
+      text: "Sem índice",
+      cls: "text-amber-500 border-amber-500/30 bg-amber-500/5",
+      hint: "A IA não encontra este documento. Clique em indexar.",
+    },
+  }[indexState(doc)];
+
+  return (
+    <Badge variant="outline" title={view.hint} className={cn("text-[10px] h-4 px-1.5 border gap-0.5", view.cls)}>
+      <Cpu className="h-2.5 w-2.5" />
+      {view.text}
+    </Badge>
+  );
+}
 
 function StatPill({ label, value, variant = "default" }: { label: string; value: number; variant?: "default" | "published" | "draft" }) {
   const cls = { default: "text-muted-foreground", published: "text-emerald-500", draft: "text-amber-500" }[variant];
