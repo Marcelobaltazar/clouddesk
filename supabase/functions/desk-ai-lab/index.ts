@@ -86,7 +86,9 @@ Deno.serve(async (req) => {
     // Mesma pós-produção do pipeline para o texto que o cliente veria.
     let reply = out.rawReply.replace(/\[OPCOES:[^\]]*\]|\[OFERECER_CREDENCIAIS\s*\]|\[ILUSTRAR\s*\]/gi, '');
     const sources = P.resolveSourceMarkers(reply, knowledge.articles);
-    reply = sources.cited === 0 ? P.ensureSourceLink(sources.text, knowledge) : sources.text;
+    // Marcador que sobrou (ex.: [FONTE:SNIPPET]) sai, como no pipeline.
+    reply = sources.text.replace(/\[\s*(?:FONTE\s*:[^\]]*|TRANSFERIR)\s*\]/gi, '').replace(/\n{3,}/g, '\n\n').trim();
+    if (sources.cited === 0) reply = P.ensureSourceLink(reply, knowledge);
 
     return json({
       reply,

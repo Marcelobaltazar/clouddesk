@@ -384,6 +384,10 @@ const AUX_MODEL = Deno.env.get('LLM_MODEL_FAST') ?? MAIN_MODEL;
 const ANSWER_TEMPERATURE = 0.3;
 /** Seletor e revisor não podem segurar o atendimento: estourou, segue sem eles. */
 const AUX_TIMEOUT_MS = 15_000;
+/** O JSON deles é curto, mas o raciocínio interno do Gemini 2.5 conta no mesmo
+ *  teto: com 1200 um seletor devolveu resposta vazia no teste. Só se paga o que
+ *  for usado. */
+const AUX_MAX_TOKENS = 4000;
 
 async function callLLM(
   apiKey: string,
@@ -442,7 +446,7 @@ async function auditReply(
 ): Promise<AuditVerdict | null> {
   try {
     const r = await callLLM(apiKey, AUDIT_SYSTEM_PROMPT, [{ role: 'user', content: buildAuditUserPrompt(input) }], {
-      model: AUX_MODEL, temperature: 0, maxTokens: 1200, timeoutMs: AUX_TIMEOUT_MS,
+      model: AUX_MODEL, temperature: 0, maxTokens: AUX_MAX_TOKENS, timeoutMs: AUX_TIMEOUT_MS,
     });
     onUsage(r.usage);
     const verdict = parseAuditVerdict(r.content);
@@ -1047,7 +1051,10 @@ Tente resolver tudo você mesma. Se não conseguir resolver, oriente o cliente a
     ? `
 [PRIMEIRA MENSAGEM — SAUDAÇÃO PROATIVA OBRIGATÓRIA]
 Esta é a primeira mensagem do cliente. NÃO pergunte apenas "Como posso ajudar?".
-Cumprimente pelo nome e apresente um resumo do que você já sabe sobre ele, no seguinte formato:
+Cumprimente pelo nome e apresente um resumo do que você já sabe sobre ele.
+- Se a mensagem dele JÁ traz uma pergunta ou um problema, responda em seguida, direto, e NÃO pergunte "sobre o que você precisa de ajuda" — ele já disse.
+- Se for só um cumprimento ou a escolha de um tema genérico (ex.: "Dúvida sobre plano"), termine perguntando em que pode ajudar.
+Formato da saudação:
 
 "Olá, ${contactInfo.customer.name}! Vi aqui no seu perfil:
 ${contactInfo.subscriptions.filter(s => s.status === 'active').map(s => {
@@ -1055,11 +1062,11 @@ ${contactInfo.subscriptions.filter(s => s.status === 'active').map(s => {
   return infra
     ? `• ${s.product} (sua infraestrutura: ${infra.default_domain || infra.purchase_code})`
     : `• ${s.product}`;
-}).join('\n')}
+}).join('\n')}"
 
-Sobre o que você precisa de ajuda hoje?"
+(e então a resposta à pergunta dele, ou "Sobre o que você precisa de ajuda hoje?" se ele ainda não perguntou nada)
 
-Se não houver assinaturas ativas, apenas cumprimente pelo nome e pergunte como pode ajudar.
+Se não houver assinaturas ativas, apenas cumprimente pelo nome e siga a mesma regra.
 Adapte o tom — não copie o formato acima palavra por palavra, mas inclua as informações.
 `
     : '';
@@ -1111,6 +1118,7 @@ Você NUNCA escreve a URL. Escreva só o marcador, com o número do artigo, em u
 Regras:
 - Usou o Artigo #2 para responder? Termine com [FONTE:2]. Sem exceção.
 - Um marcador por artigo, no máximo dois — cite os que realmente sustentaram a resposta, não a lista inteira.
+- Snippets não têm página na Central: nunca escreva marcador para snippet (nada de [FONTE:SNIPPET]).
 - Só fica sem marcador quando nenhum artigo tem a ver com a pergunta (saudação, status da infra do cliente, cobrança, papo solto).
 
 Isto vale para QUALQUER link: você não inventa, não adivinha e não "completa" endereços. Escrever uma URL que não veio dos blocos acima é um erro grave — ela é removida antes de chegar ao cliente e a resposta chega capenga.
@@ -1599,7 +1607,7 @@ async function consultKnowledge(
       search: (q, emb) => hybridSearch(supabase, q, emb),
       select: async (system, user) => {
         const r = await callLLM(apiKey, system, [{ role: 'user', content: user }], {
-          model: AUX_MODEL, temperature: 0, maxTokens: 1200, timeoutMs: AUX_TIMEOUT_MS,
+          model: AUX_MODEL, temperature: 0, maxTokens: AUX_MAX_TOKENS, timeoutMs: AUX_TIMEOUT_MS,
         });
         onUsage(r.usage);
         return r.content;

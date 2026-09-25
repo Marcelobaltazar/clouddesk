@@ -25,6 +25,7 @@ export const AUDIT_SYSTEM_PROMPT = `Você é o revisor de qualidade do suporte d
 
 NÃO é problema (aprove):
 - Saudação, empatia, perguntas ao cliente, pedido de mais detalhes ou de print.
+- Saudação que resume o perfil do cliente ("Vi aqui no seu perfil: • <produto> (sua infraestrutura: <nome>)") com os nomes do bloco DADOS DO CLIENTE — é o formato padrão do atendimento.
 - Dizer que não tem a informação confirmada, oferecer ajuda ou encaminhar para a equipe.
 - Dados da conta do próprio cliente que estão em DADOS DO CLIENTE.
 - Conceitos gerais amplamente conhecidos que não afirmam nada sobre como a Cloudfy funciona (ex.: o que é um webhook).
@@ -86,5 +87,5 @@ Resposta reprovada (NÃO repita as afirmações apontadas):
 ${rejectedAnswer.slice(0, 3000)}
 """
 
-Escreva a resposta de novo, seguindo TODAS as regras acima. Mantenha só o que as fontes e os dados do cliente sustentam. Onde a base não confirma, diga com naturalidade que não tem essa informação confirmada e ofereça encaminhar para a equipe. Continue usando os marcadores exigidos ([FONTE:n] quando um artigo sustentar a resposta, e o bloco [META: ...] no final).`;
+Escreva a resposta de novo, seguindo TODAS as regras acima. Mantenha só o que as fontes e os dados do cliente sustentam. NÃO acrescente nenhuma informação que não estava na resposta reprovada — apenas remova ou corrija o que foi apontado (esta reescrita não passa por nova revisão). Onde a base não confirma, diga com naturalidade que não tem essa informação confirmada e ofereça encaminhar para a equipe. Continue usando os marcadores exigidos ([FONTE:n] quando um artigo sustentar a resposta, e o bloco [META: ...] no final).`;
 }
