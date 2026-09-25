@@ -1,30 +1,42 @@
 // ─── desk-embed-article — indexa um artigo/snippet para a busca da IA ──────────
 //
-// POST { table, id }   (o campo `content` que o painel ainda manda é ignorado)
+// POST { table, id, offset?, hash? }   (o `content` que painéis antigos mandam é ignorado)
+//   → { ok, chunks, next, hash }       next = null quando terminou
 //
 // Lê o registro DO BANCO — o texto indexado é sempre o que está salvo, nunca o
-// que veio no body — e:
-//   1. gera o vetor do documento inteiro (coluna embedding; usado pela busca
-//      legada, que é o fallback do pipeline);
-//   2. refaz os trechos em desk_kb_chunks (busca híbrida da IA — ver
-//      _shared/kb-chunker.ts e _shared/ai-retrieval.ts).
+// que veio no body — e refaz os trechos em desk_kb_chunks (busca híbrida da IA,
+// ver _shared/kb-chunker.ts e _shared/ai-retrieval.ts), EM LOTES: cada chamada
+// gera no máximo BATCH vetores. Artigo com 8+ trechos numa chamada só estourava
+// o limite de CPU da Edge Function (HTTP 546) — 14 artigos longos falharam
+// assim na primeira reindexação. Quem chama repete com `offset = next` até
+// next = null (painel e scripts/reindex-kb.ts fazem isso).
 //
-// Quem pode chamar: operador logado no painel (salvar artigo/snippet) ou a
-// service role (scripts/reindex-kb.ts). Antes não havia verificação nenhuma: a
-// anon key é pública, e qualquer um podia trocar o que a IA lia de um artigo.
+// Status: só ao terminar o ÚLTIMO lote o registro ganha indexed_hash =
+// content_hash (o painel mostra "Indexado" só quando os dois batem). Erro vai
+// para index_error. `hash` amarra os lotes ao mesmo texto: se o artigo for
+// salvo no meio da indexação, a chamada seguinte recusa em vez de misturar
+// trechos de duas versões.
+//
+// Quem pode chamar: operador logado no painel ou chave de serviço (scripts).
 
 import { corsHeaders } from '../_shared/cors.ts';
-import { newServiceClient } from '../_shared/supabase.ts';
+import { newServiceClient, type ServiceClient } from '../_shared/supabase.ts';
 import { isServiceRoleRequest, verifyOperator } from '../_shared/widget-auth.ts';
-import { chunkArticle, chunkSnippet, type KbChunk } from '../_shared/kb-chunker.ts';
+import { chunkArticle, chunkSnippet } from '../_shared/kb-chunker.ts';
 
 type EmbeddableTable = 'desk_knowledge_base' | 'desk_faq' | 'desk_ai_snippets';
 
 const EMBEDDABLE_TABLES: EmbeddableTable[] = ['desk_knowledge_base', 'desk_faq', 'desk_ai_snippets'];
 
+/** Vetores por chamada. Artigos com até 7 passavam numa chamada só; 4 (+1 do
+ *  documento inteiro no primeiro lote) deixa folga. */
+const BATCH = 4;
+
 interface EmbedRequest {
   id?: string;
   table?: EmbeddableTable;
+  offset?: number;
+  hash?: string;
 }
 
 // ─── Embedding nativo do Supabase ───────────────────────────────────────────────
@@ -53,6 +65,13 @@ function json(body: Record<string, unknown>, status = 200): Response {
   });
 }
 
+/** Registra o erro no próprio documento, para o painel mostrar. Nunca lança. */
+async function recordError(supabase: ServiceClient, table: EmbeddableTable, id: string, message: string) {
+  if (table === 'desk_faq') return;
+  const { error } = await supabase.from(table).update({ index_error: message.slice(0, 500) }).eq('id', id);
+  if (error) console.warn(`[Embed] não consegui gravar o erro em ${table} ${id}:`, error.message);
+}
+
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
 Deno.serve(async (req) => {
@@ -60,13 +79,16 @@ Deno.serve(async (req) => {
     return new Response('ok', { headers: corsHeaders });
   }
 
+  let supabase: ServiceClient | null = null;
+  let target: { table: EmbeddableTable; id: string } | null = null;
+
   try {
     // Operador primeiro: é o caminho de todo artigo salvo no painel.
     if (!(await verifyOperator(req)) && !(await isServiceRoleRequest(req))) {
       return json({ error: 'Apenas operadores autenticados podem indexar artigos' }, 401);
     }
 
-    const { id, table }: EmbedRequest = await req.json().catch(() => ({}));
+    const { id, table, offset: rawOffset, hash }: EmbedRequest = await req.json().catch(() => ({}));
 
     if (!id || !table) {
       return json({ error: 'Missing required fields: id, table' }, 400);
@@ -75,7 +97,7 @@ Deno.serve(async (req) => {
       return json({ error: `table must be one of: ${EMBEDDABLE_TABLES.join(', ')}` }, 400);
     }
 
-    const supabase = newServiceClient();
+    supabase = newServiceClient();
 
     // ── FAQ: só o vetor do registro (não entra na busca híbrida) ─────────────
     if (table === 'desk_faq') {
@@ -85,28 +107,39 @@ Deno.serve(async (req) => {
       const embedding = await generateEmbedding(`${faq.question}\n\n${faq.answer}`);
       const { error: upErr } = await supabase.from('desk_faq').update({ embedding }).eq('id', id);
       if (upErr) throw new Error(`DB update error: ${upErr.message}`);
-      return json({ ok: true, chunks: 0 });
+      return json({ ok: true, chunks: 0, next: null });
     }
 
+    target = { table, id };
     const isArticle = table === 'desk_knowledge_base';
+    const idColumn = isArticle ? 'article_id' : 'snippet_id';
+
     const { data: doc, error: readErr } = await supabase
       .from(table)
-      .select('id, title, content')
+      .select('id, title, content, content_hash')
       .eq('id', id)
       .maybeSingle();
     if (readErr) throw new Error(`DB read error: ${readErr.message}`);
     if (!doc) return json({ error: 'Registro não encontrado' }, 404);
 
+    const contentHash = String(doc.content_hash ?? '');
+    if (hash && hash !== contentHash) {
+      return json({ error: 'O texto mudou durante a indexação. Clique em indexar de novo.' }, 409);
+    }
+
     const title = String(doc.title ?? '');
     const content = String(doc.content ?? '');
-    console.log(`[Embed] Indexando ${table} id=${id} "${title.slice(0, 60)}"`);
+    const chunks = isArticle ? chunkArticle(title, content) : chunkSnippet(title, content);
+    const total = chunks.length;
+    const start = Math.min(Math.max(0, Math.floor(Number(rawOffset) || 0)), Math.max(0, total - 1));
+    const batch = chunks.slice(start, start + BATCH);
+    const end = start + batch.length;
 
     // Tudo o que é lento (os vetores) acontece ANTES de mexer nos trechos
-    // antigos: a janela em que o artigo some da busca fica em milissegundos.
-    const docEmbedding = await generateEmbedding(`${title}\n\n${content}`);
-    const chunks: KbChunk[] = isArticle ? chunkArticle(title, content) : chunkSnippet(title, content);
+    // antigos: a janela em que o lote some da busca fica em milissegundos.
+    const docEmbedding = start === 0 ? await generateEmbedding(`${title}\n\n${content}`) : null;
     const rows = [];
-    for (const c of chunks) {
+    for (const c of batch) {
       rows.push({
         doc_type: isArticle ? 'article' : 'snippet',
         article_id: isArticle ? id : null,
@@ -119,23 +152,43 @@ Deno.serve(async (req) => {
       });
     }
 
-    const { error: upErr } = await supabase.from(table).update({ embedding: docEmbedding }).eq('id', id);
-    if (upErr) throw new Error(`DB update error: ${upErr.message}`);
+    if (docEmbedding) {
+      // Vetor do documento inteiro: usado pela busca antiga, que é o fallback.
+      const { error } = await supabase.from(table).update({ embedding: docEmbedding }).eq('id', id);
+      if (error) throw new Error(`DB update error: ${error.message}`);
+    }
 
     const { error: delErr } = await supabase
-      .from('desk_kb_chunks')
-      .delete()
-      .eq(isArticle ? 'article_id' : 'snippet_id', id);
+      .from('desk_kb_chunks').delete().eq(idColumn, id).gte('chunk_index', start).lt('chunk_index', end);
     if (delErr) throw new Error(`Chunk delete error: ${delErr.message}`);
 
     const { error: insErr } = await supabase.from('desk_kb_chunks').insert(rows);
     if (insErr) throw new Error(`Chunk insert error: ${insErr.message}`);
 
-    console.log(`[Embed] ${table} id=${id}: ${rows.length} trecho(s) indexado(s)`);
-    return json({ ok: true, chunks: rows.length });
+    if (end < total) {
+      console.log(`[Embed] ${table} ${id}: lote ${start}–${end - 1} de ${total}`);
+      return json({ ok: true, chunks: total, next: end, hash: contentHash });
+    }
+
+    // Último lote: some com trechos de uma versão anterior mais longa e marca
+    // o documento como indexado para ESTE texto.
+    const { error: tailErr } = await supabase.from('desk_kb_chunks').delete().eq(idColumn, id).gte('chunk_index', total);
+    if (tailErr) throw new Error(`Chunk cleanup error: ${tailErr.message}`);
+
+    const { error: statusErr } = await supabase.from(table).update({
+      indexed_hash: contentHash,
+      index_chunks: total,
+      index_error: null,
+      indexed_at: new Date().toISOString(),
+    }).eq('id', id);
+    if (statusErr) throw new Error(`Status update error: ${statusErr.message}`);
+
+    console.log(`[Embed] ${table} ${id} "${title.slice(0, 60)}": ${total} trecho(s) indexado(s)`);
+    return json({ ok: true, chunks: total, next: null, hash: contentHash });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
     console.error('[Embed] Error:', msg);
+    if (supabase && target) await recordError(supabase, target.table, target.id, msg);
     return json({ error: msg }, 500);
   }
 });

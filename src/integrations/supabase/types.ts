@@ -540,9 +540,14 @@ export type Database = {
         Row: {
           category: string | null
           content: string
+          content_hash: string | null
           created_at: string | null
           embedding: string | null
           id: string
+          index_chunks: number | null
+          index_error: string | null
+          indexed_at: string | null
+          indexed_hash: string | null
           title: string
           updated_at: string | null
         }
@@ -552,6 +557,10 @@ export type Database = {
           created_at?: string | null
           embedding?: string | null
           id?: string
+          index_chunks?: number | null
+          index_error?: string | null
+          indexed_at?: string | null
+          indexed_hash?: string | null
           title: string
           updated_at?: string | null
         }
@@ -561,6 +570,10 @@ export type Database = {
           created_at?: string | null
           embedding?: string | null
           id?: string
+          index_chunks?: number | null
+          index_error?: string | null
+          indexed_at?: string | null
+          indexed_hash?: string | null
           title?: string
           updated_at?: string | null
         }
@@ -893,10 +906,15 @@ export type Database = {
         Row: {
           category: string | null
           content: string
+          content_hash: string | null
           created_at: string | null
           created_by: string | null
           embedding: string | null
           id: string
+          index_chunks: number | null
+          index_error: string | null
+          indexed_at: string | null
+          indexed_hash: string | null
           is_published: boolean | null
           source: string | null
           source_id: string | null
@@ -911,6 +929,10 @@ export type Database = {
           created_by?: string | null
           embedding?: string | null
           id?: string
+          index_chunks?: number | null
+          index_error?: string | null
+          indexed_at?: string | null
+          indexed_hash?: string | null
           is_published?: boolean | null
           source?: string | null
           source_id?: string | null
@@ -925,6 +947,10 @@ export type Database = {
           created_by?: string | null
           embedding?: string | null
           id?: string
+          index_chunks?: number | null
+          index_error?: string | null
+          indexed_at?: string | null
+          indexed_hash?: string | null
           is_published?: boolean | null
           source?: string | null
           source_id?: string | null
