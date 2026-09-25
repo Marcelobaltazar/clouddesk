@@ -11,7 +11,9 @@
  * Artigos salvos pelo painel já se reindexam sozinhos.
  *
  * Uso:
- *   npx tsx scripts/reindex-kb.ts
+ *   npx tsx scripts/reindex-kb.ts            (tudo)
+ *   npx tsx scripts/reindex-kb.ts --pending  (só o que está com índice
+ *     desatualizado/ausente — ex.: depois de uma migration que muda o texto)
  *
  * Variáveis de ambiente (.env ou shell):
  *   VITE_SUPABASE_URL         — URL do projeto CloudDesk
@@ -71,13 +73,18 @@ async function main() {
   const failures: string[] = [];
   let chunks = 0;
 
+  const onlyPending = process.argv.includes('--pending');
+
   for (const table of ['desk_knowledge_base', 'desk_ai_snippets'] as Table[]) {
-    const { data, error } = await supabase.from(table).select('id, title').order('title');
+    const { data: rows, error } = await supabase
+      .from(table).select('id, title, content_hash, indexed_hash').order('title');
     if (error) {
       console.error(`❌  Erro ao listar ${table}: ${error.message}`);
       process.exit(1);
     }
-    console.log(`\n📄  ${table}: ${data.length} documento(s)`);
+    // Pendente = os trechos não são do texto atual (mesma regra do selo do painel).
+    const data = onlyPending ? rows.filter((r) => !r.indexed_hash || r.indexed_hash !== r.content_hash) : rows;
+    console.log(`\n📄  ${table}: ${data.length} documento(s)${onlyPending ? ` pendente(s) de ${rows.length}` : ''}`);
 
     for (const [i, doc] of data.entries()) {
       process.stdout.write(`[${i + 1}/${data.length}] ${doc.title.slice(0, 70)} … `);
