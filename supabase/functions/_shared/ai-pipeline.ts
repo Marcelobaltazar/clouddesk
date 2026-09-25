@@ -31,6 +31,7 @@ import {
 } from './contact-info.ts';
 import type { BillingInfo } from './chargefy.ts';
 import { collectUrls, enforceLinkAllowlist } from './link-guard.ts';
+import { HELP_CENTER_URL, hasLegacyHelpLink, legacyIntercomIds, rewriteLegacyHelpLinks } from './help-links.ts';
 import { broadcastToConversation } from './broadcast.ts';
 import {
   retrieveKnowledge,
@@ -170,6 +171,7 @@ export const _test = {
   buildAuditEvidence: (...a: Parameters<typeof buildAuditEvidence>) => buildAuditEvidence(...a),
   resolveSourceMarkers: (...a: Parameters<typeof resolveSourceMarkers>) => resolveSourceMarkers(...a),
   ensureSourceLink: (...a: Parameters<typeof ensureSourceLink>) => ensureSourceLink(...a),
+  modernizeHelpLinks: (...a: Parameters<typeof modernizeHelpLinks>) => modernizeHelpLinks(...a),
   META_INSTRUCTION: () => META_INSTRUCTION,
 };
 
@@ -239,8 +241,26 @@ async function applyPlanTag(
 }
 
 // ─── Help center URLs ─────────────────────────────────────────────────────────
+// Endereço fixo em help-links.ts — de propósito sem secret (ver o módulo).
 
-const HELP_CENTER_URL = (Deno.env.get('HELP_CENTER_URL') ?? 'https://clouddesk-omega.vercel.app').replace(/\/+$/, '');
+/** Troca link de Central antiga (domínio morto ou Intercom) pelo artigo
+ *  equivalente no endereço atual. Só consulta o banco se houver link antigo. */
+async function modernizeHelpLinks(supabase: ServiceClient, text: string): Promise<string> {
+  if (!text || !hasLegacyHelpLink(text)) return text;
+  const ids = legacyIntercomIds(text);
+  let published = new Set<string>();
+  if (ids.length > 0) {
+    const { data, error } = await supabase
+      .from('desk_knowledge_base')
+      .select('source_id')
+      .in('source_id', ids)
+      .eq('is_published', true);
+    if (error) console.warn('[AI] links antigos: consulta de artigos falhou:', error.message);
+    published = new Set(((data ?? []) as Array<{ source_id: string }>).map((r) => r.source_id));
+  }
+  console.log(`[AI] Links da Central antiga reescritos para ${HELP_CENTER_URL}`);
+  return rewriteLegacyHelpLinks(text, published);
+}
 
 // ─── Comunidade ───────────────────────────────────────────────────────────────
 // Grupos abertos a todos os clientes. O convite sai em duas janelas (ver
@@ -2176,6 +2196,11 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
     }
     reply = guarded.text;
   }
+
+  // Link de Central que não existe mais (vindo do texto de um artigo importado
+  // do Intercom ou do histórico) vira o artigo equivalente no endereço atual.
+  // Depois do guard: o endereço novo é nosso, não precisa de allow-list.
+  reply = await modernizeHelpLinks(supabase, reply);
 
   void logInteraction(supabase, {
     conversationId,

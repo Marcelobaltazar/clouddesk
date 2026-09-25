@@ -89,6 +89,7 @@ Deno.serve(async (req) => {
     // Marcador que sobrou (ex.: [FONTE:SNIPPET]) sai, como no pipeline.
     reply = sources.text.replace(/\[\s*(?:FONTE\s*:[^\]]*|TRANSFERIR)\s*\]/gi, '').replace(/\n{3,}/g, '\n\n').trim();
     if (sources.cited === 0) reply = P.ensureSourceLink(reply, knowledge);
+    reply = await P.modernizeHelpLinks(newServiceClient(), reply);
 
     return json({
       reply,
