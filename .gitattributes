@@ -1,0 +1,3 @@
+# SQL da base da IA: o texto entre $kbtxt$ vai literal para os artigos — CRLF
+# no checkout (core.autocrlf no Windows) gravaria \r no conteúdo da Central.
+docs/ia/*.sql text eol=lf
