@@ -6,7 +6,7 @@
 // técnico mandado para a fila financeira.
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { claimsAlreadyPaid, contestsBillingReading, detectBillingChange } from './support-intents.ts';
+import { claimsAlreadyPaid, contestsBillingReading, detectBillingChange, wantsAddonCancel } from './support-intents.ts';
 
 Deno.test('cobrança: problema técnico NÃO vai para a fila financeira', () => {
   for (const msg of [
@@ -98,5 +98,33 @@ Deno.test('contestação: frases parecidas que NÃO são contestação', () => {
     'meu pagamento não é aprovado no cartão',
   ]) {
     assertEquals(contestsBillingReading(msg), false, `não deveria detectar: "${msg}"`);
+  }
+});
+
+Deno.test('adicional: pedido de cancelar número/IA/backup vai para a equipe', () => {
+  for (const msg of [
+    'Como faço para cancelar meu número virtual? Eu contratei por engano',
+    'preciso cancelar o numero de WhatsApp e a IA ilimitada',
+    'gostaria de cancelar uns números virtuais sem derrubar minha infra',
+    'quero cancelar o backup diário',
+    'tem como cancelar IA ilimitada? solicitei sem querer',
+    'não quero mais o número virtual',
+    'desejo cancelar a contratação desse número, a plataforma não dá opção',
+  ]) {
+    assertEquals(wantsAddonCancel(msg), true, `deveria ir para a equipe: "${msg}"`);
+  }
+});
+
+Deno.test('adicional: cancelar o plano, ou mexer no número na Evolution, não é adicional', () => {
+  for (const msg of [
+    'quero cancelar meu plano',
+    'como cancelo a assinatura da minha infra?',
+    'preciso remover o número da instância da Evolution',
+    'o número foi bloqueado pela Meta, o que faço?',
+    'a IA ilimitada está dando erro de limite',
+    'vai conseguir resolver a questão da IA Ilimitada, ou vou precisar cancelar?',
+    'quero cancelar o plano e manter o número, dá?',
+  ]) {
+    assertEquals(wantsAddonCancel(msg), false, `não deveria ser adicional: "${msg}"`);
   }
 });

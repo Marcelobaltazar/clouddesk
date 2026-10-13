@@ -151,12 +151,14 @@ Deno.test('guard: todas as respostas fixas respeitam o tom e trazem o prazo calc
     _test.billingChangeReply('refund', w),
     _test.billingChangeReply('wrong_charge', w),
     _test.billingChangeReply('paid_but_blocked', w),
+    _test.addonCancelReply(w),
   ]) {
     assertTone(reply);
   }
   for (const reply of [
     _test.blockedAfterPaymentReply('sua infraestrutura', w),
     _test.billingChangeReply('refund', w),
+    _test.addonCancelReply(w),
   ]) {
     assertStringIncludes(reply, w);
   }

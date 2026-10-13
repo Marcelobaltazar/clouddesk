@@ -36,6 +36,7 @@ import {
   contestsBillingReading,
   detectBillingChange,
   mentionsPayment,
+  wantsAddonCancel,
   type BillingChangeKind,
 } from './support-intents.ts';
 import { humanReplyWindow } from './support-sla.ts';
@@ -176,6 +177,7 @@ export const _test = {
   cancelScheduledReply: (end: string) => cancelScheduledReply(end),
   cancelHandoffReply: (unpaid: boolean, w: string) => cancelHandoffReply(unpaid, w),
   billingChangeReply: (kind: BillingChangeKind, w: string) => billingChangeReply(kind, w),
+  addonCancelReply: (w: string) => addonCancelReply(w),
   BASE_SYSTEM_PROMPT: () => BASE_SYSTEM_PROMPT,
   friendlyDeployStatus: (v: string | null) => friendlyDeployStatus(v),
   communityInviteFor: (ctx: InviteContext) => communityInviteFor(ctx),
@@ -906,6 +908,14 @@ function cancelHandoffReply(unpaid: boolean, replyWindow: string): string {
   return (
     `${why}Já passei seu caso pra equipe, que vai te ajudar com o cancelamento — alguém te responde por aqui ${replyWindow}.\n\n` +
     `Se puder, me manda um print do que aparece quando vc tenta cancelar, que agiliza.`
+  );
+}
+
+function addonCancelReply(replyWindow: string): string {
+  return (
+    `Cancelar só um adicional (número virtual, IA Ilimitada, backup) é com a equipe — sua infraestrutura continua como está.\n\n` +
+    `Já passei seu pedido pra eles: alguém te responde por aqui ${replyWindow}. ` +
+    `Se ainda não disse, me fala qual adicional (e, se for número, qual número), que já fica tudo junto.`
   );
 }
 
@@ -2062,7 +2072,7 @@ export async function runAiPipeline(
     reply: string,
     model: string,
     intent: string,
-    urgency: 'alta' | 'critica' = 'alta',
+    urgency: 'media' | 'alta' | 'critica' = 'alta',
   ): Promise<PipelineOutcome> => {
     const { error: handoffErr } = await supabase
       .from('desk_conversations')
@@ -2120,6 +2130,15 @@ export async function runAiPipeline(
     return invoices.length > 0
       ? guardReply(blockedWithInvoiceReply(label, invoices), 'guard:blocked-infra-link', 'billing')
       : guardReply(blockedSelfServiceReply(label), 'guard:blocked-infra-selfservice', 'billing');
+  }
+
+  // Cancelar um ADICIONAL (número virtual, IA Ilimitada, backup): só a equipe
+  // de suporte consegue — o painel do cliente só cancela o plano inteiro.
+  // Mandar para Configurações → Faturamento aqui faria o cliente cancelar a
+  // infra sem querer. Vale para todos os planos.
+  if (!isDraft && wantsAddonCancel(message)) {
+    console.log('[AI] Guard cancelamento de adicional: equipe');
+    return await persistGuardHandoff(addonCancelReply(replyWindow), 'guard:cancel-addon', 'cancelamento', 'media');
   }
 
   // Guard de CANCELAMENTO (precede billing: "cancelar minha assinatura" é
