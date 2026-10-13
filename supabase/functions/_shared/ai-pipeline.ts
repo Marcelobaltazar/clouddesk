@@ -493,16 +493,26 @@ async function callLLM(
 /** Abaixo disso a resposta não tem afirmação a conferir ("Por nada! 😊"). */
 const MIN_AUDITED_CHARS = 60;
 
+/** Troca de modelo por requisição — SÓ o desk-ai-lab usa, para comparar
+ *  modelos antes de mudar o secret. O atendimento real não passa nada. */
+export interface ModelOverride {
+  /** Resposta ao cliente (padrão: LLM_MODEL). */
+  main?: string;
+  /** Seletor da busca e revisor (padrão: LLM_MODEL_FAST, ou LLM_MODEL). */
+  aux?: string;
+}
+
 /** Revisor (ai-verify.ts). null = não rodou ou não deu para ler — a resposta
  *  segue sem revisão, e o log mostra approved=null. */
 async function auditReply(
   apiKey: string,
   input: { message: string; question: string; answer: string; evidence: string },
   onUsage: (u: LLMUsage | null) => void,
+  models?: ModelOverride,
 ): Promise<AuditVerdict | null> {
   try {
     const r = await callLLM(apiKey, AUDIT_SYSTEM_PROMPT, [{ role: 'user', content: buildAuditUserPrompt(input) }], {
-      model: AUX_MODEL, temperature: 0, maxTokens: AUX_MAX_TOKENS, timeoutMs: AUX_TIMEOUT_MS,
+      model: models?.aux ?? AUX_MODEL, temperature: 0, maxTokens: AUX_MAX_TOKENS, timeoutMs: AUX_TIMEOUT_MS,
     });
     onUsage(r.usage);
     const verdict = parseAuditVerdict(r.content);
@@ -1790,6 +1800,7 @@ async function consultKnowledge(
   message: string,
   turns: ConversationTurn[],
   onUsage: (u: LLMUsage | null) => void,
+  models?: ModelOverride,
 ): Promise<KnowledgeTurn> {
   const start = Date.now();
   try {
@@ -1798,7 +1809,7 @@ async function consultKnowledge(
       search: (q, emb) => hybridSearch(supabase, q, emb),
       select: async (system, user) => {
         const r = await callLLM(apiKey, system, [{ role: 'user', content: user }], {
-          model: AUX_MODEL, temperature: 0, maxTokens: AUX_MAX_TOKENS, timeoutMs: AUX_TIMEOUT_MS,
+          model: models?.aux ?? AUX_MODEL, temperature: 0, maxTokens: AUX_MAX_TOKENS, timeoutMs: AUX_TIMEOUT_MS,
         });
         onUsage(r.usage);
         return r.content;
@@ -1841,9 +1852,10 @@ async function writeAuditedReply(
   chatMessages: ChatMessage[],
   auditInput: { message: string; question: string; evidence: string },
   onUsage: (u: LLMUsage | null) => void,
+  models?: ModelOverride,
 ): Promise<AuditedReply> {
   const start = Date.now();
-  let llm = await callLLM(apiKey, systemPrompt, chatMessages, { temperature: ANSWER_TEMPERATURE });
+  let llm = await callLLM(apiKey, systemPrompt, chatMessages, { temperature: ANSWER_TEMPERATURE, model: models?.main });
   onUsage(llm.usage);
 
   let { text: rawReply, analysis } = parseMetaBlock(llm.content);
@@ -1855,7 +1867,7 @@ async function writeAuditedReply(
   }
 
   const auditStart = Date.now();
-  const verdict = await auditReply(apiKey, { ...auditInput, answer: answerForAudit }, onUsage);
+  const verdict = await auditReply(apiKey, { ...auditInput, answer: answerForAudit }, onUsage, models);
   const audit: AuditLog = { approved: verdict?.approved ?? null, problems: verdict?.problems ?? [], rewritten: false, latency_ms: 0 };
 
   // Transferência: o texto que acompanha o [TRANSFERIR] também é conferido. Se
@@ -1877,7 +1889,7 @@ async function writeAuditedReply(
         apiKey,
         systemPrompt + buildCorrectionInstruction(answerForAudit, verdict.problems),
         chatMessages,
-        { temperature: ANSWER_TEMPERATURE },
+        { temperature: ANSWER_TEMPERATURE, model: models?.main },
       );
       onUsage(retry.usage);
       const parsed = parseMetaBlock(retry.content);

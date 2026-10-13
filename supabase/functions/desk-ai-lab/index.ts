@@ -6,7 +6,10 @@
 // loga interação, não transfere. Serve para validar mudança de prompt/busca
 // com o gabarito de perguntas reais ANTES de ela chegar ao widget.
 //
-// POST { message, history?: [{ role: 'user' | 'assistant', content }] }
+// POST { message, history?: [{ role: 'user' | 'assistant', content }],
+//        model?, aux_model? }
+// model/aux_model trocam o modelo SÓ nesta chamada (ex.: comparar
+// google/gemini-3.5-flash-lite com o atual antes de mudar o secret LLM_MODEL).
 // Auth: operador logado ou chave de serviço.
 //
 // Deploy manual (fora do deploy.ps1 de propósito — não é caminho de cliente):
@@ -21,7 +24,14 @@ import type { ContactInfoResult } from '../_shared/contact-info.ts';
 interface LabRequest {
   message?: string;
   history?: Array<{ role?: string; content?: string }>;
+  model?: string;
+  aux_model?: string;
 }
+
+/** Formato de id da OpenRouter (provedor/modelo). */
+const MODEL_ID_RE = /^[a-z0-9-]+\/[a-z0-9.:-]+$/;
+const pickModel = (v: unknown): string | undefined =>
+  typeof v === 'string' && MODEL_ID_RE.test(v) ? v : undefined;
 
 function json(body: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -72,7 +82,8 @@ Deno.serve(async (req) => {
     const onUsage = (u: { total_tokens?: number } | null) => { tokens += u?.total_tokens ?? 0; };
 
     const t0 = Date.now();
-    const { retrieval, knowledge } = await P.consultKnowledge(newServiceClient(), apiKey, message, turns, onUsage);
+    const models = { main: pickModel(body.model), aux: pickModel(body.aux_model) ?? pickModel(body.model) };
+    const { retrieval, knowledge } = await P.consultKnowledge(newServiceClient(), apiKey, message, turns, onUsage, models);
     const t1 = Date.now();
 
     const systemPrompt = P.buildSystemPrompt(knowledge, DEMO_CLIENT.customer?.name, DEMO_CLIENT, turns.length === 0, '') +
@@ -80,7 +91,7 @@ Deno.serve(async (req) => {
     const out = await P.writeAuditedReply(apiKey, systemPrompt, [...turns, { role: 'user', content: message }], {
       message, question: knowledge.question ?? message,
       evidence: P.buildAuditEvidence(knowledge, DEMO_CLIENT, ''),
-    }, onUsage);
+    }, onUsage, models);
     const t2 = Date.now();
 
     // Mesma pós-produção do pipeline para o texto que o cliente veria.
@@ -92,6 +103,8 @@ Deno.serve(async (req) => {
     reply = await P.modernizeHelpLinks(newServiceClient(), reply);
 
     return json({
+      model: out.llm.model,
+      aux_model: models.aux ?? null,
       reply,
       handoff: out.rawReply.includes('[TRANSFERIR]'),
       question: retrieval?.question ?? null,
