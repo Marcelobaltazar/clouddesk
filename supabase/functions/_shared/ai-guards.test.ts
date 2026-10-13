@@ -171,3 +171,20 @@ Deno.test('prompt: regras de tom e de responsabilidade estão no prompt base', (
   assertStringIncludes(p, 'NUNCA fale de servidor, provedor de hospedagem');
   assertEquals(/Ao final, pergunte se o cliente precisa de mais ajuda/.test(p), false);
 });
+
+Deno.test('guard: "paguei" só vira "aguarde" com pagamento confirmado na última hora', () => {
+  const now = new Date('2026-10-13T15:00:00Z').getTime();
+  const paidInvoice = billing({ invoices: [invoice({ status: 'paid', amount_due: 0, paid_at: '2026-10-13T14:40:00Z' })] });
+  const oldInvoice = billing({ invoices: [invoice({ status: 'paid', amount_due: 0, paid_at: '2026-10-13T12:00:00Z' })] });
+  assertEquals(_test.recentPaymentConfirmed(paidInvoice, 60, now), true);
+  assertEquals(_test.recentPaymentConfirmed(oldInvoice, 60, now), false);
+  assertEquals(_test.recentPaymentConfirmed(null, 60, now), false);
+
+  const reply = _test.paymentConfirmedWaitReply('sua infraestrutura **minhainfra**');
+  assertStringIncludes(reply, 'pagamento já foi confirmado');
+  assertStringIncludes(reply, '10 minutinhos');
+  // o "aguarde" não pode conter o trecho que marca a orientação de bloqueio,
+  // senão a próxima mensagem do cliente seria lida como insistência errada
+  assertEquals(reply.includes('tá bloqueada'), false);
+  assertTone(reply);
+});

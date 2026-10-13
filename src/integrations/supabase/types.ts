@@ -1118,6 +1118,99 @@ export type Database = {
           },
         ]
       }
+      desk_server_incident_conversations: {
+        Row: {
+          conversation_id: string
+          incident_id: string
+          infra_name: string | null
+          linked_at: string
+          notified_at: string | null
+        }
+        Insert: {
+          conversation_id: string
+          incident_id: string
+          infra_name?: string | null
+          linked_at?: string
+          notified_at?: string | null
+        }
+        Update: {
+          conversation_id?: string
+          incident_id?: string
+          infra_name?: string | null
+          linked_at?: string
+          notified_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "desk_server_incident_conversations_incident_id_fkey"
+            columns: ["incident_id"]
+            isOneToOne: false
+            referencedRelation: "desk_server_incidents"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "desk_server_incident_conversations_conversation_id_fkey"
+            columns: ["conversation_id"]
+            isOneToOne: false
+            referencedRelation: "desk_conversations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      desk_server_incidents: {
+        Row: {
+          detected_at: string
+          evidence: Json
+          id: string
+          last_check_at: string | null
+          last_check_ok: boolean | null
+          portainer_url: string
+          resolved_at: string | null
+          restart_error: string | null
+          restart_mode: string | null
+          restart_requested_by: string | null
+          restart_sent_at: string | null
+          server_id: number
+          server_name: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          detected_at?: string
+          evidence?: Json
+          id?: string
+          last_check_at?: string | null
+          last_check_ok?: boolean | null
+          portainer_url: string
+          resolved_at?: string | null
+          restart_error?: string | null
+          restart_mode?: string | null
+          restart_requested_by?: string | null
+          restart_sent_at?: string | null
+          server_id: number
+          server_name: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          detected_at?: string
+          evidence?: Json
+          id?: string
+          last_check_at?: string | null
+          last_check_ok?: boolean | null
+          portainer_url?: string
+          resolved_at?: string | null
+          restart_error?: string | null
+          restart_mode?: string | null
+          restart_requested_by?: string | null
+          restart_sent_at?: string | null
+          server_id?: number
+          server_name?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       desk_sla_policies: {
         Row: {
           created_at: string | null
