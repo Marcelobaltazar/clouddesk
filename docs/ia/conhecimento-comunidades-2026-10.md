@@ -12,7 +12,46 @@ Regras usadas na extração:
 - O que é de terceiros, concorrente, oferta temporária ou decisão caso a caso fica
   **fora** da IA (seção 4).
 
-Este documento é a fila de aprovação: nada daqui entrou na base da IA ainda.
+## Status — aplicado na base em 13/10/2026
+
+Aprovado pelo Marcelo ("pode aprovar se você sabe que está certo; não podemos ter
+duas respostas diferentes para o mesmo problema"). Antes de inserir, cada proposta
+foi comparada com os 101 artigos e 17 snippets publicados; onde a base dizia outra
+coisa, a base foi corrigida em vez de ganhar uma segunda versão. Tudo reindexado
+(67 trechos, 0 falhas). Rollback: `docs/ia/kb-2026-10-13-rollback.sql`.
+
+**Artigos corrigidos (7):** Upgrade e downgrade; Infras vs Planos; Comprar uma nova
+infra; Starter vs Advanced vs Ultra vs MAX; Como cancelar um plano de infra;
+Reembolsos e Trial gratuito (upgrade agora é pelo console; o suporte não cancela
+pelo cliente; reembolso é analisado pelo financeiro); SLA & Suporte (24h → 12h em
+dias úteis).
+
+**Snippets corrigidos (9) e removido (1):** duplicata de "infra bloqueada" removida
+(tinha link do Discord quebrado e prometia "até 12h"); "Minha infra está
+bloqueada", "Erro de DNS no n8n" (era aviso de incidente de 08/10 dizendo "time
+investigando"), "Política de reembolso", "Formas de pagamento" (+12x), "Como
+atualizar o n8n?", "Quedas frequentes", "Não consigo excluir minha instância",
+"Criar e excluir instâncias da Evolution", "MCP - CLOUDFY".
+
+**Snippets novos (11):** S1 upgrade, S2 anual→mensal, S5 mensalidade atrasada,
+S11 IA Ilimitada, S17/S18 mensagem não chega, S20 credenciais, S21 terminal/env,
+S22 Supabase/Chatwoot, S23 backup, S24 suporte, S27 Hermes/OpenClaw.
+
+**Fora por enquanto:** S7 (cancelar só número/adicional — feito pela equipe;
+precisa de confirmação diante da regra "ninguém cancela pelo cliente"); S3, S6,
+S9, S10 (baixa confiança ou já cobertos por artigo/página de preços); S12–S16, S19,
+S25, S26 (fundidos em snippets existentes ou já cobertos).
+
+**Pendências na base (não alteradas):**
+- "Minha instância n8n está offline ou inacessível (Erros 404, 502…)" manda o
+  cliente rodar `docker restart`/`kubectl` — o cliente não tem terminal (S21).
+  Precisa ser reescrito ou despublicado.
+- "Onde posso ver minhas credenciais?" e "Onde encontrar minhas credenciais?" são
+  dois artigos sobre o mesmo tema (hoje não se contradizem).
+
+---
+
+Seção original da proposta (antes da aprovação):
 
 ---
 
