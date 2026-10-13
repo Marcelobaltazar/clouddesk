@@ -397,15 +397,30 @@ async function createConversation(
   return created as unknown as ConversationRow;
 }
 
+/** Starter não tem atendimento humano — o atendimento é a Luna. Mandar a
+ *  conversa para a fila humana deixaria o cliente esperando ninguém. A
+ *  etiqueta de plano é gravada pelo pipeline a cada turno. */
+async function isStarterConversation(service: ServiceClient, conversationId: string): Promise<boolean> {
+  const { data } = await service
+    .from('desk_conversations')
+    .select('tags')
+    .eq('id', conversationId)
+    .maybeSingle();
+  const tags = (data as { tags?: string[] | null } | null)?.tags ?? [];
+  return tags.includes('starter');
+}
+
 /** Reabre um chamado resolvido na MESMA thread (cliente respondeu depois de
- *  resolvido). Volta para a fila humana — não para a IA. */
+ *  resolvido). Volta para a fila humana — não para a IA —, exceto no Starter,
+ *  que é atendido pela Luna. */
 async function reopenConversation(
   service: ServiceClient,
   conversation: ConversationRow,
 ): Promise<ConversationRow | null> {
+  const aiOnly = await isStarterConversation(service, conversation.id);
   const { data, error } = await service
     .from('desk_conversations')
-    .update({ status: 'pending', ai_active: false, resolved_at: null })
+    .update({ status: aiOnly ? 'open' : 'pending', ai_active: aiOnly, resolved_at: null })
     .eq('id', conversation.id)
     .select(CONV_SELECT)
     .single();
@@ -424,8 +439,8 @@ async function reopenConversation(
 
   // A inbox do operador precisa saber na hora que este chamado voltou.
   void broadcastToConversation(conversation.id, 'conv_updated', {
-    status: 'pending',
-    ai_active: false,
+    status: aiOnly ? 'open' : 'pending',
+    ai_active: aiOnly,
   });
 
   return data as unknown as ConversationRow;
@@ -793,9 +808,11 @@ Deno.serve(async (req) => {
       if (csatErr) console.warn('[widget-api] csat insert falhou:', csatErr.message);
 
       // Guardrail: avaliação 😞 reabre a conversa para acompanhamento HUMANO —
-      // um ticket avaliado como ruim não fica "resolvido" sozinho.
+      // um ticket avaliado como ruim não fica "resolvido" sozinho. No Starter
+      // não há acompanhamento humano: a nota fica registrada (relatórios) e a
+      // conversa não volta para uma fila que não vai responder.
       let reopenedForFollowUp = false;
-      if (rating === 1) {
+      if (rating === 1 && !(await isStarterConversation(service, conversation.id))) {
         const { error: reopenErr } = await service
           .from('desk_conversations')
           .update({ status: 'pending', ai_active: false, resolved_at: null })
