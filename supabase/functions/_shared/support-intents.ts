@@ -48,11 +48,10 @@ const PAYMENT_MENTION_RE =
 const CONTEST_BILLING_RE =
   /\bnao (e|eh|era|se trata)((\s|\/)+(sobre|de|do|da|um|uma|questao|duvida|assunto|caso|problema|chamado|nem|isso|referente|a|o))*(\s|\/)+(pagamento|cobranca|financeiro|fatura|billing)\b|\b(nao tem (nada )?a ver|nada a ver|nao tem relacao) com (o |a )?(pagamento|cobranca|financeiro|fatura)\b|\b(entendeu|entenderam|interpretou|classificou|classificacao( automatica)?) errad\w*|\bcorrigindo a classificacao\b/;
 
-/** Cancelar um ADICIONAL (número virtual, IA Ilimitada, backup). Diferente do
- *  plano, que o próprio cliente cancela no painel, adicional só a equipe de
- *  suporte consegue cancelar (regra confirmada em 13/10/2026). Só verbo de
- *  cancelar: "remover o número da instância" é configuração da Evolution. */
-const ADDON_NOUN = String.raw`(numeros? virtua\w*|numeros?|virtual numbers?|ia ilimitada|i\.?a\.? ilimitada|llm unlimited|backup|adicion(al|ais)|add-?ons?)`;
+/** Cancelar um ADICIONAL que só a equipe de suporte consegue cancelar (IA
+ *  Ilimitada, backup). Número virtual NÃO entra: desde 13/10/2026 o próprio
+ *  cliente cancela em Números Virtuais, no painel — a IA orienta pela base. */
+const ADDON_NOUN = String.raw`(ia ilimitada|i\.?a\.? ilimitada|llm unlimited|backup|adicion(al|ais)|add-?ons?)`;
 /** Exige pedido ("quero", "como faço", "tem como"…): "ou vou precisar
  *  cancelar?" é desabafo. Entre o verbo e o adicional não pode aparecer o plano
  *  ("posso cancelar o plano e manter o número?" não é cancelar o número). */

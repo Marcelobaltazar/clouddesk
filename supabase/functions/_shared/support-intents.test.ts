@@ -101,21 +101,19 @@ Deno.test('contestação: frases parecidas que NÃO são contestação', () => {
   }
 });
 
-Deno.test('adicional: pedido de cancelar número/IA/backup vai para a equipe', () => {
+Deno.test('adicional: pedido de cancelar IA Ilimitada/backup vai para a equipe', () => {
   for (const msg of [
-    'Como faço para cancelar meu número virtual? Eu contratei por engano',
-    'preciso cancelar o numero de WhatsApp e a IA ilimitada',
-    'gostaria de cancelar uns números virtuais sem derrubar minha infra',
     'quero cancelar o backup diário',
     'tem como cancelar IA ilimitada? solicitei sem querer',
-    'não quero mais o número virtual',
-    'desejo cancelar a contratação desse número, a plataforma não dá opção',
+    'preciso cancelar a IA ilimitada e o numero',
+    'não quero mais a IA ilimitada',
+    'gostaria de cancelar um adicional',
   ]) {
     assertEquals(wantsAddonCancel(msg), true, `deveria ir para a equipe: "${msg}"`);
   }
 });
 
-Deno.test('adicional: cancelar o plano, ou mexer no número na Evolution, não é adicional', () => {
+Deno.test('adicional: plano, número virtual ou número na Evolution não vão para a equipe', () => {
   for (const msg of [
     'quero cancelar meu plano',
     'como cancelo a assinatura da minha infra?',
@@ -124,6 +122,10 @@ Deno.test('adicional: cancelar o plano, ou mexer no número na Evolution, não �
     'a IA ilimitada está dando erro de limite',
     'vai conseguir resolver a questão da IA Ilimitada, ou vou precisar cancelar?',
     'quero cancelar o plano e manter o número, dá?',
+    // Número virtual: o próprio cliente cancela no painel (desde 13/10/2026)
+    'Como faço para cancelar meu número virtual? Eu contratei por engano',
+    'gostaria de cancelar uns números virtuais sem derrubar minha infra',
+    'não quero mais o número virtual',
   ]) {
     assertEquals(wantsAddonCancel(msg), false, `não deveria ser adicional: "${msg}"`);
   }

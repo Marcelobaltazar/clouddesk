@@ -913,9 +913,9 @@ function cancelHandoffReply(unpaid: boolean, replyWindow: string): string {
 
 function addonCancelReply(replyWindow: string): string {
   return (
-    `Cancelar só um adicional (número virtual, IA Ilimitada, backup) é com a equipe — sua infraestrutura continua como está.\n\n` +
+    `Cancelar a IA Ilimitada ou o backup é com a equipe — sua infraestrutura continua como está.\n\n` +
     `Já passei seu pedido pra eles: alguém te responde por aqui ${replyWindow}. ` +
-    `Se ainda não disse, me fala qual adicional (e, se for número, qual número), que já fica tudo junto.`
+    `Se for número virtual, esse você mesmo cancela em **Números Virtuais**, no painel lateral da Cloudfy.`
   );
 }
 
@@ -2132,8 +2132,9 @@ export async function runAiPipeline(
       : guardReply(blockedSelfServiceReply(label), 'guard:blocked-infra-selfservice', 'billing');
   }
 
-  // Cancelar um ADICIONAL (número virtual, IA Ilimitada, backup): só a equipe
-  // de suporte consegue — o painel do cliente só cancela o plano inteiro.
+  // Cancelar a IA Ilimitada ou o backup: só a equipe de suporte consegue — o
+  // painel do cliente só cancela o plano inteiro (número virtual o cliente
+  // cancela sozinho desde 13/10/2026; a IA orienta pela base).
   // Mandar para Configurações → Faturamento aqui faria o cliente cancelar a
   // infra sem querer. Vale para todos os planos.
   if (!isDraft && wantsAddonCancel(message)) {
