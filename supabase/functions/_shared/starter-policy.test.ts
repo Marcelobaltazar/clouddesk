@@ -141,3 +141,20 @@ Deno.test('reserva Starter: sai com MCP, Central e comunidade — sem equipe e s
   assertStringIncludes(r, 'discord.com');
   assert(!/equipe|encaminh|não posso|infelizmente/i.test(r));
 });
+
+// ── Exceção: o que só a equipe executa ────────────────────────────────────────
+
+Deno.test('prompt Starter: transfere SÓ as operações que a equipe executa', () => {
+  const p = _test.buildSystemPrompt(knowledge, 'Carla Souza', client(sub('n8n-starter')), false, '');
+  assertStringIncludes(p, 'SÓ O QUE A EQUIPE EXECUTA');
+  assertStringIncludes(p, 'resetar a senha do n8n');
+  assertStringIncludes(p, 'restaurar um backup');
+  assertStringIncludes(p, 'recriar a credencial da IA Ilimitada');
+  assertStringIncludes(p, 'Pedido de humano, dúvida, fluxo, erro de n8n/Evolution: NUNCA transfira');
+});
+
+Deno.test('revisor Starter: aceita "passei pra equipe" nas operações da exceção', () => {
+  const e = _test.buildAuditEvidence(knowledge, client(sub('n8n-starter')), '');
+  assertStringIncludes(e, 'Única exceção');
+  assertStringIncludes(e, 'reembolso ou cobrança indevida');
+});

@@ -64,6 +64,8 @@ const STARTER_QUESTIONS = [
   'meu fluxo do n8n parou de funcionar do nada, o que eu faço?',
   'como faço pra criar um fluxo que responde no WhatsApp com IA?',
   'o MCP da Cloudfy está incluso no meu plano?',
+  // Exceção: só a equipe executa — aqui a Luna DEVE transferir.
+  'alterei a senha do n8n e agora não consigo mais entrar',
 ];
 
 interface LabResult {

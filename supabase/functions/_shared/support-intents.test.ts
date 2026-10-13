@@ -6,7 +6,7 @@
 // técnico mandado para a fila financeira.
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { claimsAlreadyPaid, contestsBillingReading, detectBillingChange, wantsAddonCancel } from './support-intents.ts';
+import { claimsAlreadyPaid, contestsBillingReading, detectBillingChange, teamOnlyTopic, wantsAddonCancel } from './support-intents.ts';
 
 Deno.test('cobrança: problema técnico NÃO vai para a fila financeira', () => {
   for (const msg of [
@@ -128,5 +128,34 @@ Deno.test('adicional: plano, número virtual ou número na Evolution não vão p
     'não quero mais o número virtual',
   ]) {
     assertEquals(wantsAddonCancel(msg), false, `não deveria ser adicional: "${msg}"`);
+  }
+});
+
+// ── Operações que só a equipe executa (liberam a transferência do Starter) ────
+
+Deno.test('equipe: senha do n8n, backup e credencial da IA Ilimitada', () => {
+  const cases: Array<[string, string]> = [
+    ['Alterei a senha do n8n e agora não consigo mais entrar', 'n8n_password'],
+    ['esqueci minha senha do n8n', 'n8n_password'],
+    ['não consigo logar no n8n, a senha não funciona', 'n8n_password'],
+    ['preciso restaurar o backup de ontem', 'backup_restore'],
+    ['tem como voltar o backup da minha infra?', 'backup_restore'],
+    ['apaguei a credencial da IA Ilimitada sem querer', 'ai_credential'],
+    ['a chave da IA ilimitada sumiu do n8n', 'ai_credential'],
+  ];
+  for (const [msg, topic] of cases) {
+    assertEquals(teamOnlyTopic(msg), topic, `deveria ser ${topic}: "${msg}"`);
+  }
+});
+
+Deno.test('equipe: dúvida comum de fluxo não libera transferência do Starter', () => {
+  for (const msg of [
+    'meu fluxo do n8n parou de funcionar',
+    'a Evolution não chama meu webhook do n8n',
+    'como funciona o backup diário?',
+    'quero falar com um atendente',
+    'como conecto o MCP no ChatGPT?',
+  ]) {
+    assertEquals(teamOnlyTopic(msg), null, `não deveria liberar: "${msg}"`);
   }
 });

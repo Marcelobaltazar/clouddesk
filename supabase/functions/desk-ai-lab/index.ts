@@ -22,6 +22,7 @@ import { newServiceClient } from '../_shared/supabase.ts';
 import { isServiceRoleRequest, verifyOperator } from '../_shared/widget-auth.ts';
 import { _test as P, sanitizeContactText } from '../_shared/ai-pipeline.ts';
 import type { ContactInfoResult } from '../_shared/contact-info.ts';
+import { teamOnlyTopic } from '../_shared/support-intents.ts';
 
 interface LabRequest {
   message?: string;
@@ -110,15 +111,19 @@ Deno.serve(async (req) => {
     reply = sources.text.replace(/\[\s*(?:FONTE\s*:[^\]]*|TRANSFERIR)\s*\]/gi, '').replace(/\n{3,}/g, '\n\n').trim();
     if (sources.cited === 0) reply = P.ensureSourceLink(reply, knowledge);
     reply = await P.modernizeHelpLinks(newServiceClient(), reply);
-    // Starter que tentou transferir: o cliente veria o texto de reserva.
-    if (P.isStarterOnlyClient(client) && out.rawReply.includes('[TRANSFERIR]')) reply = P.starterFallbackReply();
+    // Mesma trava do pipeline: Starter só vai para a equipe no que só ela
+    // executa; fora disso, o cliente veria o texto de reserva.
+    const starter = P.isStarterOnlyClient(client);
+    const recentUserText = [...turns.filter((t) => t.role === 'user').slice(-3).map((t) => t.content), message].join('\n');
+    const handoff = out.rawReply.includes('[TRANSFERIR]') && (!starter || !!teamOnlyTopic(recentUserText));
+    if (starter && !handoff && out.rawReply.includes('[TRANSFERIR]')) reply = P.starterFallbackReply();
 
     return json({
       model: out.llm.model,
       aux_model: models.aux ?? null,
       plan,
       reply,
-      handoff: out.rawReply.includes('[TRANSFERIR]'),
+      handoff,
       question: retrieval?.question ?? null,
       coverage: knowledge.coverage,
       rounds: retrieval?.rounds ?? 0,

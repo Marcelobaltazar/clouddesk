@@ -595,6 +595,28 @@ async function runTurn(
   };
 }
 
+// ─── Conversas paradas ────────────────────────────────────────────────────────
+// A Luna respondeu e o cliente não voltou: a conversa fecha sozinha depois de
+// 24 h (regra na migration 20261013200000). Sem agendador — decisão de
+// 13/10/2026 —, vai de carona no tráfego do widget, no máximo a cada 15 min por
+// instância. O UPDATE é barato e idempotente; falhar só adia para a próxima.
+const IDLE_SWEEP_EVERY_MS = 15 * 60 * 1000;
+let lastIdleSweep = 0;
+
+async function sweepIdleConversations(service: ServiceClient): Promise<void> {
+  const now = Date.now();
+  if (now - lastIdleSweep < IDLE_SWEEP_EVERY_MS) return;
+  lastIdleSweep = now;
+  const { data, error } = await service.rpc('desk_close_idle_ai_conversations');
+  if (error) {
+    console.warn('[widget-api] encerrar conversas paradas falhou:', error.message);
+    return;
+  }
+  if (typeof data === 'number' && data > 0) {
+    console.log(`[widget-api] ${data} conversa(s) parada(s) encerrada(s)`);
+  }
+}
+
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
 Deno.serve(async (req) => {
@@ -667,6 +689,9 @@ Deno.serve(async (req) => {
     // ── Ações ───────────────────────────────────────────────────────────────────
 
     if (action === 'hello') {
+      // Carga de página é o tráfego mais constante do widget — é por aqui que
+      // as conversas paradas são encerradas.
+      void sweepIdleConversations(service);
       // Gate leve para o embed decidir se renderiza a bolha.
       return json({ eligible: true });
     }
