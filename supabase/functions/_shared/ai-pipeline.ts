@@ -37,7 +37,14 @@ import {
   type InfraServer,
   type ServerVerdict,
 } from './server-health.ts';
-import { incidentDetectedReply, openOrJoinIncident, serverIncidentsEnabled } from './server-incidents.ts';
+import {
+  decideFollowUp,
+  findOpenIncidentForConversation,
+  incidentDetectedReply,
+  openOrJoinIncident,
+  serverIncidentsEnabled,
+  settleIncidentConversation,
+} from './server-incidents.ts';
 import type { BillingInfo, BillingInvoice } from './chargefy.ts';
 import { collectUrls, enforceLinkAllowlist } from './link-guard.ts';
 import {
@@ -842,9 +849,9 @@ interface InfraDiagnosis {
  * fora derruba o n8n junto; a Evolution pode nem existir (o cliente escolhe
  * WAHA desde ago/2026).
  */
-async function diagnoseInfra(infras: ContactInfra[]): Promise<InfraDiagnosis> {
+async function diagnoseInfra(infras: ContactInfra[], checkServers = true): Promise<InfraDiagnosis> {
   const results = await probeInfraHealth(infras);
-  if (!serverIncidentsEnabled()) return { results, servers: [] };
+  if (!checkServers || !serverIncidentsEnabled()) return { results, servers: [] };
 
   const downNames = new Set(results.filter((r) => r.service === 'n8n' && !r.ok).map((r) => r.infra));
   if (downNames.size === 0) return { results, servers: [] };
@@ -2300,9 +2307,14 @@ export async function runAiPipeline(
 
   // P1: reclamação de "fora do ar"/erro com infra ativa → testa as URLs reais
   // AGORA (em paralelo com o RAG) e injeta o resultado no contexto do modelo.
-  const shouldProbe = !isDraft && deployedInfras.length > 0 && INFRA_DOWN_RE.test(message);
+  // Bloco 2 sem agendador: conversa ligada a um incidente aberto → qualquer
+  // mensagem do cliente refaz o teste (não precisa ele dizer "fora do ar").
+  const openIncident = !isDraft && serverIncidentsEnabled()
+    ? await findOpenIncidentForConversation(supabase, conversationId)
+    : null;
+  const shouldProbe = !isDraft && deployedInfras.length > 0 && (INFRA_DOWN_RE.test(message) || !!openIncident);
   const probePromise: Promise<InfraDiagnosis> = shouldProbe
-    ? diagnoseInfra(deployedInfras).catch((e) => {
+    ? diagnoseInfra(deployedInfras, !openIncident).catch((e) => {
         console.warn('[AI] Probe de infra falhou:', e instanceof Error ? e.message : e);
         return { results: [], servers: [] } as InfraDiagnosis;
       })
@@ -2325,10 +2337,31 @@ export async function runAiPipeline(
     console.log(`[AI] Probe: ${probeResults.map((r) => `${r.infra}/${r.service}=${r.status ?? 'timeout'}`).join(' ') || '(sem alvos)'}`);
   }
 
+  // Bloco 2, acompanhamento: o cliente voltou a escrever durante o incidente.
+  if (openIncident) {
+    const n8nOk = probeResults.some((r) => r.service === 'n8n' && r.infra === openIncident.infraName && r.ok);
+    const followUp = decideFollowUp(openIncident, n8nOk, replyWindow);
+    console.log(`[AI] Incidente ${openIncident.incidentId}: acompanhamento → ${followUp.kind}`);
+    if (followUp.kind === 'deadline') {
+      await settleIncidentConversation(supabase, openIncident, conversationId, 'deadline');
+      return await persistGuardHandoff(followUp.reply, 'guard:server-incident-deadline', 'infra_down', 'critica');
+    }
+    if (followUp.kind === 'recovered') await settleIncidentConversation(supabase, openIncident, conversationId, 'recovered');
+    const followAnalysis: MessageAnalysis = {
+      intent: 'infra_down', sentiment: 'neutro', urgency: followUp.kind === 'recovered' ? 'media' : 'alta', resolved: false,
+    };
+    void applyAnalysis(supabase, conversationId, followAnalysis);
+    void logInteraction(supabase, {
+      conversationId, model: `guard:server-incident-${followUp.kind}`, usage, latencyMs: 0, wasEscalated: false,
+      analysis: followAnalysis, kbIds: [], snippetIds: [], draft: false,
+    });
+    return { reply: followUp.reply, should_handoff: false, blocked: false, auto_resolved: false, reopened, metadata: null };
+  }
+
   // Bloco 2: servidor caiu de verdade (todas as tentativas sem resposta E o
   // servidor de controle respondendo) → incidente + alerta no painel. O
-  // cliente recebe resposta fixa, sem servidor/provedor/culpa; a IA segue
-  // ativa para o aviso de "voltou".
+  // cliente recebe resposta fixa, sem servidor/provedor/culpa; o reinício só
+  // sai pelo clique do operador.
   const downServer = serverChecks.find((c) => c.verdict.serverDown && c.verdict.controlOk);
   if (downServer && !isDraft) {
     const opened = await openOrJoinIncident(

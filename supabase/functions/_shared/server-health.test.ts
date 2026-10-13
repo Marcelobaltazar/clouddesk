@@ -9,7 +9,14 @@ import {
   portainerResponds,
   sendServerRestart,
 } from './server-health.ts';
-import { incidentDetectedReply, incidentRecoveredReply, incidentUnresolvedReply } from './server-incidents.ts';
+import {
+  decideFollowUp,
+  incidentDetectedReply,
+  incidentRecoveredReply,
+  incidentStillDownReply,
+  incidentUnresolvedReply,
+  type ConversationIncident,
+} from './server-incidents.ts';
 
 const DOWN = 'https://portainer661.cloudfy.live';
 const CONTROL = 'https://portainer866.cloudfy.live';
@@ -106,4 +113,39 @@ Deno.test('avisos: nada de servidor, provedor, Portainer ou culpa', () => {
   }
   assertStringIncludes(texts[0], '20 a 30 minutos');
   assertStringIncludes(texts[2], 'em até 12 horas');
+});
+
+Deno.test('avisos: sem agendador, a primeira mensagem não promete avisar sozinho', () => {
+  const t = incidentDetectedReply('sua infraestrutura **minhainfra**');
+  assertEquals(/te aviso|vou acompanhando|vou te avisar/i.test(t), false, t);
+  assertStringIncludes(t, 'me chama aqui');
+});
+
+const inc = (over: Partial<ConversationIncident> = {}): ConversationIncident => ({
+  incidentId: 'i1',
+  status: 'restart_sent',
+  detectedAt: '2026-10-13T10:00:00Z',
+  restartSentAt: '2026-10-13T10:05:00Z',
+  infraName: 'minhainfra',
+  ...over,
+});
+const at = (iso: string) => new Date(iso).getTime();
+
+Deno.test('acompanhamento: n8n de volta → Voltou!', () => {
+  const f = decideFollowUp(inc(), true, 'em até 12 horas', at('2026-10-13T10:10:00Z'));
+  assertEquals(f.kind, 'recovered');
+  assertStringIncludes(f.reply, 'Voltou!');
+  assertStringIncludes(f.reply, 'minhainfra');
+});
+
+Deno.test('acompanhamento: ainda fora dentro do prazo → em andamento', () => {
+  const f = decideFollowUp(inc(), false, 'em até 12 horas', at('2026-10-13T10:20:00Z'));
+  assertEquals(f.kind, 'still_down');
+});
+
+Deno.test('acompanhamento: prazo conta do reinício (ou da detecção se ninguém reiniciou)', () => {
+  assertEquals(decideFollowUp(inc(), false, 'w', at('2026-10-13T10:36:00Z')).kind, 'deadline');
+  const semReinicio = inc({ status: 'detected', restartSentAt: null });
+  assertEquals(decideFollowUp(semReinicio, false, 'w', at('2026-10-13T10:29:00Z')).kind, 'still_down');
+  assertEquals(decideFollowUp(semReinicio, false, 'w', at('2026-10-13T10:31:00Z')).kind, 'deadline');
 });

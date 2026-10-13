@@ -26,8 +26,7 @@ function describe(i: ServerIncident): string {
   const clients = i.affected === 1 ? "1 cliente afetado" : `${i.affected} clientes afetados`;
   if (i.status === "detected") return `${i.server_name} não responde · ${clients} · detectado ${timeAgo(i.detected_at)}`;
   if (i.status === "restart_sent") {
-    const how = i.restart_mode === "auto" ? "automático" : "manual";
-    return `${i.server_name} · reinício ${how} enviado ${i.restart_sent_at ? timeAgo(i.restart_sent_at) : ""} · aguardando voltar · ${clients}`;
+    return `${i.server_name} · reinício enviado ${i.restart_sent_at ? timeAgo(i.restart_sent_at) : ""} · aguardando voltar · ${clients}`;
   }
   return `${i.server_name} não voltou depois do reinício · ${clients} transferidos para a equipe`;
 }
@@ -118,7 +117,9 @@ export function ServerIncidentBanner() {
               </Button>
             </>
           )}
-          {i.status === "unresolved" && (
+          {/* Sem agendador, o incidente só fecha sozinho quando os clientes voltam
+              a escrever — o operador encerra quando confirmar que está tudo no ar. */}
+          {(i.status === "unresolved" || i.status === "restart_sent") && (
             <Button
               size="icon"
               variant="ghost"

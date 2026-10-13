@@ -2,8 +2,8 @@
 -- Quando a IA confirma que o servidor de um cliente não responde (Portainer fora
 -- em todas as tentativas, servidor de controle respondendo), abre-se UM
 -- incidente por servidor e cada conversa afetada é ligada a ele. O painel mostra
--- o alerta e o operador confirma o reinício (modo sombra). Depois, o monitor
--- testa de novo e avisa os clientes quando voltar.
+-- o alerta e o operador confirma o reinício (modo sombra — nunca automático).
+-- Quando o cliente volta a escrever, a IA testa de novo e responde o desfecho.
 --
 -- Dados internos: nome do servidor e URL do Portainer ficam aqui, visíveis só a
 -- operadores — nunca ao widget nem ao texto da IA.
@@ -17,8 +17,8 @@ CREATE TABLE IF NOT EXISTS public.desk_server_incidents (
   status             text NOT NULL DEFAULT 'detected'
                      CHECK (status IN ('detected', 'restart_sent', 'recovered', 'unresolved', 'dismissed')),
   detected_at        timestamptz NOT NULL DEFAULT now(),
-  restart_mode       text CHECK (restart_mode IN ('manual', 'auto')),
-  restart_requested_by uuid,                -- auth.users.id do operador (null = automático)
+  restart_mode       text CHECK (restart_mode IN ('manual')),   -- só pelo clique do operador
+  restart_requested_by uuid,                -- auth.users.id do operador que confirmou
   restart_sent_at    timestamptz,
   restart_error      text,
   resolved_at        timestamptz,
@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS public.desk_server_incident_conversations (
   conversation_id uuid NOT NULL REFERENCES public.desk_conversations(id),
   infra_name      text,
   linked_at       timestamptz NOT NULL DEFAULT now(),
-  notified_at     timestamptz,             -- quando o cliente recebeu o aviso de "voltou"
+  notified_at     timestamptz,             -- quando o cliente recebeu o desfecho (voltou / foi para a equipe)
   PRIMARY KEY (incident_id, conversation_id)
 );
 

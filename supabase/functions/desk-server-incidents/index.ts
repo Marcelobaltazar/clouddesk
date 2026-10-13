@@ -43,7 +43,7 @@ Deno.serve(async (req) => {
     const supabase = newServiceClient();
 
     if (body.action === 'restart') {
-      const result = await requestRestart(supabase, body.incident_id, 'manual', operatorAuthId);
+      const result = await requestRestart(supabase, body.incident_id, operatorAuthId);
       return result.ok ? json({ ok: true }) : json({ error: result.error }, 409);
     }
 

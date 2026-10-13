@@ -1,11 +1,12 @@
 // ─── Incidentes de servidor: registro, reinício e avisos (CloudDesk) ──────────
-// Fluxo (Bloco 2, modo sombra):
+// Fluxo (Bloco 2, modo sombra — decisões de 13/10/2026):
 //   1. A IA confirma que o servidor do cliente caiu (server-health.ts) →
 //      openOrJoinIncident: um incidente por servidor, cada conversa ligada.
-//   2. O painel mostra o alerta; o operador confirma → requestRestart('manual').
-//      Com SERVER_RESTART_AUTO_MINUTES definido, o monitor envia sozinho depois
-//      desse tempo sem confirmação ('auto'). Sem o secret, só manual.
-//   3. O monitor testa de novo; voltou → avisa cada cliente na conversa dele.
+//   2. O painel mostra o alerta; o reinício só sai pelo CLIQUE do operador
+//      (requestRestart). Não existe reinício automático.
+//   3. Sem agendador: quando o cliente volta a escrever, a IA testa de novo —
+//      voltou → "Voltou!"; ainda fora → "em andamento"; passou do prazo →
+//      atualização honesta e a conversa vai para a equipe (followUpIncident).
 //
 // Tudo desligado sem SERVER_INCIDENTS=on — o Bloco 1 pode ir para produção
 // antes. Texto para o cliente: sem servidor, provedor, Portainer ou culpa.
@@ -18,26 +19,30 @@ export function serverIncidentsEnabled(): boolean {
   return Deno.env.get('SERVER_INCIDENTS') === 'on';
 }
 
-/** Minutos sem confirmação até o reinício automático. null = só manual. */
-export function autoRestartMinutes(): number | null {
-  const v = Number(Deno.env.get('SERVER_RESTART_AUTO_MINUTES'));
-  return Number.isFinite(v) && v > 0 ? v : null;
-}
-
 /** Nunca dois reinícios do mesmo servidor em menos que isso. */
 export const RESTART_COOLDOWN_MIN = 30;
-/** Depois do reinício, quanto esperar antes de dar o incidente como não resolvido. */
+/** Passou disso (do reinício, ou da detecção se ninguém reiniciou) e o serviço
+ *  do cliente não voltou → a conversa vai para a equipe. */
 export const RECOVERY_DEADLINE_MIN = 30;
 
 const OPEN_STATUSES = ['detected', 'restart_sent'];
 
 // ─── Textos para o cliente ───────────────────────────────────────────────────
+// Sem agendador não dá para avisar sozinho quando voltar — então a mensagem
+// não promete isso: pede para o cliente testar e chamar de novo.
 
 export function incidentDetectedReply(label: string): string {
   return (
     `Testei agora e confirmei uma instabilidade no ambiente da ${label}. Já acionei a correção.\n\n` +
-    `Normalmente volta em 20 a 30 minutos. Vou acompanhando daqui e, assim que estiver tudo no ar, ` +
-    `te aviso nesta conversa — não precisa fazer nada por enquanto.`
+    `Normalmente volta em 20 a 30 minutos. Depois disso é só testar aí — se ainda estiver fora, ` +
+    `me chama aqui que eu verifico de novo na hora.`
+  );
+}
+
+export function incidentStillDownReply(): string {
+  return (
+    `Testei de novo agora e ainda não normalizou — a correção está em andamento. ` +
+    `Me chama daqui a uns minutinhos que eu testo outra vez.`
   );
 }
 
@@ -120,8 +125,7 @@ export async function openOrJoinIncident(
 export async function requestRestart(
   supabase: ServiceClient,
   incidentId: string,
-  mode: 'manual' | 'auto',
-  requestedBy: string | null,
+  requestedBy: string,
 ): Promise<{ ok: boolean; error?: string }> {
   const { data: incident } = await supabase
     .from('desk_server_incidents')
@@ -140,12 +144,12 @@ export async function requestRestart(
     .gt('restart_sent_at', since);
   if ((count ?? 0) > 0) return { ok: false, error: `Este servidor já foi reiniciado nos últimos ${RESTART_COOLDOWN_MIN} minutos` };
 
-  // Reserva o incidente ANTES de enviar: dois cliques (ou clique + automático)
-  // não podem gerar dois reinícios.
+  // Reserva o incidente ANTES de enviar: dois operadores clicando ao mesmo
+  // tempo não podem gerar dois reinícios.
   const now = new Date().toISOString();
   const { data: claimed } = await supabase
     .from('desk_server_incidents')
-    .update({ status: 'restart_sent', restart_sent_at: now, restart_mode: mode, restart_requested_by: requestedBy, updated_at: now })
+    .update({ status: 'restart_sent', restart_sent_at: now, restart_mode: 'manual', restart_requested_by: requestedBy, updated_at: now })
     .eq('id', incidentId)
     .eq('status', 'detected')
     .select('id');
@@ -161,7 +165,7 @@ export async function requestRestart(
     return { ok: false, error: `Não foi possível enviar o reinício: ${result.error}` };
   }
   await supabase.from('desk_server_incidents').update({ restart_error: null }).eq('id', incidentId);
-  console.log(`[incidents] reinício enviado: ${inc.server_name} (${mode})`);
+  console.log(`[incidents] reinício enviado: ${inc.server_name} (operador)`);
   return { ok: true };
 }
 
@@ -202,4 +206,98 @@ export async function postBotMessage(supabase: ServiceClient, conversationId: st
   await supabase.from('desk_conversations').update({ updated_at: new Date().toISOString() }).eq('id', conversationId);
   void broadcastToConversation(conversationId, 'new_message', data as Record<string, unknown>);
   return true;
+}
+
+// ─── Acompanhamento sem agendador ─────────────────────────────────────────────
+// O cliente volta a escrever numa conversa ligada a um incidente aberto → a IA
+// testa o n8n dele de novo e responde com o desfecho, em vez de seguir o
+// atendimento normal.
+
+export interface ConversationIncident {
+  incidentId: string;
+  status: string;
+  detectedAt: string;
+  restartSentAt: string | null;
+  infraName: string | null;
+}
+
+interface LinkRow {
+  incident_id: string;
+  infra_name: string | null;
+  desk_server_incidents: { status: string; detected_at: string; restart_sent_at: string | null } | null;
+}
+
+/** Incidente aberto ligado a esta conversa e ainda sem desfecho para o cliente. */
+export async function findOpenIncidentForConversation(
+  supabase: ServiceClient,
+  conversationId: string,
+): Promise<ConversationIncident | null> {
+  const { data, error } = await supabase
+    .from('desk_server_incident_conversations')
+    .select('incident_id, infra_name, desk_server_incidents!inner(status, detected_at, restart_sent_at)')
+    .eq('conversation_id', conversationId)
+    .is('notified_at', null)
+    .in('desk_server_incidents.status', OPEN_STATUSES)
+    .limit(1);
+  if (error) {
+    console.warn('[incidents] busca do incidente da conversa falhou:', error.message);
+    return null;
+  }
+  const row = ((data ?? []) as unknown as LinkRow[])[0];
+  if (!row?.desk_server_incidents) return null;
+  return {
+    incidentId: row.incident_id,
+    status: row.desk_server_incidents.status,
+    detectedAt: row.desk_server_incidents.detected_at,
+    restartSentAt: row.desk_server_incidents.restart_sent_at,
+    infraName: row.infra_name,
+  };
+}
+
+export type FollowUpKind = 'recovered' | 'still_down' | 'deadline';
+
+/** O que dizer ao cliente: voltou, ainda em correção, ou passou do prazo. */
+export function decideFollowUp(
+  inc: ConversationIncident,
+  n8nOk: boolean,
+  replyWindow: string,
+  now = Date.now(),
+): { kind: FollowUpKind; reply: string } {
+  const label = inc.infraName ? `sua infraestrutura **${inc.infraName}**` : 'sua infraestrutura';
+  if (n8nOk) return { kind: 'recovered', reply: incidentRecoveredReply(label) };
+  const since = (now - new Date(inc.restartSentAt ?? inc.detectedAt).getTime()) / 60_000;
+  if (since >= RECOVERY_DEADLINE_MIN) return { kind: 'deadline', reply: incidentUnresolvedReply(replyWindow) };
+  return { kind: 'still_down', reply: incidentStillDownReply() };
+}
+
+/** Registra o desfecho da conversa e, se ninguém mais estiver esperando,
+ *  fecha o incidente: voltou → resolvido; prazo vencido com reinício enviado →
+ *  não resolvido; ninguém reiniciou ainda → segue no painel aguardando o operador. */
+export async function settleIncidentConversation(
+  supabase: ServiceClient,
+  inc: ConversationIncident,
+  conversationId: string,
+  kind: Exclude<FollowUpKind, 'still_down'>,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await supabase
+    .from('desk_server_incident_conversations')
+    .update({ notified_at: now })
+    .eq('incident_id', inc.incidentId)
+    .eq('conversation_id', conversationId);
+
+  const { count } = await supabase
+    .from('desk_server_incident_conversations')
+    .select('conversation_id', { count: 'exact', head: true })
+    .eq('incident_id', inc.incidentId)
+    .is('notified_at', null);
+  if ((count ?? 0) > 0) return;
+
+  const next = kind === 'recovered' ? 'recovered' : inc.status === 'restart_sent' ? 'unresolved' : null;
+  if (!next) return;
+  await supabase
+    .from('desk_server_incidents')
+    .update({ status: next, resolved_at: next === 'recovered' ? now : null, updated_at: now })
+    .eq('id', inc.incidentId)
+    .in('status', OPEN_STATUSES);
 }
