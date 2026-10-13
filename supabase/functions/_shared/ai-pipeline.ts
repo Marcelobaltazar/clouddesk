@@ -195,6 +195,8 @@ export const _test = {
   cancelHandoffReply: (unpaid: boolean, w: string) => cancelHandoffReply(unpaid, w),
   billingChangeReply: (kind: BillingChangeKind, w: string) => billingChangeReply(kind, w),
   addonCancelReply: (w: string) => addonCancelReply(w),
+  recentPaymentConfirmed: (b: BillingInfo | null, minutes?: number, now?: number) => recentPaymentConfirmed(b, minutes, now),
+  paymentConfirmedWaitReply: (label: string) => paymentConfirmedWaitReply(label),
   BASE_SYSTEM_PROMPT: () => BASE_SYSTEM_PROMPT,
   friendlyDeployStatus: (v: string | null) => friendlyDeployStatus(v),
   communityInviteFor: (ctx: InviteContext) => communityInviteFor(ctx),
@@ -911,7 +913,7 @@ ${lines.join('\n')}
 
 Como responder (OBRIGATÓRIO):
 ${allOk
-    ? `- TODOS os serviços testados estão ONLINE. Diga ao cliente que você acabou de fazer um teste e está tudo funcionando normalmente do nosso lado. Peça a ele um PRINT da tela do erro (ele pode anexar a imagem aqui no chat) e mais detalhes: qual link ele está acessando e qual mensagem aparece. NÃO transfira ainda — provavelmente é outro problema (link errado, cache, senha).`
+    ? `- TODOS os serviços testados estão ONLINE. Diga ao cliente que você acabou de fazer um teste e está tudo funcionando normalmente. Peça a ele um PRINT da tela do erro (ele pode anexar a imagem aqui no chat) e mais detalhes: qual link ele está acessando e qual mensagem aparece. NÃO transfira ainda — provavelmente é outro problema (link errado, cache, senha).`
     : `- Um ou mais serviços do cliente estão realmente com problema. Diga ao cliente QUAL infraestrutura e QUAL serviço você testou e encontrou com instabilidade (e quais estão no ar), e TRANSFIRA seguindo a regra de transferência — resposta curta e útil terminando com ${TRANSFER_KEYWORD} (exceto se o cliente for somente Starter — nesse caso oriente a Central de ajuda e o Discord).`}
 - NUNCA cite códigos HTTP, termos técnicos internos ou as URLs de teste. Fale de forma simples: "testei agora e está no ar" ou "confirmei uma instabilidade".${serverNote}`;
 }
@@ -985,6 +987,27 @@ function blockedSelfServiceReply(label: string): string {
     `Pra liberar, é só atualizar o cartão em **Configurações → Faturamento** ou pagar a fatura que chegou no seu e-mail. ` +
     `Assim que o pagamento confirmar, o acesso volta.\n\n` +
     `Se vc já pagou e continua bloqueada, me avisa aqui que eu aciono a equipe pra liberar.`
+  );
+}
+
+/** Trechos fixos das respostas acima — o guard reconhece no histórico o que já
+ *  disse, para não repetir o mesmo caminho e saber quando o cliente insistiu. */
+const BLOCKED_GUIDE_MARK = 'tá bloqueada';
+const PAID_WAIT_MARK = 'pagamento já foi confirmado';
+
+/** Fatura paga ou cobrança aprovada na Chargefy nos últimos `minutes`. */
+function recentPaymentConfirmed(billing: BillingInfo | null | undefined, minutes = 60, now = Date.now()): boolean {
+  const since = now - minutes * 60_000;
+  const at = (iso: string | null | undefined) => (iso ? new Date(iso).getTime() : Number.NaN);
+  return (billing?.invoices ?? []).some((i) => String(i.status).toLowerCase() === 'paid' && at(i.paid_at) >= since)
+    || (billing?.charges ?? []).some((c) => c.paid && at(c.created_at) >= since);
+}
+
+function paymentConfirmedWaitReply(label: string): string {
+  return (
+    `Vi aqui que o seu ${PAID_WAIT_MARK}. A liberação da ${label} costuma levar alguns minutos — ` +
+    `testa de novo daqui a uns 10 minutinhos.\n\n` +
+    `Se continuar bloqueada depois disso, me chama aqui que eu aciono a equipe na hora.`
   );
 }
 
@@ -1917,9 +1940,10 @@ interface AuditedReply {
 }
 
 /**
- * Gera a resposta e passa pelo revisor. Transferência não é revisada (o texto
- * é descartado). Reprovada, a resposta é reescrita UMA vez com os apontamentos
- * — sem segunda revisão, para não dobrar o tempo de resposta no caso raro.
+ * Gera a resposta e passa pelo revisor. Reprovada, a resposta é reescrita UMA
+ * vez com os apontamentos — sem segunda revisão, para não dobrar o tempo de
+ * resposta no caso raro. O texto que acompanha uma transferência também é
+ * revisado; se reprovado, a transferência vai sem ele (ver abaixo).
  */
 async function writeAuditedReply(
   apiKey: string,
@@ -2234,17 +2258,26 @@ export async function runAiPipeline(
   const replyWindow = humanReplyWindow();
 
   // P7-A: infra REALMENTE bloqueada (dado do banco) + reclamação relacionada.
-  // Devendo → manda o link da fatura e o cliente resolve na hora. Só vai para a
-  // equipe quando ele diz que já pagou (a liberação travou) ou quando insiste.
+  // Devendo → manda o link da fatura e o cliente resolve na hora.
+  //   • "paguei" com pagamento confirmado na última hora → pede para testar de
+  //     novo em alguns minutos (a liberação costuma ser automática);
+  //   • "paguei" sem confirmação, ou de novo depois do "aguarde" → equipe;
+  //   • voltou a reclamar depois de já ter recebido o caminho → equipe.
+  // A insistência conta a partir da NOSSA resposta anterior, não da primeira
+  // mensagem do cliente — senão o "paguei" logo depois do link já ia para a
+  // equipe.
   if (!isDraft && blockedInfras.length > 0 && (mentionsPayment(message) || INFRA_DOWN_RE.test(message))) {
     const names = blockedInfras.map((i) => i.default_domain || i.purchase_code).filter(Boolean);
     const label = infraLabel(names);
-    const insisted = history.some(
-      (m) => m.sender_type === 'contact' && (mentionsPayment(m.content) || INFRA_DOWN_RE.test(m.content)),
-    );
+    const botSaid = (mark: string) => history.some((m) => m.sender_type === 'bot' && String(m.content ?? '').includes(mark));
+    const paidClaim = claimsAlreadyPaid(message);
 
-    if (claimsAlreadyPaid(message) || insisted) {
-      console.log(`[AI] Guard P7-A infra bloqueada: handoff (pago=${claimsAlreadyPaid(message)} insistiu=${insisted})`);
+    if (paidClaim && !botSaid(PAID_WAIT_MARK) && recentPaymentConfirmed(contactInfo?.billing)) {
+      console.log('[AI] Guard P7-A infra bloqueada: pagamento confirmado — pedindo para aguardar a liberação');
+      return guardReply(paymentConfirmedWaitReply(label), 'guard:blocked-infra-paid-wait', 'billing');
+    }
+    if (paidClaim || botSaid(BLOCKED_GUIDE_MARK) || botSaid(PAID_WAIT_MARK)) {
+      console.log(`[AI] Guard P7-A infra bloqueada: handoff (pago=${paidClaim} insistiu=${!paidClaim})`);
       return await persistGuardHandoff(blockedAfterPaymentReply(label, replyWindow), 'guard:blocked-infra', 'billing');
     }
 

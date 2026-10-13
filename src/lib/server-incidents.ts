@@ -29,6 +29,9 @@ export async function loadActiveIncidents(): Promise<ServerIncident[]> {
     .in("status", ["detected", "restart_sent", "unresolved"])
     .gte("detected_at", since)
     .order("detected_at", { ascending: false });
+  // Antes do `supabase db push` a tabela não existe (o front sai pela Vercel no
+  // push, a migration é aplicada à parte): sem incidentes, sem erro na tela.
+  if (error?.code === "PGRST205" || error?.code === "42P01") return [];
   if (error) throw new Error(error.message);
   return (data ?? []).map((row) => ({
     id: row.id,

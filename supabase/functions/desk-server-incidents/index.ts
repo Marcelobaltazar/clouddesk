@@ -42,6 +42,15 @@ Deno.serve(async (req) => {
 
     const supabase = newServiceClient();
 
+    // Reiniciar servidor afeta vários clientes: perfil só-leitura (viewer) não age.
+    const { data: agent } = await supabase
+      .from('desk_agents')
+      .select('role')
+      .eq('auth_user_id', operatorAuthId)
+      .maybeSingle();
+    const role = (agent as { role?: string } | null)?.role;
+    if (role !== 'admin' && role !== 'operator') return json({ error: 'Seu perfil não pode agir sobre incidentes' }, 403);
+
     if (body.action === 'restart') {
       const result = await requestRestart(supabase, body.incident_id, operatorAuthId);
       return result.ok ? json({ ok: true }) : json({ error: result.error }, 409);
