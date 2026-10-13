@@ -18,7 +18,9 @@ $functions = @(
     "desk-inbound-email",
     "desk-send-email",
     "desk-merge-conversations",
-    "desk-campaigns-admin"
+    "desk-campaigns-admin",
+    "desk-server-incidents",
+    "desk-incident-monitor"
 )
 
 Write-Host ""

@@ -23,12 +23,21 @@
 
 import type { ServiceClient } from './supabase.ts';
 import {
+  cloudfyProdClient,
   fetchContactInfo,
   isActiveInfra,
   type ContactInfoResult,
   type ContactInfra,
   type ContactSubscription,
 } from './contact-info.ts';
+import {
+  checkServer,
+  fetchInfraServers,
+  pickControlServers,
+  type InfraServer,
+  type ServerVerdict,
+} from './server-health.ts';
+import { incidentDetectedReply, openOrJoinIncident, serverIncidentsEnabled } from './server-incidents.ts';
 import type { BillingInfo, BillingInvoice } from './chargefy.ts';
 import { collectUrls, enforceLinkAllowlist } from './link-guard.ts';
 import {
@@ -815,7 +824,59 @@ async function probeInfraHealth(infras: ContactInfra[]): Promise<ProbeResult[]> 
   return classifyProbeResults(results);
 }
 
-function buildDiagnosticsSection(results: ProbeResult[]): string {
+/** Resultado do teste do servidor de uma infra cujo n8n não respondeu. */
+interface ServerCheck {
+  server: InfraServer;
+  verdict: ServerVerdict;
+  infraNames: string[];
+}
+
+interface InfraDiagnosis {
+  results: ProbeResult[];
+  servers: ServerCheck[];
+}
+
+/**
+ * Bloco 2 (SERVER_INCIDENTS=on): quando o n8n de uma infra não responde, testa
+ * o servidor dela. Só o n8n dispara o teste — todo plano tem n8n, e servidor
+ * fora derruba o n8n junto; a Evolution pode nem existir (o cliente escolhe
+ * WAHA desde ago/2026).
+ */
+async function diagnoseInfra(infras: ContactInfra[]): Promise<InfraDiagnosis> {
+  const results = await probeInfraHealth(infras);
+  if (!serverIncidentsEnabled()) return { results, servers: [] };
+
+  const downNames = new Set(results.filter((r) => r.service === 'n8n' && !r.ok).map((r) => r.infra));
+  if (downNames.size === 0) return { results, servers: [] };
+
+  const prod = cloudfyProdClient();
+  if (!prod) return { results, servers: [] };
+
+  const downInfras = infras.filter((i) => downNames.has(i.default_domain));
+  const servers = await fetchInfraServers(prod, downInfras.map((i) => i.infra_id));
+  if (servers.length === 0) return { results, servers: [] };
+
+  const byServer = new Map<number, { server: InfraServer; infraNames: string[] }>();
+  for (const s of servers) {
+    const name = downInfras.find((i) => i.infra_id === s.infraId)?.default_domain ?? '';
+    const entry = byServer.get(s.serverId) ?? { server: s, infraNames: [] };
+    if (name) entry.infraNames.push(name);
+    byServer.set(s.serverId, entry);
+  }
+  const controls = await pickControlServers(prod, [...byServer.keys()]);
+  const checks = await Promise.all(
+    [...byServer.values()].map(async (e) => ({ ...e, verdict: await checkServer(e.server.portainerUrl, controls) })),
+  );
+  for (const c of checks) {
+    console.log(
+      `[AI] Servidor ${c.server.serverName}: tentativas=${c.verdict.attempts.join(',')} ` +
+      `controle=${c.verdict.controls.join(',')} → caiu=${c.verdict.serverDown && c.verdict.controlOk}`,
+    );
+  }
+  return { results, servers: checks };
+}
+
+function buildDiagnosticsSection(results: ProbeResult[], servers: ServerCheck[] = []): string {
   if (results.length === 0) return '';
 
   const lines = results.map((r) => {
@@ -829,6 +890,13 @@ function buildDiagnosticsSection(results: ProbeResult[]): string {
 
   const allOk = results.every((r) => r.ok);
 
+  // O servidor respondeu: a falha é só desta infra (nunca dizer isso como
+  // culpa do cliente — é hipótese, não fato).
+  const serverFine = servers.some((s) => !s.verdict.serverDown);
+  const serverNote = !allOk && serverFine
+    ? `\n- Teste adicional: o ambiente que hospeda a infraestrutura está normal — a falha é só nos serviços desta infraestrutura. Causas comuns são fluxo em looping, sobrecarga ou execução presa no n8n, mas isso NÃO foi confirmado: não afirme a causa. Diga que identificou uma instabilidade nos serviços da infra dele e que a equipe vai olhar; se fizer sentido, sugira conferir as Executions do n8n.`
+    : '';
+
   return `
 [DIAGNÓSTICO AUTOMÁTICO — TESTE FEITO AGORA NAS URLS REAIS DO CLIENTE]
 O cliente relatou problema de acesso e o sistema acabou de testar os serviços dele:
@@ -838,7 +906,7 @@ Como responder (OBRIGATÓRIO):
 ${allOk
     ? `- TODOS os serviços testados estão ONLINE. Diga ao cliente que você acabou de fazer um teste e está tudo funcionando normalmente do nosso lado. Peça a ele um PRINT da tela do erro (ele pode anexar a imagem aqui no chat) e mais detalhes: qual link ele está acessando e qual mensagem aparece. NÃO transfira ainda — provavelmente é outro problema (link errado, cache, senha).`
     : `- Um ou mais serviços do cliente estão realmente com problema. Diga ao cliente QUAL infraestrutura e QUAL serviço você testou e encontrou com instabilidade (e quais estão no ar), e TRANSFIRA seguindo a regra de transferência — resposta curta e útil terminando com ${TRANSFER_KEYWORD} (exceto se o cliente for somente Starter — nesse caso oriente a Central de ajuda e o Discord).`}
-- NUNCA cite códigos HTTP, termos técnicos internos ou as URLs de teste. Fale de forma simples: "testei agora e está no ar" ou "confirmei uma instabilidade".`;
+- NUNCA cite códigos HTTP, termos técnicos internos ou as URLs de teste. Fale de forma simples: "testei agora e está no ar" ou "confirmei uma instabilidade".${serverNote}`;
 }
 
 // ─── Respostas determinísticas dos guards (P7 / cancelamento) ─────────────────
@@ -2233,12 +2301,12 @@ export async function runAiPipeline(
   // P1: reclamação de "fora do ar"/erro com infra ativa → testa as URLs reais
   // AGORA (em paralelo com o RAG) e injeta o resultado no contexto do modelo.
   const shouldProbe = !isDraft && deployedInfras.length > 0 && INFRA_DOWN_RE.test(message);
-  const probePromise: Promise<ProbeResult[]> = shouldProbe
-    ? probeInfraHealth(deployedInfras).catch((e) => {
+  const probePromise: Promise<InfraDiagnosis> = shouldProbe
+    ? diagnoseInfra(deployedInfras).catch((e) => {
         console.warn('[AI] Probe de infra falhou:', e instanceof Error ? e.message : e);
-        return [] as ProbeResult[];
+        return { results: [], servers: [] } as InfraDiagnosis;
       })
-    : Promise.resolve([] as ProbeResult[]);
+    : Promise.resolve({ results: [], servers: [] } as InfraDiagnosis);
 
   // ── Step 2: base de conhecimento (busca híbrida + seletor + busca recursiva) ──
   // Ver ai-retrieval.ts. Roda em paralelo com o probe de infra.
@@ -2251,10 +2319,34 @@ export async function runAiPipeline(
   const kbMatches = knowledge.articles;
 
   // Diagnóstico de infra (P1) — aguarda o probe iniciado em paralelo com o RAG
-  const probeResults = await probePromise;
-  const diagnosticsSection = buildDiagnosticsSection(probeResults);
+  const { results: probeResults, servers: serverChecks } = await probePromise;
+  const diagnosticsSection = buildDiagnosticsSection(probeResults, serverChecks);
   if (shouldProbe) {
     console.log(`[AI] Probe: ${probeResults.map((r) => `${r.infra}/${r.service}=${r.status ?? 'timeout'}`).join(' ') || '(sem alvos)'}`);
+  }
+
+  // Bloco 2: servidor caiu de verdade (todas as tentativas sem resposta E o
+  // servidor de controle respondendo) → incidente + alerta no painel. O
+  // cliente recebe resposta fixa, sem servidor/provedor/culpa; a IA segue
+  // ativa para o aviso de "voltou".
+  const downServer = serverChecks.find((c) => c.verdict.serverDown && c.verdict.controlOk);
+  if (downServer && !isDraft) {
+    const opened = await openOrJoinIncident(
+      supabase, downServer.server, downServer.verdict, conversationId, downServer.infraNames[0] ?? '',
+    );
+    if (opened) {
+      console.log(`[AI] Incidente de servidor ${opened.isNew ? 'aberto' : 'reaproveitado'}: ${opened.incidentId}`);
+      const incidentAnalysis: MessageAnalysis = { intent: 'infra_down', sentiment: 'negativo', urgency: 'critica', resolved: false };
+      void applyAnalysis(supabase, conversationId, incidentAnalysis);
+      void logInteraction(supabase, {
+        conversationId, model: 'guard:server-incident', usage, latencyMs: 0, wasEscalated: false,
+        analysis: incidentAnalysis, kbIds: [], snippetIds: [], draft: false,
+      });
+      return {
+        reply: incidentDetectedReply(infraLabel(downServer.infraNames.slice(0, 1))),
+        should_handoff: false, blocked: false, auto_resolved: false, reopened, metadata: null,
+      };
+    }
   }
 
   // ── Step 3: prompt + LLM ─────────────────────────────────────────────────────
