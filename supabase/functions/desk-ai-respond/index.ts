@@ -7,19 +7,33 @@
 //
 // Os turnos reais do WIDGET passaram para a Edge Function desk-widget-api, que
 // verifica a identidade do cliente (HMAC) antes de chamar o pipeline. Chamadas
-// não-draft aqui retornam 410 com instrução de migração.
+// fora dos modos abaixo retornam 410 com instrução de migração.
 //
-// Pipeline completo: ../_shared/ai-pipeline.ts
+// Modos (sempre operador autenticado):
+//   draft   { conversation_id, message } → { reply }   estrelinha do editor
+//   rewrite { text, tone }               → { text }    reescrever no tom pedido
+//
+// Pipeline completo: ../_shared/ai-pipeline.ts · reescrita: ../_shared/ai-rewrite.ts
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.98.0';
 import { corsHeaders } from '../_shared/cors.ts';
 import { verifyOperator } from '../_shared/widget-auth.ts';
-import { runAiPipeline } from '../_shared/ai-pipeline.ts';
+import { callLLM, runAiPipeline } from '../_shared/ai-pipeline.ts';
+import {
+  buildRewriteUserPrompt,
+  cleanRewriteOutput,
+  isRewriteTone,
+  MAX_REWRITE_CHARS,
+  missingUrls,
+  REWRITE_SYSTEM_PROMPT,
+} from '../_shared/ai-rewrite.ts';
 
 interface DraftRequest {
   conversation_id?: string;
   message?: string;
   mode?: string;
+  text?: string;
+  tone?: string;
 }
 
 function json(body: Record<string, unknown>, status = 200): Response {
@@ -38,9 +52,37 @@ Deno.serve(async (req) => {
     const body: DraftRequest = await req.json().catch(() => ({}));
     const { conversation_id, message, mode } = body;
 
+    if (mode === 'rewrite') {
+      if (!(await verifyOperator(req))) {
+        return json({ error: 'Apenas operadores autenticados podem reescrever mensagens' }, 401);
+      }
+      const text = typeof body.text === 'string' ? body.text.trim() : '';
+      if (!text) return json({ error: 'Escreva a mensagem antes de pedir para reescrever' }, 400);
+      if (text.length > MAX_REWRITE_CHARS) return json({ error: 'Texto longo demais para reescrever' }, 400);
+      if (!isRewriteTone(body.tone)) return json({ error: 'Tom inválido' }, 400);
+
+      const apiKey = Deno.env.get('OPENROUTER_API_KEY');
+      if (!apiKey) throw new Error('Missing OPENROUTER_API_KEY secret');
+
+      const llm = await callLLM(
+        apiKey,
+        REWRITE_SYSTEM_PROMPT,
+        [{ role: 'user', content: buildRewriteUserPrompt(text, body.tone) }],
+        { temperature: body.tone === 'corrigir' ? 0.1 : 0.5, maxTokens: 2000, timeoutMs: 30_000 },
+      );
+      const rewritten = cleanRewriteOutput(llm.content);
+      if (!rewritten) return json({ error: 'A IA não devolveu texto — tente de novo' }, 502);
+      const lost = missingUrls(text, rewritten);
+      if (lost.length > 0) {
+        console.warn(`[desk-ai-respond] rewrite descartada: perdeu ${lost.length} link(s)`);
+        return json({ error: 'A reescrita perdeu um link do texto original — tente de novo' }, 422);
+      }
+      return json({ text: rewritten });
+    }
+
     if (mode !== 'draft') {
       return json({
-        error: 'Este endpoint aceita apenas mode=draft (copilot do operador). O widget usa desk-widget-api.',
+        error: 'Este endpoint aceita apenas mode=draft ou mode=rewrite (painel do operador). O widget usa desk-widget-api.',
       }, 410);
     }
 

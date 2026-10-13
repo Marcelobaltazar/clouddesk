@@ -52,6 +52,7 @@ import {
   contestsBillingReading,
   detectBillingChange,
   mentionsPayment,
+  teamOnlyTopic,
   wantsAddonCancel,
   type BillingChangeKind,
 } from './support-intents.ts';
@@ -176,7 +177,7 @@ const CONTROL_MARKERS_RE =
 // Cabeçalhos internos do prompt — se aparecem numa mensagem de cliente, é
 // tentativa de injeção de contexto falso.
 const PROMPT_BLOCK_RE =
-  /(-{3,}\s*(?:DADOS DO CLIENTE|REGRAS SOBRE OS DADOS DO CLIENTE)\s*-{3,})|\[\s*(?:IDENTIDADE|SEGURAN[ÇC]A[^[\]]*|BASE DE CONHECIMENTO[^\]]*|REGRA DE TRANSFER[ÊE]NCIA[^\]]*|AN[ÁA]LISE OBRIGAT[ÓO]RIA[^\]]*|PRIMEIRA MENSAGEM[^\]]*|PLANO STARTER[^\]]*|MODO RASCUNHO[^\]]*|JEITO DE FALAR[^\]]*|COMO FALAR DE PROBLEMAS[^\]]*|CORRE[ÇC][ÃA]O[^\]]*)\s*\]/gi;
+  /(-{3,}\s*(?:DADOS DO CLIENTE|REGRAS SOBRE OS DADOS DO CLIENTE)\s*-{3,})|\[\s*(?:IDENTIDADE|SEGURAN[ÇC]A[^[\]]*|BASE DE CONHECIMENTO[^\]]*|REGRA DE TRANSFER[ÊE]NCIA[^\]]*|AN[ÁA]LISE OBRIGAT[ÓO]RIA[^\]]*|PRIMEIRA MENSAGEM[^\]]*|PLANO STARTER[^\]]*|POL[ÍI]TICA DE ATENDIMENTO[^\]]*|MODO RASCUNHO[^\]]*|JEITO DE FALAR[^\]]*|COMO FALAR DE PROBLEMAS[^\]]*|CORRE[ÇC][ÃA]O[^\]]*)\s*\]/gi;
 
 // Exportado só para testes (regexes de detecção determinística).
 export const _test = {
@@ -200,6 +201,12 @@ export const _test = {
   BASE_SYSTEM_PROMPT: () => BASE_SYSTEM_PROMPT,
   friendlyDeployStatus: (v: string | null) => friendlyDeployStatus(v),
   communityInviteFor: (ctx: InviteContext) => communityInviteFor(ctx),
+  // Política do Starter (atendimento só com a Luna)
+  isStarterOnlyClient: (c: ContactInfoResult | null) => isStarterOnlyClient(c),
+  starterTeamOnlyReason: (t: string) => starterTeamOnlyReason(t),
+  buildDiagnosticsSection: (...a: Parameters<typeof buildDiagnosticsSection>) => buildDiagnosticsSection(...a),
+  starterFallbackReply: () => starterFallbackReply(),
+  MCP_CONNECT_URL: () => MCP_CONNECT_URL,
   COMMUNITY_INVITE_FIRST: () => COMMUNITY_INVITE_FIRST,
   COMMUNITY_INVITE: () => COMMUNITY_INVITE,
   // Etapas com LLM, para o teste ponta a ponta local (base real + OpenRouter)
@@ -358,6 +365,23 @@ function kbArticleUrl(
   return `${HELP_CENTER_URL}/ajuda/${key}${slug ? `-${slug}` : ''}`;
 }
 
+// ─── MCP da Cloudfy — o caminho do cliente Starter ────────────────────────────
+// No Starter o atendimento é a Luna (sem equipe humana). Para não deixar o
+// cliente sem saída, o MCP vira o próximo passo na maioria dos casos: com ele
+// a IA do próprio cliente (ChatGPT, Claude…) mexe nos fluxos dele. Fatos do
+// snippet "MCP - CLOUDFY"; o link vai fixo porque a busca do turno raramente
+// traz o artigo do MCP quando a pergunta é sobre outra coisa. A Central abre o
+// artigo pelo id — o título só enfeita a URL.
+const MCP_CONNECT_URL = kbArticleUrl(
+  'manual', null, 'bcd3348c-bbd7-47ad-b58b-ca5e5b76f634',
+  'Como conectar o MCP da Cloudfy no Claude (site, app ou Desktop)?',
+) ?? `${HELP_CENTER_URL}/ajuda`;
+/** No Starter só isto vai para a equipe (13/10/2026). Reembolso, cobrança
+ *  indevida, adicional e infra paga bloqueada saem antes, pelos guards. */
+const STARTER_TEAM_ONLY =
+  'pedidos que só a equipe executa — resetar a senha do n8n de quem ficou sem acesso, restaurar um backup, recriar a credencial da IA Ilimitada, reembolso ou cobrança indevida, cancelar um adicional, liberar infra que já foi paga e continua bloqueada. Esses vão para a equipe, e aí dizer que está passando o pedido pra ela é o certo';
+const MCP_FACTS = `Todos os clientes têm o MCP da Cloudfy, sem custo. Com ele o cliente conecta a infraestrutura no ChatGPT ou no Claude (também no Cursor e no Codex) e pede, em português, pra IA criar e ajustar os fluxos do n8n, investigar execuções com erro e ver as instâncias do WhatsApp. Pra conectar: no Cloudfy Console, área MCP. Passo a passo no Claude: ${MCP_CONNECT_URL}`;
+
 // ─── Constants / prompt ───────────────────────────────────────────────────────
 
 const TRANSFER_KEYWORD = '[TRANSFERIR]';
@@ -463,7 +487,7 @@ const AUX_TIMEOUT_MS = 15_000;
  *  for usado. */
 const AUX_MAX_TOKENS = 4000;
 
-async function callLLM(
+export async function callLLM(
   apiKey: string,
   systemPrompt: string,
   messages: ChatMessage[],
@@ -885,7 +909,7 @@ async function diagnoseInfra(infras: ContactInfra[], checkServers = true): Promi
   return { results, servers: checks };
 }
 
-function buildDiagnosticsSection(results: ProbeResult[], servers: ServerCheck[] = []): string {
+function buildDiagnosticsSection(results: ProbeResult[], servers: ServerCheck[] = [], starter = false): string {
   if (results.length === 0) return '';
 
   const lines = results.map((r) => {
@@ -903,8 +927,12 @@ function buildDiagnosticsSection(results: ProbeResult[], servers: ServerCheck[] 
   // culpa do cliente — é hipótese, não fato).
   const serverFine = servers.some((s) => !s.verdict.serverDown);
   const serverNote = !allOk && serverFine
-    ? `\n- Teste adicional: o ambiente que hospeda a infraestrutura está normal — a falha é só nos serviços desta infraestrutura. Causas comuns são fluxo em looping, sobrecarga ou execução presa no n8n, mas isso NÃO foi confirmado: não afirme a causa. Diga que identificou uma instabilidade nos serviços da infra dele e que a equipe vai olhar; se fizer sentido, sugira conferir as Executions do n8n.`
+    ? `\n- Teste adicional: o ambiente que hospeda a infraestrutura está normal — a falha é só nos serviços desta infraestrutura. Causas comuns são fluxo em looping, sobrecarga ou execução presa no n8n, mas isso NÃO foi confirmado: não afirme a causa. Diga que identificou uma instabilidade nos serviços da infra dele${starter ? '' : ' e que a equipe vai olhar'}; se fizer sentido, sugira conferir as Executions do n8n.`
     : '';
+  // Starter: não há equipe para quem passar — ele sai com o que dá para fazer.
+  const problemAction = starter
+    ? `oriente o que ele mesmo pode fazer segundo as FONTES (ex.: reiniciar a infraestrutura pelo Cloudfy Console) e, se o problema for num fluxo, o MCP da Cloudfy pra IA dele investigar as execuções. Não transfira.`
+    : `TRANSFIRA seguindo a regra de transferência — resposta curta e útil terminando com ${TRANSFER_KEYWORD}.`;
 
   return `
 [DIAGNÓSTICO AUTOMÁTICO — TESTE FEITO AGORA NAS URLS REAIS DO CLIENTE]
@@ -914,7 +942,7 @@ ${lines.join('\n')}
 Como responder (OBRIGATÓRIO):
 ${allOk
     ? `- TODOS os serviços testados estão ONLINE. Diga ao cliente que você acabou de fazer um teste e está tudo funcionando normalmente. Peça a ele um PRINT da tela do erro (ele pode anexar a imagem aqui no chat) e mais detalhes: qual link ele está acessando e qual mensagem aparece. NÃO transfira ainda — provavelmente é outro problema (link errado, cache, senha).`
-    : `- Um ou mais serviços do cliente estão realmente com problema. Diga ao cliente QUAL infraestrutura e QUAL serviço você testou e encontrou com instabilidade (e quais estão no ar), e TRANSFIRA seguindo a regra de transferência — resposta curta e útil terminando com ${TRANSFER_KEYWORD} (exceto se o cliente for somente Starter — nesse caso oriente a Central de ajuda e o Discord).`}
+    : `- Um ou mais serviços do cliente estão realmente com problema. Diga ao cliente QUAL infraestrutura e QUAL serviço você testou e encontrou com instabilidade (e quais estão no ar), e ${problemAction}`}
 - NUNCA cite códigos HTTP, termos técnicos internos ou as URLs de teste. Fale de forma simples: "testei agora e está no ar" ou "confirmei uma instabilidade".${serverNote}`;
 }
 
@@ -1057,6 +1085,18 @@ function billingChangeReply(kind: BillingChangeKind, replyWindow: string): strin
     `${what[kind]} — eu consigo consultar sua cobrança, mas não alterar nada por aqui.\n\n` +
     `Já deixei seu caso com eles: alguém te responde por aqui ${replyWindow}. ` +
     `Se tiver comprovante ou print, manda aqui que já fica tudo junto.`
+  );
+}
+
+/** Starter quando o modelo tentou transferir mesmo assim: o cliente sai com o
+ *  caminho (MCP, Central, comunidade) — nunca com "não posso". */
+function starterFallbackReply(): string {
+  return (
+    `Pra isso eu não tenho uma resposta confirmada aqui. O que mais resolve nesses casos: conectar o MCP da Cloudfy ` +
+    `no ChatGPT ou no Claude e pedir pra IA olhar seus fluxos e as execuções com erro — vem incluso, sem custo. ` +
+    `Pra conectar é no Cloudfy Console, área MCP (passo a passo: ${MCP_CONNECT_URL}).\n\n` +
+    `Vale também uma olhada na Central de ajuda (${HELP_CENTER_URL}/ajuda) e, se quiser trocar ideia com outros ` +
+    `usuários, a comunidade no Discord: ${COMMUNITY_DISCORD}`
   );
 }
 
@@ -1254,16 +1294,35 @@ ${buildBillingContext(info.billing)}
 `;
 }
 
+/**
+ * Plano que vale para o ATENDIMENTO: o maior entre as infras que não foram
+ * encerradas. Infra bloqueada por pagamento ou ainda implantando continua sendo
+ * cliente daquele plano — antes, um Advanced com a infra bloqueada (ou sem
+ * nenhuma infra no ar) caía na regra do Starter e ficava sem equipe.
+ * (detectPlanTag, que alimenta as etiquetas e os Disparos, olha só as no ar.)
+ */
+function supportPlan(contactInfo?: ContactInfoResult | null): PlanTag {
+  const live = (contactInfo?.subscriptions ?? [])
+    .filter((s) => (s.status ?? '').toLowerCase() !== 'canceled')
+    .map((s) => ({ ...s, status: 'active' }));
+  return detectPlanTag(live);
+}
+
+/** Starter não tem atendimento humano: o atendimento é a Luna, no chat. */
 function isStarterOnlyClient(contactInfo?: ContactInfoResult | null): boolean {
-  const subscriptions = contactInfo?.subscriptions ?? [];
-  const activeSubscriptions = subscriptions.filter((s) => {
-    const st = (s.status ?? '').toLowerCase();
-    return st === 'active' || st === 'completed';
-  });
-  const hasNonStarter = activeSubscriptions.some(
-    (s) => !(s.product ?? '').toLowerCase().includes('starter'),
-  );
-  return !hasNonStarter;
+  return supportPlan(contactInfo) === 'starter';
+}
+
+/**
+ * Exceção do Starter: o que só a equipe executa. O modelo decide transferir;
+ * isto confere que o assunto apareceu nas últimas mensagens do cliente — pedido
+ * de humano sozinho não basta. Inclui cobrança e adicional porque o guard
+ * determinístico pode não pegar uma frase que o modelo entendeu.
+ */
+function starterTeamOnlyReason(recentClientText: string): string | null {
+  return teamOnlyTopic(recentClientText)
+    ?? detectBillingChange(recentClientText)
+    ?? (wantsAddonCancel(recentClientText) ? 'addon_cancel' : null);
 }
 
 /** O que a busca concluiu, dito à IA antes das fontes. É o que a autoriza a
@@ -1342,13 +1401,55 @@ function buildSystemPrompt(
 
   const contactContext = buildClientContext(contactInfo ?? null);
 
-  const starterRule = isStarterOnlyClient(contactInfo)
+  // Starter: o atendimento é a Luna. Antes a regra era só "não transfira", e
+  // o modelo seguia oferecendo "quer que eu encaminhe?" — e recusava quando o
+  // cliente dizia sim. Agora o Starter não vê regra de transferência nenhuma
+  // (transferSection abaixo) e recebe o caminho: fontes, MCP e comunidade.
+  const starter = isStarterOnlyClient(contactInfo);
+  const starterRule = starter
     ? `
-[PLANO STARTER — SEM TRANSFERÊNCIA]
-Este cliente tem apenas plano(s) Starter ativo(s). NUNCA transfira para humano — mesmo que ele peça explicitamente. NÃO use ${TRANSFER_KEYWORD} em nenhuma hipótese.
-Tente resolver tudo você mesma. Se não conseguir resolver, oriente o cliente a usar a Central de ajuda (${HELP_CENTER_URL}/ajuda) e o Discord (${COMMUNITY_DISCORD}).
+[PLANO STARTER — O ATENDIMENTO É VOCÊ]
+Este cliente é do plano Starter. No Starter o atendimento é este chat, com você: não existe atendimento da equipe humana, nem se ele pedir. Ele tem atendimento — é você — e não pode sair daqui sem um caminho.
+- Resolva de verdade: use as FONTES, mande o passo a passo e cite o artigo da Central com [FONTE:n] quando houver.
+- Na maioria dos casos — principalmente fluxo do n8n, execução com erro, webhook, Evolution/WhatsApp — indique o MCP da Cloudfy como próximo passo. ${MCP_FACTS}
+  Ligue a dica ao caso dele (ex.: "conecta o MCP e pede pra IA olhar as execuções com erro desse fluxo"), não como propaganda solta.
+- NUNCA ofereça encaminhar, passar o caso, abrir chamado ou acionar a equipe, e não diga que alguém vai olhar depois — nem frases como "a equipe já está olhando" ou "já acionei a verificação". Única exceção: ${STARTER_TEAM_ONLY}.
+- Se ele pedir a equipe ou um humano: diga com naturalidade que no Starter o atendimento é por aqui, com você, e siga com um próximo passo concreto. Nada de "infelizmente não posso".
+- O Discord (${COMMUNITY_DISCORD}) é a comunidade de usuários da Cloudfy: pode convidar como um lugar legal pra trocar ideia com outros clientes, mas nunca diga que a equipe atende lá.
 `
     : '';
+
+  const offTopicRule = 'Se for uma pergunta completamente fora do contexto de suporte da Cloudfy (ex.: "onde comprar coca-cola", receitas, assuntos pessoais, notícias), NÃO transfira: responda educadamente que você só pode ajudar com questões relacionadas à Cloudfy (infraestrutura, n8n, Evolution API, assinaturas, etc.) e ofereça ajuda nesses temas.';
+  const billingQuestions = 'Perguntas sobre cobrança (valor do plano, fatura, 2ª via, vencimento, se o pagamento passou, motivo de recusa do cartão, parcelas) NÃO são motivo de transferência: responda você mesma usando o bloco DADOS DE COBRANÇA. Upgrade de plano, troca de cartão e cancelamento o próprio cliente faz no painel — oriente pelas FONTES.';
+
+  const transferSection = starter
+    ? `[REGRA DE TRANSFERÊNCIA — PLANO STARTER: SÓ O QUE A EQUIPE EXECUTA]
+Este cliente é do plano Starter: não existe atendimento da equipe (veja o bloco PLANO STARTER). Use ${TRANSFER_KEYWORD} SOMENTE quando ele precisar de uma destas operações, que só a equipe executa: resetar a senha do n8n de quem ficou sem acesso, restaurar um backup, recriar a credencial da IA Ilimitada, reembolso ou cobrança que ele não reconhece, cancelar a IA Ilimitada ou o backup. Nesse caso diga em poucas linhas o que entendeu e que está passando o pedido pra equipe, e termine com ${TRANSFER_KEYWORD} sozinho na última linha (antes do bloco META). Pedido de humano, dúvida, fluxo, erro de n8n/Evolution: NUNCA transfira.
+
+1. Se a pergunta puder ser respondida pelos DADOS DO CLIENTE ou pelas FONTES da base de conhecimento, responda normalmente.
+2. Se a base NÃO cobre a pergunta, não invente: diga que não tem essa informação confirmada e mostre o caminho que ele tem — o MCP da Cloudfy, um artigo da Central, o que conferir.
+3. ${offTopicRule}
+
+${billingQuestions}`
+    : `[REGRA DE TRANSFERÊNCIA — OBRIGATÓRIA]
+NÃO transfira para humano por padrão. Antes de pensar em transferir, siga esta ordem:
+
+1. Se a pergunta puder ser respondida pelos DADOS DO CLIENTE ou pelas FONTES da base de conhecimento, responda normalmente.
+2. Se a base NÃO cobre a pergunta, não invente e não transfira de imediato: diga que não tem essa informação confirmada e pergunte se o cliente quer que você encaminhe para a equipe. Se ele disser que sim, isso é pedido explícito — caso (a) abaixo.
+3. ${offTopicRule}
+
+Use o marcador ${TRANSFER_KEYWORD} SOMENTE em um destes casos:
+  a) O cliente pediu EXPLICITAMENTE para falar com um humano/atendente; OU
+  b) É um problema técnico específico que realmente precisa de intervenção humana e que você não consegue resolver — por exemplo: infraestrutura bloqueada ou um bug reportado pelo cliente.
+
+${billingQuestions} Só transfira se o cliente pedir explicitamente, ou se for algo que só a equipe faz (reembolso, estorno, cobrança que ele não reconhece) — você só consulta, não executa alterações.
+
+Quando transferir, NUNCA mande o cliente embora sem resposta. Escreva antes, em poucas linhas:
+- o que você entendeu e o que você verificou (ex.: o resultado do teste da infra, se houver);
+- o que ele pode fazer enquanto isso, se houver algo seguro nas FONTES (ex.: conferir as Executions do n8n);
+- que você está passando o caso para a equipe.
+Não prometa prazo — o sistema informa o prazo logo em seguida. Termine com ${TRANSFER_KEYWORD} sozinho na última linha (antes do bloco META).
+Dúvida genérica, pergunta fora de contexto, ou algo que você consegue responder NÃO são motivos para transferir.`;
 
   // Antes a primeira resposta abria com "Vi aqui no seu perfil:" + lista dos
   // produtos — soava a formulário. Agora o oi é curto e o dado do cliente só
@@ -1369,27 +1470,7 @@ ${SECURITY_PROMPT}
 ${clientSection}${contactContext}${diagnosticsSection ?? ''}${firstMessageInstruction}${starterRule}
 ---
 
-[REGRA DE TRANSFERÊNCIA — OBRIGATÓRIA]
-NÃO transfira para humano por padrão. Antes de pensar em transferir, siga esta ordem:
-
-1. Se a pergunta puder ser respondida pelos DADOS DO CLIENTE ou pelas FONTES da base de conhecimento, responda normalmente.
-2. Se a base NÃO cobre a pergunta, não invente e não transfira de imediato: diga que não tem essa informação confirmada e pergunte se o cliente quer que você encaminhe para a equipe (cliente só Starter: oriente a Central de ajuda e o Discord, conforme a regra do plano Starter). Se ele disser que sim, isso é pedido explícito — caso (a) abaixo.
-3. Se for uma pergunta completamente fora do contexto de suporte da Cloudfy (ex.: "onde comprar coca-cola", receitas, assuntos pessoais, notícias), NÃO transfira: responda educadamente que você só pode ajudar com questões relacionadas à Cloudfy (infraestrutura, n8n, Evolution API, assinaturas, etc.) e ofereça ajuda nesses temas.
-
-Use o marcador ${TRANSFER_KEYWORD} SOMENTE em um destes casos:
-  a) O cliente pediu EXPLICITAMENTE para falar com um humano/atendente; OU
-  b) É um problema técnico específico que realmente precisa de intervenção humana e que você não consegue resolver — por exemplo: infraestrutura bloqueada ou um bug reportado pelo cliente.
-
-Perguntas sobre cobrança (valor do plano, fatura, 2ª via, vencimento, se o pagamento passou, motivo de recusa do cartão, parcelas) NÃO são motivo de transferência: responda você mesma usando o bloco DADOS DE COBRANÇA. Upgrade de plano, troca de cartão e cancelamento o próprio cliente faz no painel — oriente pelas FONTES. Só transfira se o cliente pedir explicitamente, ou se for algo que só a equipe faz (reembolso, estorno, cobrança que ele não reconhece) — você só consulta, não executa alterações.
-
-Quando transferir, NUNCA mande o cliente embora sem resposta. Escreva antes, em poucas linhas:
-- o que você entendeu e o que você verificou (ex.: o resultado do teste da infra, se houver);
-- o que ele pode fazer enquanto isso, se houver algo seguro nas FONTES (ex.: conferir as Executions do n8n);
-- que você está passando o caso para a equipe.
-Não prometa prazo — o sistema informa o prazo logo em seguida. Termine com ${TRANSFER_KEYWORD} sozinho na última linha (antes do bloco META).
-Dúvida genérica, pergunta fora de contexto, ou algo que você consegue responder NÃO são motivos para transferir.
-
-Se o cliente tem APENAS plano(s) Starter ativo(s) (nenhuma assinatura ativa de Advanced, Ultra, Max ou outro), NUNCA transfira para humano — mesmo que peça. Tente resolver tudo. Se não conseguir, oriente para a Central de ajuda (${HELP_CENTER_URL}/ajuda) e o Discord (${COMMUNITY_DISCORD}). Se o cliente tiver alguma assinatura ativa não-Starter, o atendimento humano é normal.
+${transferSection}
 
 ---
 
@@ -1445,9 +1526,25 @@ function buildAuditEvidence(
 ): string {
   return [
     buildClientContext(contactInfo).trim() || '--- DADOS DO CLIENTE ---\n(não disponíveis)',
+    supportPolicyEvidence(contactInfo),
     diagnosticsSection.trim(),
     `[FONTES DA BASE DE CONHECIMENTO]\n${buildKnowledgeSection(knowledge)}`,
   ].filter(Boolean).join('\n\n');
+}
+
+/** Como este cliente é atendido — o revisor precisa disso para aprovar "no
+ *  Starter o atendimento é por aqui" (antes reprovava como "sem fonte") e para
+ *  reprovar uma oferta de encaminhar que o Starter não tem. */
+function supportPolicyEvidence(contactInfo: ContactInfoResult | null): string {
+  const channels = `Central de ajuda: ${HELP_CENTER_URL}/ajuda. Comunidade de usuários da Cloudfy (não é canal da equipe): Discord ${COMMUNITY_DISCORD}.`;
+  if (!isStarterOnlyClient(contactInfo)) {
+    return `[POLÍTICA DE ATENDIMENTO]\nQuando necessário, a assistente transfere a conversa para a equipe da Cloudfy. ${channels}`;
+  }
+  return `[POLÍTICA DE ATENDIMENTO]
+Este cliente é do plano Starter. No Starter o atendimento é este chat, com a assistente (IA): não existe encaminhamento para a equipe humana, nem se o cliente pedir. Oferecer, prometer ou dizer que vai encaminhar o caso, abrir chamado ou acionar a equipe é ERRADO para este cliente.
+Única exceção: ${STARTER_TEAM_ONLY}.
+${MCP_FACTS}
+${channels}`;
 }
 
 // ─── Reply marker parsing ─────────────────────────────────────────────────────
@@ -2207,6 +2304,8 @@ export async function runAiPipeline(
     void applyPlanTag(supabase, conversationId, planTag);
     console.log(`[AI] Plan tag: ${planTag}`);
   }
+  // Starter: atendimento só com a Luna (sem transferência do modelo).
+  const isStarterClient = isStarterOnlyClient(contactInfo);
 
   // ── Guards determinísticos de infraestrutura (P1/P7) ─────────────────────────
   const allInfras = contactInfo?.infras ?? [];
@@ -2331,9 +2430,11 @@ export async function runAiPipeline(
   // indevida, "paguei e continua bloqueado"). A IA CONSULTA a Chargefy mas não
   // altera nada. Todo o resto — valor, vencimento, 2ª via, trocar cartão,
   // upgrade, pagar no PIX — segue para o modelo, que responde com os dados e a
-  // base (e transfere sozinho se não tiver como ajudar).
+  // base (e transfere sozinho se não tiver como ajudar). Vale para todos os
+  // planos: dinheiro é operação que só a equipe executa, inclusive no Starter
+  // (até 13/10/2026 o Starter ficava de fora e não tinha saída).
   const billingChange = detectBillingChange(message);
-  if (!isDraft && !mentionsCancel && billingChange && !isStarterOnlyClient(contactInfo)) {
+  if (!isDraft && !mentionsCancel && billingChange) {
     console.log(`[AI] Guard P7-B billing: handoff (${billingChange})`);
     return await persistGuardHandoff(billingChangeReply(billingChange, replyWindow), 'guard:billing', 'billing');
   }
@@ -2365,7 +2466,7 @@ export async function runAiPipeline(
 
   // Diagnóstico de infra (P1) — aguarda o probe iniciado em paralelo com o RAG
   const { results: probeResults, servers: serverChecks } = await probePromise;
-  const diagnosticsSection = buildDiagnosticsSection(probeResults, serverChecks);
+  const diagnosticsSection = buildDiagnosticsSection(probeResults, serverChecks, isStarterClient);
   if (shouldProbe) {
     console.log(`[AI] Probe: ${probeResults.map((r) => `${r.infra}/${r.service}=${r.status ?? 'timeout'}`).join(' ') || '(sem alvos)'}`);
   }
@@ -2482,8 +2583,14 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
   }, onUsage);
   const latencyMs = Date.now() - llmStart;
 
-  const isStarterClient = isStarterOnlyClient(contactInfo);
-  const should_handoff = !isDraft && !isStarterClient && rawReply.includes(TRANSFER_KEYWORD);
+  // Starter só vai para a equipe no que só ela executa (ver starterTeamOnlyReason).
+  const recentContactText = [
+    ...history.filter((m) => m.sender_type === 'contact').slice(-3).map((m) => String(m.content ?? '')),
+    message,
+  ].join('\n');
+  const starterTeamOnly = isStarterClient ? starterTeamOnlyReason(recentContactText) : null;
+  const should_handoff = !isDraft && (!isStarterClient || !!starterTeamOnly) && rawReply.includes(TRANSFER_KEYWORD);
+  if (isStarterClient && should_handoff) console.log(`[AI] Starter → equipe (operação: ${starterTeamOnly})`);
 
   const activeInfras = (contactInfo?.infras ?? []).filter(isActiveInfra);
   let { text: reply, metadata } = should_handoff
@@ -2647,14 +2754,15 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
   // Starter: se o modelo tentou transferir mesmo proibido, troca o marcador
   // residual por orientação de autoatendimento. Texto nosso, links nossos —
   // por isso vem DEPOIS do guard, sem precisar passar por ele.
-  if (isStarterClient && rawReply.includes(TRANSFER_KEYWORD)) {
-    reply = `Não consegui resolver isso por aqui agora. Recomendo conferir nossa Central de ajuda em ${HELP_CENTER_URL}/ajuda ou pedir ajuda no nosso Discord: ${COMMUNITY_DISCORD}`;
+  if (isStarterClient && !should_handoff && rawReply.includes(TRANSFER_KEYWORD)) {
+    reply = starterFallbackReply();
     metadata = null;
   }
 
   // Convite às comunidades — anexado server-side depois da limpeza, para não
-  // ser removido junto com os marcadores nem virar decisão do modelo.
-  const invite = reply
+  // ser removido junto com os marcadores nem virar decisão do modelo. Se a
+  // resposta já trouxe a comunidade (comum no Starter), não repete o link.
+  const invite = reply && !COMMUNITY_URLS.some((url) => reply.includes(url))
     ? communityInviteFor({
         history,
         analysis,

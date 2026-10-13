@@ -397,15 +397,49 @@ async function createConversation(
   return created as unknown as ConversationRow;
 }
 
+/** Starter não tem atendimento humano — o atendimento é a Luna. Mandar a
+ *  conversa para a fila humana deixaria o cliente esperando ninguém. A
+ *  etiqueta de plano é gravada pelo pipeline a cada turno. */
+async function isStarterConversation(service: ServiceClient, conversationId: string): Promise<boolean> {
+  const { data } = await service
+    .from('desk_conversations')
+    .select('tags')
+    .eq('id', conversationId)
+    .maybeSingle();
+  const tags = (data as { tags?: string[] | null } | null)?.tags ?? [];
+  return tags.includes('starter');
+}
+
+/** Para onde volta um chamado resolvido que o cliente respondeu:
+ *  • Starter → Luna (não há equipe humana);
+ *  • fechado por inatividade (a Luna respondeu e o cliente sumiu — migration
+ *    20261013200000) → Luna, que estava no meio do atendimento;
+ *  • o resto → fila humana: o assunto voltou depois de resolvido. */
+async function reopensToLuna(service: ServiceClient, conversationId: string): Promise<boolean> {
+  const { data } = await service
+    .from('desk_conversations')
+    .select('tags, metadata, resolved_at')
+    .eq('id', conversationId)
+    .maybeSingle();
+  const row = data as { tags?: string[] | null; metadata?: Record<string, unknown> | null; resolved_at?: string | null } | null;
+  if (!row) return false;
+  if ((row.tags ?? []).includes('starter')) return true;
+  // O mesmo instante nos dois campos = este fechamento foi o automático.
+  const idleAt = row.metadata?.idle_closed_at;
+  return typeof idleAt === 'string' && !!row.resolved_at && Date.parse(idleAt) === Date.parse(row.resolved_at);
+}
+
 /** Reabre um chamado resolvido na MESMA thread (cliente respondeu depois de
- *  resolvido). Volta para a fila humana — não para a IA. */
+ *  resolvido). Volta para a fila humana — não para a IA —, exceto quando
+ *  reopensToLuna diz o contrário. */
 async function reopenConversation(
   service: ServiceClient,
   conversation: ConversationRow,
 ): Promise<ConversationRow | null> {
+  const aiOnly = await reopensToLuna(service, conversation.id);
   const { data, error } = await service
     .from('desk_conversations')
-    .update({ status: 'pending', ai_active: false, resolved_at: null })
+    .update({ status: aiOnly ? 'open' : 'pending', ai_active: aiOnly, resolved_at: null })
     .eq('id', conversation.id)
     .select(CONV_SELECT)
     .single();
@@ -424,8 +458,8 @@ async function reopenConversation(
 
   // A inbox do operador precisa saber na hora que este chamado voltou.
   void broadcastToConversation(conversation.id, 'conv_updated', {
-    status: 'pending',
-    ai_active: false,
+    status: aiOnly ? 'open' : 'pending',
+    ai_active: aiOnly,
   });
 
   return data as unknown as ConversationRow;
@@ -580,6 +614,32 @@ async function runTurn(
   };
 }
 
+// ─── Conversas paradas ────────────────────────────────────────────────────────
+// A Luna respondeu e o cliente não voltou: a conversa fecha sozinha depois de
+// 24 h (regra na migration 20261013200000). Sem agendador — decisão de
+// 13/10/2026 —, vai de carona no tráfego do widget, no máximo a cada 15 min por
+// instância. O UPDATE é barato e idempotente; falhar só adia para a próxima.
+const IDLE_SWEEP_EVERY_MS = 15 * 60 * 1000;
+let lastIdleSweep = 0;
+
+async function sweepIdleConversations(service: ServiceClient): Promise<void> {
+  const now = Date.now();
+  if (now - lastIdleSweep < IDLE_SWEEP_EVERY_MS) return;
+  lastIdleSweep = now;
+  try {
+    const { data, error } = await service.rpc('desk_close_idle_ai_conversations');
+    if (error) {
+      console.warn('[widget-api] encerrar conversas paradas falhou:', error.message);
+      return;
+    }
+    if (typeof data === 'number' && data > 0) {
+      console.log(`[widget-api] ${data} conversa(s) parada(s) encerrada(s)`);
+    }
+  } catch (e) {
+    console.warn('[widget-api] encerrar conversas paradas falhou:', e instanceof Error ? e.message : e);
+  }
+}
+
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
 Deno.serve(async (req) => {
@@ -652,6 +712,12 @@ Deno.serve(async (req) => {
     // ── Ações ───────────────────────────────────────────────────────────────────
 
     if (action === 'hello') {
+      // Carga de página é o tráfego mais constante do widget — é por aqui que
+      // as conversas paradas são encerradas. waitUntil segura a instância até
+      // a varredura terminar (a resposta já saiu).
+      const sweep = sweepIdleConversations(service);
+      (globalThis as unknown as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } })
+        .EdgeRuntime?.waitUntil?.(sweep);
       // Gate leve para o embed decidir se renderiza a bolha.
       return json({ eligible: true });
     }
@@ -793,9 +859,11 @@ Deno.serve(async (req) => {
       if (csatErr) console.warn('[widget-api] csat insert falhou:', csatErr.message);
 
       // Guardrail: avaliação 😞 reabre a conversa para acompanhamento HUMANO —
-      // um ticket avaliado como ruim não fica "resolvido" sozinho.
+      // um ticket avaliado como ruim não fica "resolvido" sozinho. No Starter
+      // não há acompanhamento humano: a nota fica registrada (relatórios) e a
+      // conversa não volta para uma fila que não vai responder.
       let reopenedForFollowUp = false;
-      if (rating === 1) {
+      if (rating === 1 && !(await isStarterConversation(service, conversation.id))) {
         const { error: reopenErr } = await service
           .from('desk_conversations')
           .update({ status: 'pending', ai_active: false, resolved_at: null })

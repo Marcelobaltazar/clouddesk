@@ -90,3 +90,33 @@ export function mentionsPayment(text: string): boolean {
 export function contestsBillingReading(text: string): boolean {
   return CONTEST_BILLING_RE.test(normalizeForIntent(text));
 }
+
+// ─── Operações que só a equipe executa (vale também para o Starter) ───────────
+// No Starter o atendimento é a Luna, sem equipe humana — exceto pedidos que o
+// cliente não consegue fazer sozinho e a Luna não executa (13/10/2026). O
+// modelo decide se é o caso; este teste só confere que o ASSUNTO apareceu na
+// conversa antes de deixar um Starter ir para a equipe. Por isso é amplo:
+// errar para mais custa uma transferência; para menos, um cliente sem saída.
+//   • senha do n8n (trocou/esqueceu e ficou sem acesso — a equipe reseta);
+//   • restaurar backup;
+//   • credencial da IA Ilimitada apagada ou alterada (a equipe recria).
+// Reembolso, cobrança indevida, adicional e infra paga bloqueada já têm guard
+// próprio (detectBillingChange / wantsAddonCancel / P7-A) para todos os planos.
+const N8N_PASSWORD_TOPIC_RE =
+  /\b(senha|password)\b[^.?!]{0,60}\bn8n\b|\bn8n\b[^.?!]{0,60}\b(senha|password)\b/;
+const BACKUP_RESTORE_TOPIC_RE =
+  /\b(restaur\w*|recuper\w*|volt\w*|revert\w*)\b[^.?!]{0,40}\bbackups?\b|\bbackups?\b[^.?!]{0,40}\b(restaur\w*|recuper\w*|volt\w*|revert\w*)\b/;
+const AI_CREDENTIAL_TOPIC_RE = new RegExp(
+  String.raw`\b(credencia\w*|chave)\b[^.?!]{0,60}\b(ia ilimitada|i\.?a\.? ilimitada|llm unlimited|openrouter)\b` +
+  String.raw`|\b(ia ilimitada|i\.?a\.? ilimitada|llm unlimited|openrouter)\b[^.?!]{0,60}\b(credencia\w*|chave)\b`,
+);
+
+export type TeamOnlyTopic = 'n8n_password' | 'backup_restore' | 'ai_credential';
+
+export function teamOnlyTopic(text: string): TeamOnlyTopic | null {
+  const t = normalizeForIntent(text);
+  if (N8N_PASSWORD_TOPIC_RE.test(t)) return 'n8n_password';
+  if (BACKUP_RESTORE_TOPIC_RE.test(t)) return 'backup_restore';
+  if (AI_CREDENTIAL_TOPIC_RE.test(t)) return 'ai_credential';
+  return null;
+}

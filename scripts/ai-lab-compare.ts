@@ -15,6 +15,8 @@
  * Uso:
  *   npx tsx scripts/ai-lab-compare.ts                       (atual × 3.5 Flash Lite)
  *   npx tsx scripts/ai-lab-compare.ts google/gemini-3.8-flash
+ *   npx tsx scripts/ai-lab-compare.ts --plan=starter         (só o modelo atual,
+ *     cliente Starter, perguntas que testam o atendimento sem equipe humana)
  *
  * Variáveis (.env ou shell): VITE_SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY.
  */
@@ -28,8 +30,12 @@ if (!SUPABASE_URL || !KEY) {
   process.exit(1);
 }
 
-const CANDIDATE = process.argv[2] ?? 'google/gemini-3.5-flash-lite';
-const BASELINE = process.argv[3]; // vazio = o modelo do secret LLM_MODEL
+const args = process.argv.slice(2);
+const PLAN = args.find((a) => a.startsWith('--plan='))?.slice('--plan='.length);
+const positional = args.filter((a) => !a.startsWith('--'));
+// Com --plan e sem modelo informado, roda só o modelo atual.
+const CANDIDATE = positional[0] ?? (PLAN ? undefined : 'google/gemini-3.5-flash-lite');
+const BASELINE = positional[1]; // vazio = o modelo do secret LLM_MODEL
 
 /** Perguntas reais de set–out/2026, sem nome, e-mail ou infra de cliente. */
 const QUESTIONS = [
@@ -45,6 +51,21 @@ const QUESTIONS = [
   'como atualizo a versão do meu n8n?',
   'o MCP da Cloudfy está incluso no meu plano?',
   'quero falar com um atendente',
+];
+
+/** Starter: atendimento só com a Luna — nunca oferecer equipe, sempre um caminho
+ *  (MCP, Central). Inclui o caso real de 13/10 (pediu logs, ouviu "não consigo
+ *  encaminhar"). */
+const STARTER_QUESTIONS = [
+  'quero falar com um atendente',
+  'tem como alguém da equipe olhar meu fluxo?',
+  'a Evolution não chama meu webhook do n8n. Já conferi a URL de produção e a instância está conectada',
+  'podem conferir nos logs da minha infra se chegaram requisições POST no meu webhook ontem à tarde?',
+  'meu fluxo do n8n parou de funcionar do nada, o que eu faço?',
+  'como faço pra criar um fluxo que responde no WhatsApp com IA?',
+  'o MCP da Cloudfy está incluso no meu plano?',
+  // Exceção: só a equipe executa — aqui a Luna DEVE transferir.
+  'alterei a senha do n8n e agora não consigo mais entrar',
 ];
 
 interface LabResult {
@@ -63,7 +84,7 @@ async function ask(message: string, model?: string): Promise<LabResult & { ms: n
   const res = await fetch(`${SUPABASE_URL}/functions/v1/desk-ai-lab`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${KEY}` },
-    body: JSON.stringify(model ? { message, model } : { message }),
+    body: JSON.stringify({ message, ...(model ? { model } : {}), ...(PLAN ? { plan: PLAN } : {}) }),
   }).catch((e) => ({ ok: false, json: async () => ({ error: String(e) }) }) as unknown as Response);
   const data = (await res.json().catch(() => ({ error: 'resposta inválida' }))) as LabResult;
   return { ...data, ms: Date.now() - t0 };
@@ -73,9 +94,12 @@ const s = (ms?: number) => (ms === undefined ? '—' : `${(ms / 1000).toFixed(1)
 
 async function main() {
   const totals: Record<string, number[]> = {};
-  for (const q of QUESTIONS) {
+  const questions = PLAN === 'starter' ? STARTER_QUESTIONS : QUESTIONS;
+  const models = CANDIDATE ? [BASELINE, CANDIDATE] : [BASELINE];
+  if (PLAN) console.log(`\n👤 Cliente fictício no plano: ${PLAN}`);
+  for (const q of questions) {
     console.log(`\n${'═'.repeat(90)}\n❓ ${q}`);
-    for (const model of [BASELINE, CANDIDATE]) {
+    for (const model of models) {
       const r = await ask(q, model);
       const label = r.model ?? model ?? 'atual';
       (totals[label] ??= []).push(r.ms);
