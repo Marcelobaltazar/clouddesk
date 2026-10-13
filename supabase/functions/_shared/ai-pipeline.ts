@@ -1424,7 +1424,7 @@ Este cliente é do plano Starter. No Starter o atendimento é este chat, com voc
 
   const transferSection = starter
     ? `[REGRA DE TRANSFERÊNCIA — PLANO STARTER: SÓ O QUE A EQUIPE EXECUTA]
-Este cliente é do plano Starter: não existe atendimento da equipe (veja o bloco PLANO STARTER). Use ${TRANSFER_KEYWORD} SOMENTE quando ele precisar de uma destas operações, que só a equipe executa: resetar a senha do n8n de quem ficou sem acesso, restaurar um backup, recriar a credencial da IA Ilimitada. Nesse caso diga em poucas linhas o que entendeu e que está passando o pedido pra equipe, e termine com ${TRANSFER_KEYWORD} sozinho na última linha (antes do bloco META). Pedido de humano, dúvida, fluxo, erro de n8n/Evolution: NUNCA transfira.
+Este cliente é do plano Starter: não existe atendimento da equipe (veja o bloco PLANO STARTER). Use ${TRANSFER_KEYWORD} SOMENTE quando ele precisar de uma destas operações, que só a equipe executa: resetar a senha do n8n de quem ficou sem acesso, restaurar um backup, recriar a credencial da IA Ilimitada, reembolso ou cobrança que ele não reconhece, cancelar a IA Ilimitada ou o backup. Nesse caso diga em poucas linhas o que entendeu e que está passando o pedido pra equipe, e termine com ${TRANSFER_KEYWORD} sozinho na última linha (antes do bloco META). Pedido de humano, dúvida, fluxo, erro de n8n/Evolution: NUNCA transfira.
 
 1. Se a pergunta puder ser respondida pelos DADOS DO CLIENTE ou pelas FONTES da base de conhecimento, responda normalmente.
 2. Se a base NÃO cobre a pergunta, não invente: diga que não tem essa informação confirmada e mostre o caminho que ele tem — o MCP da Cloudfy, um artigo da Central, o que conferir.
