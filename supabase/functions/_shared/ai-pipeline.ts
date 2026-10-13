@@ -203,6 +203,7 @@ export const _test = {
   communityInviteFor: (ctx: InviteContext) => communityInviteFor(ctx),
   // Política do Starter (atendimento só com a Luna)
   isStarterOnlyClient: (c: ContactInfoResult | null) => isStarterOnlyClient(c),
+  starterTeamOnlyReason: (t: string) => starterTeamOnlyReason(t),
   buildDiagnosticsSection: (...a: Parameters<typeof buildDiagnosticsSection>) => buildDiagnosticsSection(...a),
   starterFallbackReply: () => starterFallbackReply(),
   MCP_CONNECT_URL: () => MCP_CONNECT_URL,
@@ -486,7 +487,7 @@ const AUX_TIMEOUT_MS = 15_000;
  *  for usado. */
 const AUX_MAX_TOKENS = 4000;
 
-async function callLLM(
+export async function callLLM(
   apiKey: string,
   systemPrompt: string,
   messages: ChatMessage[],
@@ -1310,6 +1311,18 @@ function supportPlan(contactInfo?: ContactInfoResult | null): PlanTag {
 /** Starter não tem atendimento humano: o atendimento é a Luna, no chat. */
 function isStarterOnlyClient(contactInfo?: ContactInfoResult | null): boolean {
   return supportPlan(contactInfo) === 'starter';
+}
+
+/**
+ * Exceção do Starter: o que só a equipe executa. O modelo decide transferir;
+ * isto confere que o assunto apareceu nas últimas mensagens do cliente — pedido
+ * de humano sozinho não basta. Inclui cobrança e adicional porque o guard
+ * determinístico pode não pegar uma frase que o modelo entendeu.
+ */
+function starterTeamOnlyReason(recentClientText: string): string | null {
+  return teamOnlyTopic(recentClientText)
+    ?? detectBillingChange(recentClientText)
+    ?? (wantsAddonCancel(recentClientText) ? 'addon_cancel' : null);
 }
 
 /** O que a busca concluiu, dito à IA antes das fontes. É o que a autoriza a
@@ -2570,14 +2583,12 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
   }, onUsage);
   const latencyMs = Date.now() - llmStart;
 
-  // Starter só vai para a equipe no que só ela executa (senha do n8n, backup,
-  // credencial da IA Ilimitada): o modelo decide, e o assunto precisa ter
-  // aparecido nas últimas mensagens do cliente — pedido de humano sozinho não basta.
+  // Starter só vai para a equipe no que só ela executa (ver starterTeamOnlyReason).
   const recentContactText = [
     ...history.filter((m) => m.sender_type === 'contact').slice(-3).map((m) => String(m.content ?? '')),
     message,
   ].join('\n');
-  const starterTeamOnly = isStarterClient ? teamOnlyTopic(recentContactText) : null;
+  const starterTeamOnly = isStarterClient ? starterTeamOnlyReason(recentContactText) : null;
   const should_handoff = !isDraft && (!isStarterClient || !!starterTeamOnly) && rawReply.includes(TRANSFER_KEYWORD);
   if (isStarterClient && should_handoff) console.log(`[AI] Starter → equipe (operação: ${starterTeamOnly})`);
 

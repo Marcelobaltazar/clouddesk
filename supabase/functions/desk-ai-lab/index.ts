@@ -22,7 +22,6 @@ import { newServiceClient } from '../_shared/supabase.ts';
 import { isServiceRoleRequest, verifyOperator } from '../_shared/widget-auth.ts';
 import { _test as P, sanitizeContactText } from '../_shared/ai-pipeline.ts';
 import type { ContactInfoResult } from '../_shared/contact-info.ts';
-import { teamOnlyTopic } from '../_shared/support-intents.ts';
 
 interface LabRequest {
   message?: string;
@@ -115,7 +114,7 @@ Deno.serve(async (req) => {
     // executa; fora disso, o cliente veria o texto de reserva.
     const starter = P.isStarterOnlyClient(client);
     const recentUserText = [...turns.filter((t) => t.role === 'user').slice(-3).map((t) => t.content), message].join('\n');
-    const handoff = out.rawReply.includes('[TRANSFERIR]') && (!starter || !!teamOnlyTopic(recentUserText));
+    const handoff = out.rawReply.includes('[TRANSFERIR]') && (!starter || !!P.starterTeamOnlyReason(recentUserText));
     if (starter && !handoff && out.rawReply.includes('[TRANSFERIR]')) reply = P.starterFallbackReply();
 
     return json({

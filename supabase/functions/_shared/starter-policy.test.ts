@@ -158,3 +158,13 @@ Deno.test('revisor Starter: aceita "passei pra equipe" nas operações da exceç
   assertStringIncludes(e, 'Única exceção');
   assertStringIncludes(e, 'reembolso ou cobrança indevida');
 });
+
+Deno.test('trava do Starter: só libera o que a equipe executa', () => {
+  assertEquals(_test.starterTeamOnlyReason('quero falar com um atendente'), null);
+  assertEquals(_test.starterTeamOnlyReason('tem como alguém da equipe olhar meu fluxo?'), null);
+  assertEquals(_test.starterTeamOnlyReason('meu webhook da evolution não chega no n8n'), null);
+  assertEquals(_test.starterTeamOnlyReason('alterei a senha do n8n e não consigo entrar'), 'n8n_password');
+  assertEquals(_test.starterTeamOnlyReason('preciso restaurar o backup de ontem'), 'backup_restore');
+  assertEquals(_test.starterTeamOnlyReason('quero o reembolso da última cobrança'), 'refund');
+  assertEquals(_test.starterTeamOnlyReason('quero cancelar a IA ilimitada'), 'addon_cancel');
+});

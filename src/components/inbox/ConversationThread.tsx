@@ -9,10 +9,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { Bot, Lock, Info, CheckCircle, Send, MessageSquare, UserPlus, Clock, BookOpen, Reply, Search, Zap, Sparkles, Loader2, RotateCcw, Mail, MoreHorizontal, GitMerge } from "lucide-react";
+import { Bot, Lock, Info, CheckCircle, Send, MessageSquare, UserPlus, Clock, BookOpen, Reply, Search, Zap, Sparkles, Loader2, RotateCcw, Mail, MoreHorizontal, GitMerge, Wand2 } from "lucide-react";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
@@ -55,6 +55,19 @@ async function describeFunctionError(error: Error): Promise<string> {
   detail = detail.trim().slice(0, 300);
   return detail ? `HTTP ${status} — ${detail}` : `HTTP ${status}`;
 }
+
+// ─── Reescrever (botão ao lado da estrelinha) ─────────────────────────────────
+// Os tons espelham supabase/functions/_shared/ai-rewrite.ts (REWRITE_TONES).
+type RewriteTone = "amigavel" | "formal" | "curto" | "claro" | "empatico" | "corrigir";
+
+const REWRITE_OPTIONS: { tone: RewriteTone; label: string; hint: string }[] = [
+  { tone: "amigavel", label: "Mais amigável", hint: "caloroso e leve" },
+  { tone: "formal",   label: "Mais formal",   hint: "profissional, sem gírias" },
+  { tone: "curto",    label: "Mais curto",    hint: "só o essencial" },
+  { tone: "claro",    label: "Mais claro",    hint: "simples, sem jargão" },
+  { tone: "empatico", label: "Mais empático", hint: "reconhece a situação do cliente" },
+  { tone: "corrigir", label: "Corrigir português", hint: "só ortografia e gramática" },
+];
 
 const SNOOZE_OPTIONS: SnoozeOption[] = [
   {
@@ -160,11 +173,21 @@ export function ConversationThread() {
   const sendAndResolveRef = useRef<(() => void) | null>(null);
 
   const [content, setContent]   = useState("");
+  // Texto atual para quem roda depois de um await (ex.: a reescrita confere se
+  // o operador não mexeu no texto enquanto a IA trabalhava).
+  const contentRef = useRef(content);
+  contentRef.current = content;
   // Composer mode: "reply" (público) ou "note" (nota interna)
   const [mode, setMode]         = useState<"reply" | "note">("reply");
   const [sending, setSending]   = useState(false);
+  // Travas síncronas: Enter/Ctrl+Enter repetido chega antes do re-render que
+  // desabilitaria o botão — sem isto a mensagem saía duas vezes.
+  const sendingRef   = useRef(false);
+  const resolvingRef = useRef(false);
   // Copilot: gerando rascunho de resposta com IA
   const [suggesting, setSuggesting] = useState(false);
+  // Reescrevendo o texto do operador em outro tom
+  const [rewriting, setRewriting] = useState(false);
 
   // Snooze dropdown (also opened via keyboard shortcut Z)
   const [snoozeOpen, setSnoozeOpen] = useState(false);
@@ -424,6 +447,10 @@ export function ConversationThread() {
 
       // Ctrl+Enter → enviar mensagem e resolver conversa
       if (e.key === "Enter") {
+        // Tecla segurada repete o evento; e dentro de um modal (ex.: mesclar)
+        // o Ctrl+Enter é do modal, não da conversa.
+        if (e.repeat) return;
+        if ((e.target as HTMLElement | null)?.closest?.('[role="dialog"],[role="alertdialog"]')) return;
         const conv = convs.find((c) => c.id === convId);
         if (!conv || conv.status === "resolved") return;
         e.preventDefault();
@@ -463,7 +490,9 @@ export function ConversationThread() {
     );
   }
 
-  const contactName = conversation.contact?.name || conversation.contact?.email || "Visitante";
+  // A tabela account nem sempre tem a linha do cliente do widget — o e-mail da
+  // conversa vem antes de cair em "Visitante".
+  const contactName = conversation.contact?.name || conversation.contact?.email || conversation.user_email || "Visitante";
   const prio = priorityLabels[conversation.priority] ?? priorityLabels.medium;
 
   // ── Actions ─────────────────────────────────────────────────────────────────
@@ -487,21 +516,44 @@ export function ConversationThread() {
   };
   assignToMeRef.current = handleAssignToMe;
 
-  const handleResolve = async () => {
-    // P6: ao encerrar o atendimento humano, a IA volta a ficar ATIVA. Se o
-    // cliente reabrir/mandar nova mensagem, a IA atende de novo sem precisar de
-    // religamento manual. (No fluxo do widget uma nova mensagem numa conversa
-    // resolvida abre um chamado NOVO, que já nasce com ai_active=true — este
-    // religamento cobre o caso de a mesma conversa ser reaberta pelo operador.)
-    const { error } = await supabase
-      .from("desk_conversations")
-      .update({ status: "resolved", resolved_at: new Date().toISOString(), ai_active: true })
-      .eq("id", activeConversationId);
-
-    if (error) { toast.error("Erro ao resolver conversa"); return; }
-    // Widget mostra o CSAT ao receber status resolved
-    void broadcastConvUpdated(activeConversationId!, { status: "resolved", ai_active: true });
+  // Fechar a conversa — UM caminho só para o botão ✓ e o Ctrl+Enter. Antes:
+  //  • nenhum dos dois mexia na tela — esperava o eco do Realtime (que ainda
+  //    re-busca dados), então o clique parecia não pegar e o operador clicava
+  //    de novo;
+  //  • o Ctrl+Enter com texto fechava com a IA PAUSADA e ainda gravava "IA
+  //    pausada — atendimento humano assumiu" DEPOIS de fechar (o cliente via
+  //    isso embaixo da avaliação); com nota interna, nem fechava.
+  // P6: ao encerrar, a IA volta a ficar ATIVA — se o cliente voltar a escrever
+  // e a conversa for reaberta, ela atende sem religamento manual.
+  const resolveConversation = async (): Promise<boolean> => {
+    if (resolvingRef.current) return false;
+    resolvingRef.current = true;
+    const id = activeConversationId!;
+    const now = new Date().toISOString();
+    const { patchConversation } = useInboxStore.getState();
+    const before = { status: conversation.status, resolved_at: conversation.resolved_at, ai_active: conversation.ai_active };
+    patchConversation(id, { status: "resolved", resolved_at: now, ai_active: true, updated_at: now });
+    try {
+      const { error } = await supabase
+        .from("desk_conversations")
+        .update({ status: "resolved", resolved_at: now, ai_active: true, updated_at: now })
+        .eq("id", id);
+      if (error) {
+        patchConversation(id, before);
+        console.error(error);
+        toast.error("Erro ao resolver conversa");
+        return false;
+      }
+      // Widget mostra o CSAT ao receber status resolved
+      void broadcastConvUpdated(id, { status: "resolved", ai_active: true });
+      toast.success("Conversa resolvida");
+      return true;
+    } finally {
+      resolvingRef.current = false;
+    }
   };
+
+  const handleResolve = () => { void resolveConversation(); };
 
   // Reabre uma conversa resolvida (o cliente também reabre implicitamente ao
   // mandar mensagem nova — via desk-ai-respond; aqui é o caminho manual do operador).
@@ -594,13 +646,15 @@ export function ConversationThread() {
 
   const handleSend = async (opts?: { resolveAfter?: boolean }) => {
     const resolveAfter = opts?.resolveAfter ?? false;
+    if (sendingRef.current) return;
 
     // Ctrl+Enter on an empty composer → just resolve (nothing to send).
     if (!content.trim()) {
-      if (resolveAfter && conversation.status !== "resolved") await handleResolve();
+      if (resolveAfter && conversation.status !== "resolved") await resolveConversation();
       return;
     }
     if (!agent) return;
+    sendingRef.current = true;
     setSending(true);
 
     // ── Canal E-MAIL: resposta pública sai pela Gmail API (support@cloudfy.email)
@@ -628,6 +682,7 @@ export function ConversationThread() {
         const msg = err instanceof Error ? err.message : "Erro desconhecido";
         toast.error("Erro ao enviar e-mail", { description: msg });
       } finally {
+        sendingRef.current = false;
         setSending(false);
       }
       return;
@@ -664,18 +719,18 @@ export function ConversationThread() {
       }
 
       // Status after send:
-      //  - Ctrl+Enter (resolveAfter) on a public reply → resolve the conversation
+      //  - Ctrl+Enter (resolveAfter) → fecha logo abaixo, pelo mesmo caminho do
+      //    botão ✓ (resposta pública ou nota)
       //  - replying to a pending conversation → move it back to open
       //  - otherwise just bump updated_at so Realtime propagates to ConversationList
       // Handoff humano (CLAUDE.md §7.7): a primeira resposta PÚBLICA do operador
       // pausa a IA (ai_active=false) — sem isto a IA continuava respondendo em
       // paralelo com o atendente. Reativação é manual (botão "Reativar IA").
+      // Fechando, não pausa: a conversa encerra com a IA ativa (P6).
       const now = new Date().toISOString();
-      const pauseAI = !isNote && conversation.ai_active;
+      const pauseAI = !isNote && !resolveAfter && conversation.ai_active;
       const statusUpdate: Record<string, unknown> =
-        resolveAfter && !isNote
-          ? { status: "resolved", resolved_at: now, updated_at: now }
-          : !isNote && conversation.status === "pending"
+        !isNote && !resolveAfter && conversation.status === "pending"
           ? { status: "open", updated_at: now }
           : { updated_at: now };
       if (pauseAI) statusUpdate.ai_active = false;
@@ -715,10 +770,12 @@ export function ConversationThread() {
 
       setContent("");
       setMode("reply");
+      if (resolveAfter) await resolveConversation();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Erro desconhecido";
       toast.error("Erro ao enviar mensagem", { description: msg });
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
   };
@@ -766,6 +823,45 @@ export function ConversationThread() {
       toast.error("Não consegui gerar a sugestão", { description: msg });
     } finally {
       setSuggesting(false);
+    }
+  };
+
+  // ── Reescrever: o operador escreveu, a IA devolve no tom escolhido ───────────
+  // Mesmos fatos e links (o servidor recusa a reescrita que perde um link).
+  // Troca o texto do editor e oferece "Desfazer" no aviso.
+  const handleRewrite = async (tone: RewriteTone, label: string) => {
+    const original = content;
+    if (!original.trim() || rewriting) return;
+
+    setRewriting(true);
+    try {
+      const { data, error } = await supabase.functions.invoke<{ text?: string }>(
+        "desk-ai-respond",
+        { body: { mode: "rewrite", text: original, tone } },
+      );
+      if (error) throw new Error(await describeFunctionError(error));
+      if (!data?.text) throw new Error("A IA não devolveu texto");
+
+      // O operador pode ter mexido no texto (ou enviado) enquanto a IA
+      // reescrevia — aí a versão dele vale mais que a reescrita.
+      if (contentRef.current !== original) {
+        toast.info("O texto mudou enquanto eu reescrevia — deixei como está");
+        return;
+      }
+      const rewritten = data.text;
+      setContent(rewritten);
+      toast.success(`Reescrito: ${label.toLowerCase()}`, {
+        action: {
+          label: "Desfazer",
+          onClick: () => { if (contentRef.current === rewritten) setContent(original); },
+        },
+      });
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Erro desconhecido";
+      toast.error("Não consegui reescrever", { description: msg });
+    } finally {
+      setRewriting(false);
     }
   };
 
@@ -1120,6 +1216,42 @@ export function ConversationThread() {
                     Sugerir resposta com IA — usa dados do cliente, infra e base de conhecimento
                   </TooltipContent>
                 </Tooltip>
+
+                {/* Reescrever o texto do operador em outro tom */}
+                <DropdownMenu>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                          disabled={!content.trim() || rewriting}
+                        >
+                          {rewriting ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Wand2 className="h-4 w-4" />
+                          )}
+                        </Button>
+                      </DropdownMenuTrigger>
+                    </TooltipTrigger>
+                    <TooltipContent>Reescrever sua mensagem em outro tom</TooltipContent>
+                  </Tooltip>
+                  <DropdownMenuContent align="end" className="w-56">
+                    <DropdownMenuLabel className="text-xs text-muted-foreground">Reescrever</DropdownMenuLabel>
+                    {REWRITE_OPTIONS.map((opt) => (
+                      <DropdownMenuItem
+                        key={opt.tone}
+                        onClick={() => void handleRewrite(opt.tone, opt.label)}
+                        className="flex flex-col items-start gap-0"
+                      >
+                        <span className="text-sm">{opt.label}</span>
+                        <span className="text-[11px] text-muted-foreground">{opt.hint}</span>
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
 
                 {/* Insert snippet / resposta rápida (item 5) — botão ⚡ ou "/" no composer */}
                 <Popover

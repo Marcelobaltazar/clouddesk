@@ -410,14 +410,33 @@ async function isStarterConversation(service: ServiceClient, conversationId: str
   return tags.includes('starter');
 }
 
+/** Para onde volta um chamado resolvido que o cliente respondeu:
+ *  • Starter → Luna (não há equipe humana);
+ *  • fechado por inatividade (a Luna respondeu e o cliente sumiu — migration
+ *    20261013200000) → Luna, que estava no meio do atendimento;
+ *  • o resto → fila humana: o assunto voltou depois de resolvido. */
+async function reopensToLuna(service: ServiceClient, conversationId: string): Promise<boolean> {
+  const { data } = await service
+    .from('desk_conversations')
+    .select('tags, metadata, resolved_at')
+    .eq('id', conversationId)
+    .maybeSingle();
+  const row = data as { tags?: string[] | null; metadata?: Record<string, unknown> | null; resolved_at?: string | null } | null;
+  if (!row) return false;
+  if ((row.tags ?? []).includes('starter')) return true;
+  // O mesmo instante nos dois campos = este fechamento foi o automático.
+  const idleAt = row.metadata?.idle_closed_at;
+  return typeof idleAt === 'string' && !!row.resolved_at && Date.parse(idleAt) === Date.parse(row.resolved_at);
+}
+
 /** Reabre um chamado resolvido na MESMA thread (cliente respondeu depois de
- *  resolvido). Volta para a fila humana — não para a IA —, exceto no Starter,
- *  que é atendido pela Luna. */
+ *  resolvido). Volta para a fila humana — não para a IA —, exceto quando
+ *  reopensToLuna diz o contrário. */
 async function reopenConversation(
   service: ServiceClient,
   conversation: ConversationRow,
 ): Promise<ConversationRow | null> {
-  const aiOnly = await isStarterConversation(service, conversation.id);
+  const aiOnly = await reopensToLuna(service, conversation.id);
   const { data, error } = await service
     .from('desk_conversations')
     .update({ status: aiOnly ? 'open' : 'pending', ai_active: aiOnly, resolved_at: null })
@@ -607,13 +626,17 @@ async function sweepIdleConversations(service: ServiceClient): Promise<void> {
   const now = Date.now();
   if (now - lastIdleSweep < IDLE_SWEEP_EVERY_MS) return;
   lastIdleSweep = now;
-  const { data, error } = await service.rpc('desk_close_idle_ai_conversations');
-  if (error) {
-    console.warn('[widget-api] encerrar conversas paradas falhou:', error.message);
-    return;
-  }
-  if (typeof data === 'number' && data > 0) {
-    console.log(`[widget-api] ${data} conversa(s) parada(s) encerrada(s)`);
+  try {
+    const { data, error } = await service.rpc('desk_close_idle_ai_conversations');
+    if (error) {
+      console.warn('[widget-api] encerrar conversas paradas falhou:', error.message);
+      return;
+    }
+    if (typeof data === 'number' && data > 0) {
+      console.log(`[widget-api] ${data} conversa(s) parada(s) encerrada(s)`);
+    }
+  } catch (e) {
+    console.warn('[widget-api] encerrar conversas paradas falhou:', e instanceof Error ? e.message : e);
   }
 }
 
@@ -690,8 +713,11 @@ Deno.serve(async (req) => {
 
     if (action === 'hello') {
       // Carga de página é o tráfego mais constante do widget — é por aqui que
-      // as conversas paradas são encerradas.
-      void sweepIdleConversations(service);
+      // as conversas paradas são encerradas. waitUntil segura a instância até
+      // a varredura terminar (a resposta já saiu).
+      const sweep = sweepIdleConversations(service);
+      (globalThis as unknown as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } })
+        .EdgeRuntime?.waitUntil?.(sweep);
       // Gate leve para o embed decidir se renderiza a bolha.
       return json({ eligible: true });
     }

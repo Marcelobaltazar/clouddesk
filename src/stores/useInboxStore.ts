@@ -105,6 +105,9 @@ interface InboxState {
   loadMore: () => Promise<void>;
   refreshTabCounts: () => Promise<void>;
   upsertConversation: (raw: Record<string, unknown>) => Promise<void>;
+  /** Atualiza a conversa na lista NA HORA (ação do próprio operador). O eco do
+   *  Realtime chega depois e confirma — sem isto o botão parecia não funcionar. */
+  patchConversation: (id: string, patch: Partial<Conversation>) => void;
   removeConversation: (id: string) => void;
 }
 
@@ -592,6 +595,12 @@ export const useInboxStore = create<InboxState>((set, get) => ({
     });
 
     get().refreshTabCounts();
+  },
+
+  patchConversation: (id, patch) => {
+    set((s) => ({
+      conversations: s.conversations.map((c) => (c.id === id ? { ...c, ...patch } : c)),
+    }));
   },
 
   removeConversation: (id) => {

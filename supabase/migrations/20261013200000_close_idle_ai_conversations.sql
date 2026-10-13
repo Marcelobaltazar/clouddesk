@@ -7,7 +7,10 @@
 --   • nada novo há p_idle (padrão 24 horas).
 -- O aviso vai como NOTA INTERNA: o operador vê no histórico, e o cliente não
 -- ganha badge de "não lida" por isso. Se ele voltar a escrever, o gateway
--- reabre a mesma thread (Starter volta para a Luna; os demais, para a equipe).
+-- reabre a mesma thread com a Luna — ela estava no meio do atendimento. Para o
+-- gateway saber que foi este fechamento (e não um "resolvido" de verdade), o
+-- metadata.idle_closed_at recebe o mesmo instante do resolved_at; se depois
+-- alguém resolver de novo, os dois deixam de bater.
 -- Sem agendador (decisão de 13/10/2026): o desk-widget-api chama a função de
 -- carona no tráfego do widget, no máximo a cada 15 min por instância.
 
@@ -42,7 +45,9 @@ BEGIN
      FOR UPDATE OF c SKIP LOCKED
   ), closed AS (
     UPDATE desk_conversations c
-       SET status = 'resolved', resolved_at = now()
+       SET status = 'resolved',
+           resolved_at = now(),
+           metadata = COALESCE(c.metadata, '{}'::jsonb) || jsonb_build_object('idle_closed_at', now())
       FROM idle
      WHERE c.id = idle.id
        AND c.status = 'open'
