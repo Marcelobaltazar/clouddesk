@@ -9,6 +9,7 @@
 import { assertEquals, assert, assertStringIncludes } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import { sanitizeContactText, _test } from './ai-pipeline.ts';
 import { hmacSha256Hex, isValidEmail, normalizeEmail } from './widget-auth.ts';
+import { mentionsPayment } from './support-intents.ts';
 
 // ── sanitizeContactText ────────────────────────────────────────────────────────
 
@@ -110,7 +111,6 @@ Deno.test('infra-down: NÃO dispara em conversa normal', () => {
 // ── Guard de pagamento (P7) ────────────────────────────────────────────────────
 
 Deno.test('blocked-payment: detecta menções de pagamento/bloqueio', () => {
-  const re = _test.BLOCKED_PAYMENT_RE();
   for (const msg of [
     'já paguei a fatura mas segue bloqueado',
     'fiz o pagamento e não voltou',
@@ -118,6 +118,13 @@ Deno.test('blocked-payment: detecta menções de pagamento/bloqueio', () => {
     'a cobrança foi feita, pode liberar?',
     'regularizei a assinatura',
   ]) {
+    assert(mentionsPayment(msg), `deveria detectar: "${msg}"`);
+  }
+});
+
+Deno.test('infra-down: páginas de erro 52x da Cloudflare contam como fora do ar', () => {
+  const re = _test.INFRA_DOWN_RE();
+  for (const msg of ['os endereços dão erro 522', 'n8n retornando 524', 'error 522: connection timed out']) {
     assert(re.test(msg), `deveria detectar: "${msg}"`);
   }
 });
