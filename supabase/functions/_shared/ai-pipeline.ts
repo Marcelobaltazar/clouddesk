@@ -29,8 +29,17 @@ import {
   type ContactInfra,
   type ContactSubscription,
 } from './contact-info.ts';
-import type { BillingInfo } from './chargefy.ts';
+import type { BillingInfo, BillingInvoice } from './chargefy.ts';
 import { collectUrls, enforceLinkAllowlist } from './link-guard.ts';
+import {
+  claimsAlreadyPaid,
+  contestsBillingReading,
+  detectBillingChange,
+  mentionsPayment,
+  wantsAddonCancel,
+  type BillingChangeKind,
+} from './support-intents.ts';
+import { humanReplyWindow } from './support-sla.ts';
 import { HELP_CENTER_URL, hasLegacyHelpLink, legacyIntercomIds, rewriteLegacyHelpLinks } from './help-links.ts';
 import { broadcastToConversation } from './broadcast.ts';
 import {
@@ -151,14 +160,26 @@ const CONTROL_MARKERS_RE =
 // Cabeçalhos internos do prompt — se aparecem numa mensagem de cliente, é
 // tentativa de injeção de contexto falso.
 const PROMPT_BLOCK_RE =
-  /(-{3,}\s*(?:DADOS DO CLIENTE|REGRAS SOBRE OS DADOS DO CLIENTE)\s*-{3,})|\[\s*(?:IDENTIDADE|SEGURAN[ÇC]A[^[\]]*|BASE DE CONHECIMENTO[^\]]*|REGRA DE TRANSFER[ÊE]NCIA[^\]]*|AN[ÁA]LISE OBRIGAT[ÓO]RIA[^\]]*|PRIMEIRA MENSAGEM[^\]]*|PLANO STARTER[^\]]*|MODO RASCUNHO[^\]]*)\s*\]/gi;
+  /(-{3,}\s*(?:DADOS DO CLIENTE|REGRAS SOBRE OS DADOS DO CLIENTE)\s*-{3,})|\[\s*(?:IDENTIDADE|SEGURAN[ÇC]A[^[\]]*|BASE DE CONHECIMENTO[^\]]*|REGRA DE TRANSFER[ÊE]NCIA[^\]]*|AN[ÁA]LISE OBRIGAT[ÓO]RIA[^\]]*|PRIMEIRA MENSAGEM[^\]]*|PLANO STARTER[^\]]*|MODO RASCUNHO[^\]]*|JEITO DE FALAR[^\]]*|COMO FALAR DE PROBLEMAS[^\]]*|CORRE[ÇC][ÃA]O[^\]]*)\s*\]/gi;
 
 // Exportado só para testes (regexes de detecção determinística).
 export const _test = {
   INFRA_DOWN_RE: () => INFRA_DOWN_RE,
-  BLOCKED_PAYMENT_RE: () => BLOCKED_PAYMENT_RE,
+  classifyProbeResults: (r: ProbeResult[]) => classifyProbeResults(r),
   CANCEL_RE: () => CANCEL_RE,
   CANCEL_FAIL_RE: () => CANCEL_FAIL_RE,
+  // Respostas determinísticas dos guards (tom, links e prazos)
+  openInvoicesToPay: (b: BillingInfo | null) => openInvoicesToPay(b),
+  scheduledCancellationEnd: (b: BillingInfo | null) => scheduledCancellationEnd(b),
+  hasUnpaidSubscription: (b: BillingInfo | null) => hasUnpaidSubscription(b),
+  blockedWithInvoiceReply: (label: string, inv: BillingInvoice[]) => blockedWithInvoiceReply(label, inv),
+  blockedSelfServiceReply: (label: string) => blockedSelfServiceReply(label),
+  blockedAfterPaymentReply: (label: string, w: string) => blockedAfterPaymentReply(label, w),
+  cancelScheduledReply: (end: string) => cancelScheduledReply(end),
+  cancelHandoffReply: (unpaid: boolean, w: string) => cancelHandoffReply(unpaid, w),
+  billingChangeReply: (kind: BillingChangeKind, w: string) => billingChangeReply(kind, w),
+  addonCancelReply: (w: string) => addonCancelReply(w),
+  BASE_SYSTEM_PROMPT: () => BASE_SYSTEM_PROMPT,
   friendlyDeployStatus: (v: string | null) => friendlyDeployStatus(v),
   communityInviteFor: (ctx: InviteContext) => communityInviteFor(ctx),
   COMMUNITY_INVITE_FIRST: () => COMMUNITY_INVITE_FIRST,
@@ -323,10 +344,23 @@ function kbArticleUrl(
 
 const TRANSFER_KEYWORD = '[TRANSFERIR]';
 
-const BASE_SYSTEM_PROMPT = `Você é Luna, assistente virtual de suporte da Cloudfy, uma empresa SaaS de infraestrutura.
-Seja profissional, amigável e direta. Use linguagem simples e acessível.
-Responda em português do Brasil. Respostas curtas e objetivas (máximo 3 parágrafos).
-Ao final, pergunte se o cliente precisa de mais ajuda.
+const BASE_SYSTEM_PROMPT = `Você é a Luna, assistente virtual do suporte da Cloudfy (infraestrutura pronta pra n8n, WhatsApp, banco de dados e afins).
+
+[JEITO DE FALAR]
+Escreva como alguém experiente do suporte conversando no chat — não como robô, nem como e-mail formal.
+- Português do Brasil do dia a dia, tom tranquilo e amigável. Pode usar "pra", "tá", "vc", "tbm", "rapidinho", "certinho" com naturalidade, sem exagerar.
+- Espelhe o cliente: mensagem curta e informal → resposta curta e informal. Relato técnico e detalhado → resposta organizada e técnica, sem gíria, mas ainda leve. Passo a passo e notícia ruim: sem abreviação.
+- Primeiro a resposta, depois o detalhe. Frases curtas, no máximo 3 parágrafos curtos (passo a passo numerado pode passar disso).
+- Nome do cliente: só no primeiro oi da conversa ou numa notícia importante. Não repita o nome a cada mensagem.
+- Nada de fórmula de robô: não escreva "Entendi que a sua dúvida envolve…", "Fico à disposição", "Espero ter ajudado", "Prezado(a)", nem termine toda resposta com "Posso ajudar em algo mais?". Termine com o próximo passo concreto ("testa aí e me fala?") ou simplesmente termine.
+- Empatia de verdade e curta: se o cliente está frustrado, reconheça em uma frase, do jeito que uma pessoa falaria ("poxa, ficar sem o WhatsApp desde ontem é chato demais"), e já parta pra solução.
+- Emoji: no máximo 1 por mensagem e só quando combinar. Em notícia ruim, nenhum.
+- Você é a assistente virtual da Cloudfy. Se perguntarem se é robô ou IA, diga que sim, com naturalidade — nunca finja ser uma pessoa.
+
+[COMO FALAR DE PROBLEMAS]
+- NUNCA diga que o problema é da Cloudfy, "do nosso lado", "falha nossa", "erro da nossa infraestrutura" ou parecido — nem quando parecer ser. Fale de forma neutra: "identifiquei uma instabilidade", "já acionei a verificação", "a equipe já está olhando".
+- Só aponte a causa no cliente quando houver FATO nos dados ou nas fontes (ex.: looping, sobrecarga, execução presa, credencial alterada). Sem fato, não culpe ninguém: diga o que você verificou e qual é o próximo passo.
+- NUNCA fale de servidor, provedor de hospedagem, data center, localização, configuração de máquina (memória, CPU) ou de como a infraestrutura funciona por dentro. A Cloudfy não divulga isso. Se perguntarem, diga que essas informações não são divulgadas e volte pra solução. (Limites que estão nas FONTES — timeout, payload, execuções simultâneas por plano — você pode explicar normalmente.)
 
 [OPÇÕES CLICÁVEIS]
 Quando quiser oferecer opções ao usuário, use o formato [OPCOES: Opção 1 | Opção 2 | Opção 3] no final da sua mensagem.
@@ -397,7 +431,9 @@ interface LLMOptions {
   timeoutMs?: number;
 }
 
-const MAIN_MODEL = Deno.env.get('LLM_MODEL') ?? 'google/gemini-2.5-flash';
+// google/gemini-2.5-flash sai da OpenRouter em 20/10/2026 — o padrão já é o
+// sucessor (mesmo preço, aceita imagem). O valor real vem do secret LLM_MODEL.
+const MAIN_MODEL = Deno.env.get('LLM_MODEL') ?? 'google/gemini-3.5-flash-lite';
 /** Modelo do seletor e do revisor. Mesmo da resposta, salvo configuração. */
 const AUX_MODEL = Deno.env.get('LLM_MODEL_FAST') ?? MAIN_MODEL;
 /** Resposta ao cliente: baixa para seguir a fonte em vez de "criar". */
@@ -457,16 +493,26 @@ async function callLLM(
 /** Abaixo disso a resposta não tem afirmação a conferir ("Por nada! 😊"). */
 const MIN_AUDITED_CHARS = 60;
 
+/** Troca de modelo por requisição — SÓ o desk-ai-lab usa, para comparar
+ *  modelos antes de mudar o secret. O atendimento real não passa nada. */
+export interface ModelOverride {
+  /** Resposta ao cliente (padrão: LLM_MODEL). */
+  main?: string;
+  /** Seletor da busca e revisor (padrão: LLM_MODEL_FAST, ou LLM_MODEL). */
+  aux?: string;
+}
+
 /** Revisor (ai-verify.ts). null = não rodou ou não deu para ler — a resposta
  *  segue sem revisão, e o log mostra approved=null. */
 async function auditReply(
   apiKey: string,
   input: { message: string; question: string; answer: string; evidence: string },
   onUsage: (u: LLMUsage | null) => void,
+  models?: ModelOverride,
 ): Promise<AuditVerdict | null> {
   try {
     const r = await callLLM(apiKey, AUDIT_SYSTEM_PROMPT, [{ role: 'user', content: buildAuditUserPrompt(input) }], {
-      model: AUX_MODEL, temperature: 0, maxTokens: AUX_MAX_TOKENS, timeoutMs: AUX_TIMEOUT_MS,
+      model: models?.aux ?? AUX_MODEL, temperature: 0, maxTokens: AUX_MAX_TOKENS, timeoutMs: AUX_TIMEOUT_MS,
     });
     onUsage(r.usage);
     const verdict = parseAuditVerdict(r.content);
@@ -694,21 +740,14 @@ async function loadKnowledge(supabase: ServiceClient, retrieval: RetrievalResult
 // P1: cliente diz que a infra está fora do ar / com erro → o sistema testa as
 // URLs REAIS antes de o modelo responder. As URLs seguem o padrão fixo:
 //   https://{nome}-n8n.cloudfy.live   e   https://{nome}-evolution.cloudfy.live
-// P7: infra BLOQUEADA por pagamento + reclamação relacionada → resposta
-// determinística (aviso de até 4h) + transferência para humano.
+// P7: infra BLOQUEADA por pagamento + reclamação relacionada → link da fatura
+// em aberto (ou o caminho para pagar); "já paguei e continua bloqueada" vai
+// para a equipe. A detecção de cobrança fica em support-intents.ts.
 
+// 520–524 são as páginas de erro da Cloudflare quando o serviço não responde
+// (o "erro 522" é o relato mais comum de infra fora do ar).
 const INFRA_DOWN_RE =
-  /(fora do ar|off-?line|caiu|derrubad|fora de servi[çc]o|indispon[ií]vel|n[ãa]o (est[áa] )?(abrindo|funcionando|carregando|respondendo)|n[ãa]o (abre|funciona|carrega|responde|entra|conecta|acessa)|n[ãa]o consigo (abrir|acessar|entrar|logar)|erro\s*(404|500|502|503)|\b(404|502|503)\b|p[áa]gina de erro|not found|bad gateway|gateway time-?out)/i;
-
-// "assinatura" NÃO entra aqui: sozinha é ampla demais (ex.: "cancelar minha
-// assinatura" é cancelamento, não billing — e cancelamento tem precedência).
-// Pedidos de ALTERAÇÃO em cobrança — a IA só lê a Chargefy, nunca escreve.
-// Estes continuam indo para humano; consultas de leitura, não.
-const BILLING_ACTION_RE =
-  /(reembols|estorn|devolv|desbloque|liberar|reativar|regulariz|trocar? (o |meu )?cart[ãa]o|alterar? (a )?forma|(mudar|trocar|alterar|migrar)( de| o)? plano|upgrade|downgrade|cobran[çc]a indevida|cobrad[oa] (a mais|duas vezes|em dobro|2x)|em dobro|duplicad|n[ãa]o reconhe[çc]o|contestar?)/i;
-
-const BLOCKED_PAYMENT_RE =
-  /(bloquead|desbloquear|pag(uei|amento|ou|ar)|\bpago\b|fatura|cobran[çc]|reembolso|estorno|cart[ãa]o|inadimpl|regulariz|liberar|reativar|voltar (a )?(funcionar|ativa))/i;
+  /(fora do ar|off-?line|caiu|derrubad|fora de servi[çc]o|indispon[ií]vel|n[ãa]o (est[áa] )?(abrindo|funcionando|carregando|respondendo)|n[ãa]o (abre|funciona|carrega|responde|entra|conecta|acessa)|n[ãa]o consigo (abrir|acessar|entrar|logar)|erro\s*(404|500|50[2-4]|52[0-4])|\b(404|50[2-4]|52[0-4])\b|p[áa]gina de erro|not found|bad gateway|gateway time-?out|connection timed out)/i;
 
 // Cancelamento: menção ao ato de cancelar/encerrar a assinatura…
 const CANCEL_RE =
@@ -741,7 +780,22 @@ async function probeUrl(url: string): Promise<{ ok: boolean; status: number | nu
   }
 }
 
-/** Testa n8n + Evolution das infras ATIVAS do cliente (máx. 3 infras). */
+/**
+ * O DNS da Cloudfy responde a qualquer subdomínio: serviço que a infra NÃO tem
+ * (Evolution numa infra com WAHA, e vice-versa — o cliente escolhe desde
+ * ago/2026) volta 404. Em 13/10/2026 isso fez a IA ver "Evolution fora do ar"
+ * numa infra que nem tinha Evolution e transferir. Regras:
+ *   • n8n existe em toda infra → 404 é falha de verdade;
+ *   • Evolution/WAHA → 404 é inconclusivo e sai do diagnóstico;
+ *   • 401/403 = serviço no ar pedindo login (WAHA responde assim).
+ */
+function classifyProbeResults(results: ProbeResult[]): ProbeResult[] {
+  return results
+    .map((r) => ({ ...r, ok: r.ok || r.status === 401 || r.status === 403 }))
+    .filter((r) => r.service === 'n8n' || r.status !== 404);
+}
+
+/** Testa n8n + WhatsApp (Evolution ou WAHA) das infras ATIVAS do cliente (máx. 3 infras). */
 async function probeInfraHealth(infras: ContactInfra[]): Promise<ProbeResult[]> {
   const targets = infras
     .filter((i) => i.default_domain)
@@ -749,14 +803,16 @@ async function probeInfraHealth(infras: ContactInfra[]): Promise<ProbeResult[]> 
     .flatMap((i) => [
       { infra: i.default_domain, service: 'n8n', url: `https://${i.default_domain}-n8n.cloudfy.live` },
       { infra: i.default_domain, service: 'Evolution API', url: `https://${i.default_domain}-evolution.cloudfy.live` },
+      { infra: i.default_domain, service: 'WAHA', url: `https://${i.default_domain}-waha.cloudfy.live` },
     ]);
 
-  return Promise.all(
+  const results = await Promise.all(
     targets.map(async (t) => {
       const r = await probeUrl(t.url);
       return { ...t, ...r };
     }),
   );
+  return classifyProbeResults(results);
 }
 
 function buildDiagnosticsSection(results: ProbeResult[]): string {
@@ -781,8 +837,129 @@ ${lines.join('\n')}
 Como responder (OBRIGATÓRIO):
 ${allOk
     ? `- TODOS os serviços testados estão ONLINE. Diga ao cliente que você acabou de fazer um teste e está tudo funcionando normalmente do nosso lado. Peça a ele um PRINT da tela do erro (ele pode anexar a imagem aqui no chat) e mais detalhes: qual link ele está acessando e qual mensagem aparece. NÃO transfira ainda — provavelmente é outro problema (link errado, cache, senha).`
-    : `- Um ou mais serviços do cliente estão realmente com problema. Confirme para o cliente que você verificou e há uma instabilidade no serviço dele, e TRANSFIRA para um humano respondendo APENAS ${TRANSFER_KEYWORD} (exceto se o cliente for somente Starter — nesse caso oriente a Central de ajuda e o Discord).`}
+    : `- Um ou mais serviços do cliente estão realmente com problema. Diga ao cliente QUAL infraestrutura e QUAL serviço você testou e encontrou com instabilidade (e quais estão no ar), e TRANSFIRA seguindo a regra de transferência — resposta curta e útil terminando com ${TRANSFER_KEYWORD} (exceto se o cliente for somente Starter — nesse caso oriente a Central de ajuda e o Discord).`}
 - NUNCA cite códigos HTTP, termos técnicos internos ou as URLs de teste. Fale de forma simples: "testei agora e está no ar" ou "confirmei uma instabilidade".`;
+}
+
+// ─── Respostas determinísticas dos guards (P7 / cancelamento) ─────────────────
+// Texto fixo no tom da Luna. Link, valor e prazo vêm dos dados e do
+// support-sla.ts — o modelo não participa, então não tem como inventar nenhum
+// deles. Regras de tom (13/10/2026): nunca "erro nosso"; nunca culpar o cliente
+// sem fato; prazo só o que a equipe cumpre; emoji no máximo um, nenhum em
+// notícia ruim.
+
+function infraLabel(names: string[]): string {
+  if (names.length === 0) return 'sua infraestrutura';
+  if (names.length === 1) return `sua infraestrutura **${names[0]}**`;
+  return `suas infraestruturas **${names.join('**, **')}**`;
+}
+
+function formatDateBR(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? ''
+    : d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Sao_Paulo' });
+}
+
+/** Faturas em aberto com link de pagamento, a mais antiga primeiro (máx. 2). */
+function openInvoicesToPay(billing: BillingInfo | null | undefined): BillingInvoice[] {
+  return (billing?.invoices ?? [])
+    .filter((i) => String(i.status).toLowerCase() === 'open' && i.amount_due > 0 && !!i.hosted_url)
+    .sort((a, b) => String(a.due_date ?? '').localeCompare(String(b.due_date ?? '')))
+    .slice(0, 2);
+}
+
+function liveSubscriptions(billing: BillingInfo | null | undefined) {
+  return (billing?.subscriptions ?? []).filter((s) => String(s.status).toLowerCase() !== 'canceled');
+}
+
+/** Fim do acesso, quando TODAS as assinaturas vivas já têm cancelamento
+ *  agendado. null se alguma ainda vai renovar (ou se não temos os dados). */
+function scheduledCancellationEnd(billing: BillingInfo | null | undefined): string | null {
+  const live = liveSubscriptions(billing);
+  if (live.length === 0 || !live.every((s) => s.cancel_at_period_end)) return null;
+  const ends = live
+    .map((s) => s.cancel_at ?? s.current_period_end)
+    .filter((d): d is string => !!d)
+    .sort();
+  return ends.length > 0 ? ends[ends.length - 1] : null;
+}
+
+/** Mensalidade em aberto trava o botão de cancelar no portal de cobrança. */
+function hasUnpaidSubscription(billing: BillingInfo | null | undefined): boolean {
+  return liveSubscriptions(billing).some((s) => ['unpaid', 'past_due'].includes(String(s.status).toLowerCase()));
+}
+
+function blockedWithInvoiceReply(label: string, invoices: BillingInvoice[]): string {
+  const lines = invoices.map((i) => {
+    const due = formatDateBR(i.due_date);
+    return `• ${money(i.amount_due, i.currency)}${due ? ` (venc. ${due})` : ''}: [pagar agora](${i.hosted_url})`;
+  });
+  const what = invoices.length === 1 ? 'tem uma mensalidade em aberto' : 'tem mensalidades em aberto';
+  return (
+    `Vi aqui que ${label} tá bloqueada porque ${what}. Dá pra pagar direto por aqui:\n\n${lines.join('\n')}\n\n` +
+    `Assim que o pagamento confirmar, o acesso volta — normalmente é rapidinho. ` +
+    `Se depois de uns 30 minutos continuar bloqueada, me chama aqui que eu aciono a equipe.`
+  );
+}
+
+function blockedSelfServiceReply(label: string): string {
+  return (
+    `Vi aqui que ${label} tá bloqueada por uma pendência de pagamento. ` +
+    `Pra liberar, é só atualizar o cartão em **Configurações → Faturamento** ou pagar a fatura que chegou no seu e-mail. ` +
+    `Assim que o pagamento confirmar, o acesso volta.\n\n` +
+    `Se vc já pagou e continua bloqueada, me avisa aqui que eu aciono a equipe pra liberar.`
+  );
+}
+
+function blockedAfterPaymentReply(label: string, replyWindow: string): string {
+  return (
+    `Vi aqui que ${label} ainda tá bloqueada. Quando o pagamento já foi feito e o acesso não volta, ` +
+    `às vezes a liberação fica presa na operadora do cartão e alguém da equipe precisa liberar manualmente.\n\n` +
+    `Já deixei seu caso com eles: alguém te responde por aqui ${replyWindow}. ` +
+    `Se tiver o comprovante, manda aqui que agiliza.`
+  );
+}
+
+function cancelScheduledReply(endIso: string): string {
+  const end = formatDateBR(endIso);
+  return (
+    `Boa notícia: seu cancelamento já tá agendado. ` +
+    `Vc continua com acesso${end ? ` até ${end}` : ' até o fim do período que já foi pago'} e não vai ter nova cobrança.\n\n` +
+    `Depois dessa data a infraestrutura é excluída, então, se quiser guardar seus workflows, vale exportar um backup antes.`
+  );
+}
+
+function cancelHandoffReply(unpaid: boolean, replyWindow: string): string {
+  const why = unpaid
+    ? `Achei o motivo: tem uma mensalidade em aberto na sua assinatura, e com fatura pendente o botão de cancelar fica travado. `
+    : `Vamos resolver isso. `;
+  return (
+    `${why}Já passei seu caso pra equipe, que vai te ajudar com o cancelamento — alguém te responde por aqui ${replyWindow}.\n\n` +
+    `Se puder, me manda um print do que aparece quando vc tenta cancelar, que agiliza.`
+  );
+}
+
+function addonCancelReply(replyWindow: string): string {
+  return (
+    `Cancelar a IA Ilimitada ou o backup é com a equipe — sua infraestrutura continua como está.\n\n` +
+    `Já passei seu pedido pra eles: alguém te responde por aqui ${replyWindow}. ` +
+    `Se for número virtual, esse você mesmo cancela em **Números Virtuais**, no painel lateral da Cloudfy.`
+  );
+}
+
+function billingChangeReply(kind: BillingChangeKind, replyWindow: string): string {
+  const what: Record<BillingChangeKind, string> = {
+    refund: 'Pedido de reembolso ou estorno passa pela análise da equipe financeira',
+    wrong_charge: 'Cobrança que não bate precisa ser conferida pela equipe financeira',
+    paid_but_blocked: 'Quando o pagamento já foi feito e o acesso não volta, alguém da equipe precisa liberar manualmente',
+  };
+  return (
+    `${what[kind]} — eu consigo consultar sua cobrança, mas não alterar nada por aqui.\n\n` +
+    `Já deixei seu caso com eles: alguém te responde por aqui ${replyWindow}. ` +
+    `Se tiver comprovante ou print, manda aqui que já fica tudo junto.`
+  );
 }
 
 // ─── Prompt builder ───────────────────────────────────────────────────────────
@@ -1058,8 +1235,9 @@ function buildSystemPrompt(
   isFirstMessage?: boolean,
   diagnosticsSection?: string,
 ): string {
+  const firstName = (clientName ?? '').trim().split(/\s+/)[0] ?? '';
   const clientSection = clientName
-    ? `\n[CLIENTE]\nVocê está atendendo: ${clientName}. Cumprimente-o pelo nome na primeira mensagem.\n`
+    ? `\n[CLIENTE]\nVocê está atendendo: ${clientName}. Quando usar o nome, use só o primeiro (${firstName}) — e só no primeiro oi ou numa notícia importante.\n`
     : '';
 
   const contextSection = buildKnowledgeSection(knowledge);
@@ -1074,27 +1252,17 @@ Tente resolver tudo você mesma. Se não conseguir resolver, oriente o cliente a
 `
     : '';
 
+  // Antes a primeira resposta abria com "Vi aqui no seu perfil:" + lista dos
+  // produtos — soava a formulário. Agora o oi é curto e o dado do cliente só
+  // aparece quando ajuda a responder.
   const firstMessageInstruction = isFirstMessage && contactInfo?.customer
     ? `
-[PRIMEIRA MENSAGEM — SAUDAÇÃO PROATIVA OBRIGATÓRIA]
-Esta é a primeira mensagem do cliente. NÃO pergunte apenas "Como posso ajudar?".
-Cumprimente pelo nome e apresente um resumo do que você já sabe sobre ele.
-- Se a mensagem dele JÁ traz uma pergunta ou um problema, responda em seguida, direto, e NÃO pergunte "sobre o que você precisa de ajuda" — ele já disse.
-- Se for só um cumprimento ou a escolha de um tema genérico (ex.: "Dúvida sobre plano"), termine perguntando em que pode ajudar.
-Formato da saudação:
-
-"Olá, ${contactInfo.customer.name}! Vi aqui no seu perfil:
-${contactInfo.subscriptions.filter(s => s.status === 'active').map(s => {
-  const infra = contactInfo.infras.find(i => i.subscription_id === s.subscription_id);
-  return infra
-    ? `• ${s.product} (sua infraestrutura: ${infra.default_domain || infra.purchase_code})`
-    : `• ${s.product}`;
-}).join('\n')}"
-
-(e então a resposta à pergunta dele, ou "Sobre o que você precisa de ajuda hoje?" se ele ainda não perguntou nada)
-
-Se não houver assinaturas ativas, apenas cumprimente pelo nome e siga a mesma regra.
-Adapte o tom — não copie o formato acima palavra por palavra, mas inclua as informações.
+[PRIMEIRA MENSAGEM]
+É a primeira mensagem do cliente nesta conversa.
+- Abra com um oi curto e natural usando o primeiro nome (ex.: "Oi, ${firstName}!").
+- Se ele já trouxe uma pergunta ou um problema, responda direto em seguida. Não liste os produtos dele e não pergunte "em que posso ajudar" — ele já disse.
+- Cite a infraestrutura ou o plano dele só quando isso ajudar na resposta (ex.: "vi que sua infra X tá no ar").
+- Se for só um oi ou a escolha de um tema genérico (ex.: "Dúvida sobre plano"), cumprimente e pergunte, de forma natural, no que pode ajudar.
 `
     : '';
 
@@ -1110,13 +1278,17 @@ NÃO transfira para humano por padrão. Antes de pensar em transferir, siga esta
 2. Se a base NÃO cobre a pergunta, não invente e não transfira de imediato: diga que não tem essa informação confirmada e pergunte se o cliente quer que você encaminhe para a equipe (cliente só Starter: oriente a Central de ajuda e o Discord, conforme a regra do plano Starter). Se ele disser que sim, isso é pedido explícito — caso (a) abaixo.
 3. Se for uma pergunta completamente fora do contexto de suporte da Cloudfy (ex.: "onde comprar coca-cola", receitas, assuntos pessoais, notícias), NÃO transfira: responda educadamente que você só pode ajudar com questões relacionadas à Cloudfy (infraestrutura, n8n, Evolution API, assinaturas, etc.) e ofereça ajuda nesses temas.
 
-Você DEVE responder APENAS com a palavra-chave ${TRANSFER_KEYWORD} SOMENTE em um destes casos:
+Use o marcador ${TRANSFER_KEYWORD} SOMENTE em um destes casos:
   a) O cliente pediu EXPLICITAMENTE para falar com um humano/atendente; OU
   b) É um problema técnico específico que realmente precisa de intervenção humana e que você não consegue resolver — por exemplo: infraestrutura bloqueada ou um bug reportado pelo cliente.
 
-Perguntas sobre cobrança (valor do plano, fatura, 2ª via, vencimento, se o pagamento passou, motivo de recusa do cartão, parcelas) NÃO são motivo de transferência: responda você mesma usando o bloco DADOS DE COBRANÇA. Só transfira se o cliente pedir explicitamente, ou se ele quiser ALTERAR algo (cancelar, reembolsar, trocar de plano, mudar forma de pagamento) — você só consulta, não executa alterações.
+Perguntas sobre cobrança (valor do plano, fatura, 2ª via, vencimento, se o pagamento passou, motivo de recusa do cartão, parcelas) NÃO são motivo de transferência: responda você mesma usando o bloco DADOS DE COBRANÇA. Upgrade de plano, troca de cartão e cancelamento o próprio cliente faz no painel — oriente pelas FONTES. Só transfira se o cliente pedir explicitamente, ou se for algo que só a equipe faz (reembolso, estorno, cobrança que ele não reconhece) — você só consulta, não executa alterações.
 
-Quando transferir, retorne APENAS ${TRANSFER_KEYWORD} — nada antes ou depois, sem explicação.
+Quando transferir, NUNCA mande o cliente embora sem resposta. Escreva antes, em poucas linhas:
+- o que você entendeu e o que você verificou (ex.: o resultado do teste da infra, se houver);
+- o que ele pode fazer enquanto isso, se houver algo seguro nas FONTES (ex.: conferir as Executions do n8n);
+- que você está passando o caso para a equipe.
+Não prometa prazo — o sistema informa o prazo logo em seguida. Termine com ${TRANSFER_KEYWORD} sozinho na última linha (antes do bloco META).
 Dúvida genérica, pergunta fora de contexto, ou algo que você consegue responder NÃO são motivos para transferir.
 
 Se o cliente tem APENAS plano(s) Starter ativo(s) (nenhuma assinatura ativa de Advanced, Ultra, Max ou outro), NUNCA transfira para humano — mesmo que peça. Tente resolver tudo. Se não conseguir, oriente para a Central de ajuda (${HELP_CENTER_URL}/ajuda) e o Discord (${COMMUNITY_DISCORD}). Se o cliente tiver alguma assinatura ativa não-Starter, o atendimento humano é normal.
@@ -1353,7 +1525,7 @@ function communityInviteFor(ctx: InviteContext): string | null {
 
 const META_INSTRUCTION = `
 [ANÁLISE OBRIGATÓRIA — BLOCO META]
-No FINAL de TODA resposta (inclusive quando responder apenas ${TRANSFER_KEYWORD}), anexe em uma linha própria:
+No FINAL de TODA resposta (inclusive quando transferir), anexe em uma linha própria:
 [META: intent=<valor> sentiment=<valor> urgency=<valor> resolved=<sim|nao>]
 
 - intent: credenciais | n8n | evolution | infra_down | billing | cancelamento | upgrade | dominio | duvida_geral | outro
@@ -1628,6 +1800,7 @@ async function consultKnowledge(
   message: string,
   turns: ConversationTurn[],
   onUsage: (u: LLMUsage | null) => void,
+  models?: ModelOverride,
 ): Promise<KnowledgeTurn> {
   const start = Date.now();
   try {
@@ -1636,7 +1809,7 @@ async function consultKnowledge(
       search: (q, emb) => hybridSearch(supabase, q, emb),
       select: async (system, user) => {
         const r = await callLLM(apiKey, system, [{ role: 'user', content: user }], {
-          model: AUX_MODEL, temperature: 0, maxTokens: AUX_MAX_TOKENS, timeoutMs: AUX_TIMEOUT_MS,
+          model: models?.aux ?? AUX_MODEL, temperature: 0, maxTokens: AUX_MAX_TOKENS, timeoutMs: AUX_TIMEOUT_MS,
         });
         onUsage(r.usage);
         return r.content;
@@ -1679,22 +1852,35 @@ async function writeAuditedReply(
   chatMessages: ChatMessage[],
   auditInput: { message: string; question: string; evidence: string },
   onUsage: (u: LLMUsage | null) => void,
+  models?: ModelOverride,
 ): Promise<AuditedReply> {
   const start = Date.now();
-  let llm = await callLLM(apiKey, systemPrompt, chatMessages, { temperature: ANSWER_TEMPERATURE });
+  let llm = await callLLM(apiKey, systemPrompt, chatMessages, { temperature: ANSWER_TEMPERATURE, model: models?.main });
   onUsage(llm.usage);
 
   let { text: rawReply, analysis } = parseMetaBlock(llm.content);
   console.log(`[AI] Reply: "${rawReply.substring(0, 80)}" meta=${JSON.stringify(analysis)} latency=${Date.now() - start}ms`);
 
   const answerForAudit = rawReply.replace(CONTROL_MARKERS_RE, '').replace(/\n{3,}/g, '\n\n').trim();
-  if (rawReply.includes(TRANSFER_KEYWORD) || answerForAudit.length < MIN_AUDITED_CHARS) {
+  if (answerForAudit.length < MIN_AUDITED_CHARS) {
     return { llm, rawReply, analysis, audit: null };
   }
 
   const auditStart = Date.now();
-  const verdict = await auditReply(apiKey, { ...auditInput, answer: answerForAudit }, onUsage);
+  const verdict = await auditReply(apiKey, { ...auditInput, answer: answerForAudit }, onUsage, models);
   const audit: AuditLog = { approved: verdict?.approved ?? null, problems: verdict?.problems ?? [], rewritten: false, latency_ms: 0 };
+
+  // Transferência: o texto que acompanha o [TRANSFERIR] também é conferido. Se
+  // for reprovado, não se reescreve (a reescrita pode perder o marcador e a
+  // conversa não iria para a equipe) — transfere só com a mensagem do sistema.
+  if (rawReply.includes(TRANSFER_KEYWORD)) {
+    if (verdict && !verdict.approved) {
+      console.warn(`[AI] Texto da transferência reprovado — vai sem texto: ${verdict.problems.join(' | ')}`);
+      rawReply = TRANSFER_KEYWORD;
+    }
+    audit.latency_ms = Date.now() - auditStart;
+    return { llm, rawReply, analysis, audit };
+  }
 
   if (verdict && !verdict.approved) {
     console.warn(`[AI] Revisor reprovou a resposta: ${verdict.problems.join(' | ')}`);
@@ -1703,7 +1889,7 @@ async function writeAuditedReply(
         apiKey,
         systemPrompt + buildCorrectionInstruction(answerForAudit, verdict.problems),
         chatMessages,
-        { temperature: ANSWER_TEMPERATURE },
+        { temperature: ANSWER_TEMPERATURE, model: models?.main },
       );
       onUsage(retry.usage);
       const parsed = parseMetaBlock(retry.content);
@@ -1722,6 +1908,43 @@ async function writeAuditedReply(
   }
   audit.latency_ms = Date.now() - auditStart;
   return { llm, rawReply, analysis, audit };
+}
+
+/**
+ * Reabre a conversa para a IA quando a transferência veio do guard de cobrança
+ * e o cliente contestou. Não reabre se a última decisão não foi do guard (a
+ * pausa pode ser de um operador ou de outro motivo) nem se alguém da equipe já
+ * respondeu depois — aí a conversa é da equipe.
+ */
+async function reopenAfterBillingMisread(supabase: ServiceClient, conversationId: string): Promise<boolean> {
+  const { data: last, error: lastErr } = await supabase
+    .from('desk_ai_interactions')
+    .select('model, created_at')
+    .eq('conversation_id', conversationId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (lastErr || !last || (last as { model?: string }).model !== 'guard:billing') return false;
+
+  const { count, error: agentErr } = await supabase
+    .from('desk_messages')
+    .select('id', { count: 'exact', head: true })
+    .eq('conversation_id', conversationId)
+    .eq('sender_type', 'agent')
+    .gt('created_at', (last as { created_at: string }).created_at);
+  if (agentErr || (count ?? 0) > 0) return false;
+
+  const { error } = await supabase
+    .from('desk_conversations')
+    .update({ status: 'open', ai_active: true })
+    .eq('id', conversationId);
+  if (error) {
+    console.error('[AI] Reabrir após contestação de cobrança falhou:', error.message);
+    return false;
+  }
+  console.log(`[AI] Cliente contestou a leitura "cobrança" — IA reativada em ${conversationId}`);
+  void broadcastToConversation(conversationId, 'conv_updated', { status: 'open', ai_active: true });
+  return true;
 }
 
 // ─── Pipeline ─────────────────────────────────────────────────────────────────
@@ -1779,6 +2002,22 @@ export async function runAiPipeline(
       convRow.ai_active = true;
       reopened = true;
       void broadcastToConversation(conversationId, 'conv_updated', { status: 'open', ai_active: true });
+    }
+  }
+
+  // ── Contestação: "não é sobre pagamento" depois de uma transferência do guard
+  // de cobrança. Em set–out/2026, 11 clientes escreveram isso e ficaram sem
+  // resposta (a IA estava pausada e a equipe demorou). Se a pausa veio do guard
+  // e ninguém da equipe respondeu ainda, a IA volta e responde o que foi pedido.
+  let correctedBillingReading = false;
+  if (
+    !isDraft && convRow && !convRow.ai_active && convRow.status === 'pending' &&
+    contestsBillingReading(message)
+  ) {
+    correctedBillingReading = await reopenAfterBillingMisread(supabase, conversationId);
+    if (correctedBillingReading) {
+      convRow.ai_active = true;
+      convRow.status = 'open';
     }
   }
 
@@ -1881,7 +2120,7 @@ export async function runAiPipeline(
     reply: string,
     model: string,
     intent: string,
-    urgency: 'alta' | 'critica' = 'alta',
+    urgency: 'media' | 'alta' | 'critica' = 'alta',
   ): Promise<PipelineOutcome> => {
     const { error: handoffErr } = await supabase
       .from('desk_conversations')
@@ -1903,35 +2142,70 @@ export async function runAiPipeline(
     return { reply, should_handoff: true, skip_handoff_notice: true, blocked: false, auto_resolved: false, reopened, metadata: null };
   };
 
-  const mentionsBilling = BLOCKED_PAYMENT_RE.test(message);
+  // Resposta determinística SEM transferência (o cliente resolve sozinho com o
+  // que a gente mandou — ex.: link da fatura). A IA continua ativa.
+  const guardReply = (reply: string, model: string, intent: string): PipelineOutcome => {
+    const syntheticAnalysis: MessageAnalysis = {
+      intent, sentiment: 'neutro', urgency: 'media', resolved: false,
+    };
+    void applyAnalysis(supabase, conversationId, syntheticAnalysis);
+    void logInteraction(supabase, {
+      conversationId, model, usage: null, latencyMs: 0, wasEscalated: false,
+      analysis: syntheticAnalysis, kbIds: [], snippetIds: [], draft: false,
+    });
+    return { reply, should_handoff: false, blocked: false, auto_resolved: false, reopened, metadata: null };
+  };
 
-  // P7-A: infra REALMENTE bloqueada + reclamação relacionada → aviso das 4h.
-  if (!isDraft && blockedInfras.length > 0 && (mentionsBilling || INFRA_DOWN_RE.test(message))) {
+  const replyWindow = humanReplyWindow();
+
+  // P7-A: infra REALMENTE bloqueada (dado do banco) + reclamação relacionada.
+  // Devendo → manda o link da fatura e o cliente resolve na hora. Só vai para a
+  // equipe quando ele diz que já pagou (a liberação travou) ou quando insiste.
+  if (!isDraft && blockedInfras.length > 0 && (mentionsPayment(message) || INFRA_DOWN_RE.test(message))) {
     const names = blockedInfras.map((i) => i.default_domain || i.purchase_code).filter(Boolean);
-    const infraLabel = names.length === 0
-      ? 'sua infraestrutura'
-      : names.length === 1
-      ? `sua infraestrutura **${names[0]}**`
-      : `suas infraestruturas **${names.join('**, **')}**`;
+    const label = infraLabel(names);
+    const insisted = history.some(
+      (m) => m.sender_type === 'contact' && (mentionsPayment(m.content) || INFRA_DOWN_RE.test(m.content)),
+    );
 
-    const reply =
-      `Verifiquei aqui: ${infraLabel} está com o acesso bloqueado por uma pendência de pagamento. ` +
-      `Quando o pagamento é confirmado, a reativação não acontece na hora — a operadora pode levar um tempo para liberar o acesso de volta. 😕\n\n` +
-      `Já avisei nossa equipe sobre o seu caso: **em até 4 horas** o acesso estará liberado. Um atendente humano vai acompanhar isso de perto por aqui, tudo bem? 🙏`;
+    if (claimsAlreadyPaid(message) || insisted) {
+      console.log(`[AI] Guard P7-A infra bloqueada: handoff (pago=${claimsAlreadyPaid(message)} insistiu=${insisted})`);
+      return await persistGuardHandoff(blockedAfterPaymentReply(label, replyWindow), 'guard:blocked-infra', 'billing');
+    }
 
-    console.log(`[AI] Guard P7-A infra bloqueada: handoff (${names.join(', ') || 'sem nome'})`);
-    return await persistGuardHandoff(reply, 'guard:blocked-infra', 'billing');
+    const invoices = openInvoicesToPay(contactInfo?.billing);
+    console.log(`[AI] Guard P7-A infra bloqueada: ${invoices.length > 0 ? 'link da fatura' : 'autoatendimento'}`);
+    return invoices.length > 0
+      ? guardReply(blockedWithInvoiceReply(label, invoices), 'guard:blocked-infra-link', 'billing')
+      : guardReply(blockedSelfServiceReply(label), 'guard:blocked-infra-selfservice', 'billing');
+  }
+
+  // Cancelar a IA Ilimitada ou o backup: só a equipe de suporte consegue — o
+  // painel do cliente só cancela o plano inteiro (número virtual o cliente
+  // cancela sozinho desde 13/10/2026; a IA orienta pela base).
+  // Mandar para Configurações → Faturamento aqui faria o cliente cancelar a
+  // infra sem querer. Vale para todos os planos.
+  if (!isDraft && wantsAddonCancel(message)) {
+    console.log('[AI] Guard cancelamento de adicional: equipe');
+    return await persistGuardHandoff(addonCancelReply(replyWindow), 'guard:cancel-addon', 'cancelamento', 'media');
   }
 
   // Guard de CANCELAMENTO (precede billing: "cancelar minha assinatura" é
-  // cancelamento, não cobrança): cliente que NÃO CONSEGUE cancelar (ou insiste
-  // que não está conseguindo) precisa de atenção humana imediata — risco de
-  // churn e de reclamação formal. Vale para TODOS os planos (inclusive
-  // Starter): impedir cancelamento não pode ficar sem resposta humana.
+  // cancelamento, não cobrança). Ninguém cancela pelo cliente — mas ele não
+  // pode ficar sem saída:
+  //   • cancelamento já agendado → avisa na hora (muita gente pergunta isso);
+  //   • não consegue cancelar ou insiste → equipe, com o motivo quando a gente
+  //     sabe (fatura em aberto trava o botão de cancelar).
   // A primeira menção simples a "cancelar" continua com a IA (ela orienta o
-  // autoatendimento via base de conhecimento).
+  // autoatendimento via base de conhecimento). Vale para todos os planos.
   const mentionsCancel = CANCEL_RE.test(message);
   if (!isDraft && mentionsCancel) {
+    const scheduledEnd = scheduledCancellationEnd(contactInfo?.billing);
+    if (scheduledEnd) {
+      console.log('[AI] Guard cancelamento: já agendado — avisando sem transferir');
+      return guardReply(cancelScheduledReply(scheduledEnd), 'guard:cancel-scheduled', 'cancelamento');
+    }
+
     const mentionsFailure = CANCEL_FAIL_RE.test(message);
     // Insistência: já havia mencionado cancelamento em turno anterior
     const insisted = history.some(
@@ -1939,41 +2213,21 @@ export async function runAiPipeline(
     );
 
     if (mentionsFailure || insisted) {
-      const reply =
-        `Sinto muito que você esteja com dificuldade para cancelar — isso não deveria acontecer. 😕\n\n` +
-        `Já acionei nossa equipe para cuidar do seu caso pessoalmente: você vai receber um retorno **aqui, em até 12 horas**. ` +
-        `Se puder, me conta o que aconteceu quando tentou cancelar (um print da tela ajuda muito a agilizar). 🙏`;
-      console.log(`[AI] Guard cancelamento: handoff (failure=${mentionsFailure} insisted=${insisted})`);
-      return await persistGuardHandoff(reply, 'guard:cancel', 'cancelamento', 'critica');
+      const unpaid = hasUnpaidSubscription(contactInfo?.billing);
+      console.log(`[AI] Guard cancelamento: handoff (failure=${mentionsFailure} insisted=${insisted} unpaid=${unpaid})`);
+      return await persistGuardHandoff(cancelHandoffReply(unpaid, replyWindow), 'guard:cancel', 'cancelamento', 'critica');
     }
   }
 
-  // P7-B: menção a pagamento/fatura/cobrança/desbloqueio.
-  //
-  // A IA CONSULTA cobrança (dados reais da Chargefy no contexto) mas NÃO executa
-  // alterações — o acesso à Chargefy é somente leitura. Então só escala quando o
-  // cliente quer MUDAR algo (reembolso, estorno, desbloqueio, trocar cartão) ou
-  // quando não temos os dados dele para responder.
-  //
-  // Perguntas de consulta ("qual o valor da minha fatura", "qual cartão
-  // cadastrei", "meu pagamento passou") seguem para o modelo, que responde com o
-  // bloco DADOS DE COBRANÇA.
-  const wantsBillingChange = BILLING_ACTION_RE.test(message);
-  const hasBillingData = (contactInfo?.billing?.subscriptions?.length ?? 0) > 0
-    || (contactInfo?.billing?.invoices?.length ?? 0) > 0
-    || (contactInfo?.billing?.charges?.length ?? 0) > 0;
-
-  // Pedido de alteração escala por si só — "quero mudar de plano" ou "fui
-  // cobrado em dobro" não contêm as palavras de BLOCKED_PAYMENT_RE.
-  if (
-    !isDraft && !mentionsCancel && !isStarterOnlyClient(contactInfo) &&
-    (wantsBillingChange || (mentionsBilling && !hasBillingData))
-  ) {
-    const reply =
-      `Entendi que a sua dúvida envolve pagamento/cobrança. Esse tipo de assunto é tratado diretamente pela nossa equipe. 💳\n\n` +
-      `Já encaminhei o seu caso para um atendente humano — ele vai te responder por aqui assim que possível. Enquanto isso, se tiver um comprovante ou print, pode anexar aqui que agiliza. 🙏`;
-    console.log('[AI] Guard P7-B billing: handoff (menção a pagamento)');
-    return await persistGuardHandoff(reply, 'guard:billing', 'billing');
+  // P7-B: pedido de cobrança que só a equipe resolve (reembolso, cobrança
+  // indevida, "paguei e continua bloqueado"). A IA CONSULTA a Chargefy mas não
+  // altera nada. Todo o resto — valor, vencimento, 2ª via, trocar cartão,
+  // upgrade, pagar no PIX — segue para o modelo, que responde com os dados e a
+  // base (e transfere sozinho se não tiver como ajudar).
+  const billingChange = detectBillingChange(message);
+  if (!isDraft && !mentionsCancel && billingChange && !isStarterOnlyClient(contactInfo)) {
+    console.log(`[AI] Guard P7-B billing: handoff (${billingChange})`);
+    return await persistGuardHandoff(billingChangeReply(billingChange, replyWindow), 'guard:billing', 'billing');
   }
 
   // P1: reclamação de "fora do ar"/erro com infra ativa → testa as URLs reais
@@ -2007,6 +2261,13 @@ export async function runAiPipeline(
   const clientName = contactInfo?.customer?.name || fallbackName;
   let systemPrompt = buildSystemPrompt(knowledge, clientName, contactInfo, isFirstMessage, diagnosticsSection);
   systemPrompt += `\n${META_INSTRUCTION}`;
+
+  if (correctedBillingReading) {
+    systemPrompt += `
+
+[CORREÇÃO — O ATENDIMENTO ENTENDEU ERRADO ANTES]
+Na mensagem anterior o atendimento tratou o pedido do cliente como assunto de pagamento/cobrança, e não era. Comece reconhecendo isso em poucas palavras, como uma pessoa faria ("foi mal, entendi errado"), e responda o pedido que ele descreveu nas mensagens anteriores. Não volte a falar de cobrança.`;
+  }
 
   if (imageUrl) {
     systemPrompt += `
@@ -2047,7 +2308,7 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
     content: m.sender_type === 'contact' ? sanitizeContactText(m.content) : String(m.content ?? '').slice(0, 6000),
   }));
   // Turno atual: texto puro, ou multimodal (texto + imagem) quando o cliente
-  // anexou uma foto — o modelo (gemini-2.5-flash) analisa a imagem de verdade.
+  // anexou uma foto — o modelo (LLM_MODEL, multimodal) analisa a imagem de verdade.
   const userContent: ChatMessage['content'] = imageUrl
     ? [
         { type: 'text', text: message },
@@ -2257,9 +2518,11 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
   }
 
   return {
-    // Handoff normal: o "reply" é só a keyword — o cliente recebe apenas a
-    // mensagem de sistema de encaminhamento (inserida pelo gateway).
-    reply: should_handoff ? null : reply,
+    // Handoff: o texto que a IA escreveu ANTES do [TRANSFERIR] (o que testou,
+    // o que o cliente pode fazer enquanto isso) vai para o cliente, seguido da
+    // mensagem de sistema com o prazo (inserida pelo gateway). Antes ia só a
+    // mensagem de sistema — o cliente era transferido sem resposta nenhuma.
+    reply: should_handoff ? (reply.trim() || null) : reply,
     should_handoff,
     blocked: false,
     auto_resolved,

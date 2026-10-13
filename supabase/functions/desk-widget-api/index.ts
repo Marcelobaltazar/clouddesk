@@ -24,7 +24,9 @@ import {
   validateAndResendCredentials,
   type ContactInfoResult,
 } from '../_shared/contact-info.ts';
-import { runAiPipeline, detectPlanTag, COMMUNITY_DISCORD, type MessageMetadata } from '../_shared/ai-pipeline.ts';
+import { runAiPipeline, detectPlanTag, type MessageMetadata } from '../_shared/ai-pipeline.ts';
+import { HELP_CENTER_URL } from '../_shared/help-links.ts';
+import { humanReplyWindow } from '../_shared/support-sla.ts';
 import { broadcastToConversation } from '../_shared/broadcast.ts';
 import { loadEligibleCampaigns, trackCampaignEvent } from '../_shared/campaigns.ts';
 
@@ -119,16 +121,15 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const ZERO_UUID = '00000000-0000-0000-0000-000000000000';
 
 // Mensagem de sistema no handoff IA → humano (era hardcoded no widget; agora é
-// inserida server-side para nenhum cliente conseguir pular/forjar).
-const HANDOFF_MESSAGE = `Vou encaminhar sua solicitação para nossa equipe.
+// inserida server-side para nenhum cliente conseguir pular/forjar). O prazo vem
+// do support-sla.ts: 12h em dia útil, senão o próximo dia útil — calculado na
+// hora, para nunca prometer o que a equipe não cumpre.
+function handoffMessage(): string {
+  return `Passei sua conversa pra nossa equipe — alguém te responde por aqui ${humanReplyWindow()}.
+Se lembrar de mais algum detalhe ou tiver um print, pode mandar que fica tudo junto.
 
-⏰ Nosso SLA:
-- Seg a Sex, 9h às 19h
-- Resposta em até 12 horas úteis
-- Fora do horário: fila para próximo dia útil
-
-📚 Central de ajuda: https://clouddesk-omega.vercel.app/ajuda
-💬 Discord: ${COMMUNITY_DISCORD}`;
+📚 Enquanto isso, a Central de ajuda pode adiantar: ${HELP_CENTER_URL}/ajuda`;
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -546,7 +547,7 @@ async function runTurn(
       if (botMsg) newMessages.push(botMsg);
     }
     if (!outcome.skip_handoff_notice) {
-      const sysMsg = await insertMessage(service, conversation.id, 'system', HANDOFF_MESSAGE);
+      const sysMsg = await insertMessage(service, conversation.id, 'system', handoffMessage());
       if (sysMsg) newMessages.push(sysMsg);
     }
   } else if (outcome.reply) {

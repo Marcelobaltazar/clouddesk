@@ -9,6 +9,7 @@
 import { assertEquals, assert, assertStringIncludes } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import { sanitizeContactText, _test } from './ai-pipeline.ts';
 import { hmacSha256Hex, isValidEmail, normalizeEmail } from './widget-auth.ts';
+import { mentionsPayment } from './support-intents.ts';
 
 // ── sanitizeContactText ────────────────────────────────────────────────────────
 
@@ -110,7 +111,6 @@ Deno.test('infra-down: NÃO dispara em conversa normal', () => {
 // ── Guard de pagamento (P7) ────────────────────────────────────────────────────
 
 Deno.test('blocked-payment: detecta menções de pagamento/bloqueio', () => {
-  const re = _test.BLOCKED_PAYMENT_RE();
   for (const msg of [
     'já paguei a fatura mas segue bloqueado',
     'fiz o pagamento e não voltou',
@@ -118,6 +118,13 @@ Deno.test('blocked-payment: detecta menções de pagamento/bloqueio', () => {
     'a cobrança foi feita, pode liberar?',
     'regularizei a assinatura',
   ]) {
+    assert(mentionsPayment(msg), `deveria detectar: "${msg}"`);
+  }
+});
+
+Deno.test('infra-down: páginas de erro 52x da Cloudflare contam como fora do ar', () => {
+  const re = _test.INFRA_DOWN_RE();
+  for (const msg of ['os endereços dão erro 522', 'n8n retornando 524', 'error 522: connection timed out']) {
     assert(re.test(msg), `deveria detectar: "${msg}"`);
   }
 });
@@ -228,4 +235,29 @@ Deno.test('email: normalização e validação', () => {
   assertEquals(isValidEmail('não-é-email'), false);
   assertEquals(isValidEmail('a@b'), false);
   assertEquals(isValidEmail('x'.repeat(300) + '@y.com'), false);
+});
+
+// ── Teste de saúde das URLs da infra ───────────────────────────────────────────
+
+Deno.test('probe: 404 em Evolution/WAHA é inconclusivo (serviço pode nem existir na infra)', () => {
+  const r = _test.classifyProbeResults([
+    { infra: 'x', service: 'n8n', url: 'u', ok: true, status: 200 },
+    { infra: 'x', service: 'Evolution API', url: 'u', ok: false, status: 404 },
+    { infra: 'x', service: 'WAHA', url: 'u', ok: false, status: 401 },
+  ]);
+  assertEquals(r.map((x) => `${x.service}:${x.ok}`), ['n8n:true', 'WAHA:true']);
+});
+
+Deno.test('probe: n8n com 404 é falha real (toda infra tem n8n)', () => {
+  const r = _test.classifyProbeResults([{ infra: 'x', service: 'n8n', url: 'u', ok: false, status: 404 }]);
+  assertEquals(r.length, 1);
+  assertEquals(r[0].ok, false);
+});
+
+Deno.test('probe: Evolution sem resposta (timeout) ou 5xx continua sendo problema', () => {
+  const r = _test.classifyProbeResults([
+    { infra: 'x', service: 'Evolution API', url: 'u', ok: false, status: null },
+    { infra: 'x', service: 'Evolution API', url: 'u', ok: false, status: 522 },
+  ]);
+  assertEquals(r.map((x) => x.ok), [false, false]);
 });
