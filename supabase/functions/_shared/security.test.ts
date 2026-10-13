@@ -236,3 +236,28 @@ Deno.test('email: normalização e validação', () => {
   assertEquals(isValidEmail('a@b'), false);
   assertEquals(isValidEmail('x'.repeat(300) + '@y.com'), false);
 });
+
+// ── Teste de saúde das URLs da infra ───────────────────────────────────────────
+
+Deno.test('probe: 404 em Evolution/WAHA é inconclusivo (serviço pode nem existir na infra)', () => {
+  const r = _test.classifyProbeResults([
+    { infra: 'x', service: 'n8n', url: 'u', ok: true, status: 200 },
+    { infra: 'x', service: 'Evolution API', url: 'u', ok: false, status: 404 },
+    { infra: 'x', service: 'WAHA', url: 'u', ok: false, status: 401 },
+  ]);
+  assertEquals(r.map((x) => `${x.service}:${x.ok}`), ['n8n:true', 'WAHA:true']);
+});
+
+Deno.test('probe: n8n com 404 é falha real (toda infra tem n8n)', () => {
+  const r = _test.classifyProbeResults([{ infra: 'x', service: 'n8n', url: 'u', ok: false, status: 404 }]);
+  assertEquals(r.length, 1);
+  assertEquals(r[0].ok, false);
+});
+
+Deno.test('probe: Evolution sem resposta (timeout) ou 5xx continua sendo problema', () => {
+  const r = _test.classifyProbeResults([
+    { infra: 'x', service: 'Evolution API', url: 'u', ok: false, status: null },
+    { infra: 'x', service: 'Evolution API', url: 'u', ok: false, status: 522 },
+  ]);
+  assertEquals(r.map((x) => x.ok), [false, false]);
+});

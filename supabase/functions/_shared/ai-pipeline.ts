@@ -165,6 +165,7 @@ const PROMPT_BLOCK_RE =
 // Exportado só para testes (regexes de detecção determinística).
 export const _test = {
   INFRA_DOWN_RE: () => INFRA_DOWN_RE,
+  classifyProbeResults: (r: ProbeResult[]) => classifyProbeResults(r),
   CANCEL_RE: () => CANCEL_RE,
   CANCEL_FAIL_RE: () => CANCEL_FAIL_RE,
   // Respostas determinísticas dos guards (tom, links e prazos)
@@ -430,7 +431,9 @@ interface LLMOptions {
   timeoutMs?: number;
 }
 
-const MAIN_MODEL = Deno.env.get('LLM_MODEL') ?? 'google/gemini-2.5-flash';
+// google/gemini-2.5-flash sai da OpenRouter em 20/10/2026 — o padrão já é o
+// sucessor (mesmo preço, aceita imagem). O valor real vem do secret LLM_MODEL.
+const MAIN_MODEL = Deno.env.get('LLM_MODEL') ?? 'google/gemini-3.5-flash-lite';
 /** Modelo do seletor e do revisor. Mesmo da resposta, salvo configuração. */
 const AUX_MODEL = Deno.env.get('LLM_MODEL_FAST') ?? MAIN_MODEL;
 /** Resposta ao cliente: baixa para seguir a fonte em vez de "criar". */
@@ -767,7 +770,22 @@ async function probeUrl(url: string): Promise<{ ok: boolean; status: number | nu
   }
 }
 
-/** Testa n8n + Evolution das infras ATIVAS do cliente (máx. 3 infras). */
+/**
+ * O DNS da Cloudfy responde a qualquer subdomínio: serviço que a infra NÃO tem
+ * (Evolution numa infra com WAHA, e vice-versa — o cliente escolhe desde
+ * ago/2026) volta 404. Em 13/10/2026 isso fez a IA ver "Evolution fora do ar"
+ * numa infra que nem tinha Evolution e transferir. Regras:
+ *   • n8n existe em toda infra → 404 é falha de verdade;
+ *   • Evolution/WAHA → 404 é inconclusivo e sai do diagnóstico;
+ *   • 401/403 = serviço no ar pedindo login (WAHA responde assim).
+ */
+function classifyProbeResults(results: ProbeResult[]): ProbeResult[] {
+  return results
+    .map((r) => ({ ...r, ok: r.ok || r.status === 401 || r.status === 403 }))
+    .filter((r) => r.service === 'n8n' || r.status !== 404);
+}
+
+/** Testa n8n + WhatsApp (Evolution ou WAHA) das infras ATIVAS do cliente (máx. 3 infras). */
 async function probeInfraHealth(infras: ContactInfra[]): Promise<ProbeResult[]> {
   const targets = infras
     .filter((i) => i.default_domain)
@@ -775,14 +793,16 @@ async function probeInfraHealth(infras: ContactInfra[]): Promise<ProbeResult[]> 
     .flatMap((i) => [
       { infra: i.default_domain, service: 'n8n', url: `https://${i.default_domain}-n8n.cloudfy.live` },
       { infra: i.default_domain, service: 'Evolution API', url: `https://${i.default_domain}-evolution.cloudfy.live` },
+      { infra: i.default_domain, service: 'WAHA', url: `https://${i.default_domain}-waha.cloudfy.live` },
     ]);
 
-  return Promise.all(
+  const results = await Promise.all(
     targets.map(async (t) => {
       const r = await probeUrl(t.url);
       return { ...t, ...r };
     }),
   );
+  return classifyProbeResults(results);
 }
 
 function buildDiagnosticsSection(results: ProbeResult[]): string {
@@ -807,7 +827,7 @@ ${lines.join('\n')}
 Como responder (OBRIGATÓRIO):
 ${allOk
     ? `- TODOS os serviços testados estão ONLINE. Diga ao cliente que você acabou de fazer um teste e está tudo funcionando normalmente do nosso lado. Peça a ele um PRINT da tela do erro (ele pode anexar a imagem aqui no chat) e mais detalhes: qual link ele está acessando e qual mensagem aparece. NÃO transfira ainda — provavelmente é outro problema (link errado, cache, senha).`
-    : `- Um ou mais serviços do cliente estão realmente com problema. Confirme para o cliente que você verificou e há uma instabilidade no serviço dele, e TRANSFIRA para um humano respondendo APENAS ${TRANSFER_KEYWORD} (exceto se o cliente for somente Starter — nesse caso oriente a Central de ajuda e o Discord).`}
+    : `- Um ou mais serviços do cliente estão realmente com problema. Diga ao cliente QUAL infraestrutura e QUAL serviço você testou e encontrou com instabilidade (e quais estão no ar), e TRANSFIRA seguindo a regra de transferência — resposta curta e útil terminando com ${TRANSFER_KEYWORD} (exceto se o cliente for somente Starter — nesse caso oriente a Central de ajuda e o Discord).`}
 - NUNCA cite códigos HTTP, termos técnicos internos ou as URLs de teste. Fale de forma simples: "testei agora e está no ar" ou "confirmei uma instabilidade".`;
 }
 
@@ -1248,13 +1268,17 @@ NÃO transfira para humano por padrão. Antes de pensar em transferir, siga esta
 2. Se a base NÃO cobre a pergunta, não invente e não transfira de imediato: diga que não tem essa informação confirmada e pergunte se o cliente quer que você encaminhe para a equipe (cliente só Starter: oriente a Central de ajuda e o Discord, conforme a regra do plano Starter). Se ele disser que sim, isso é pedido explícito — caso (a) abaixo.
 3. Se for uma pergunta completamente fora do contexto de suporte da Cloudfy (ex.: "onde comprar coca-cola", receitas, assuntos pessoais, notícias), NÃO transfira: responda educadamente que você só pode ajudar com questões relacionadas à Cloudfy (infraestrutura, n8n, Evolution API, assinaturas, etc.) e ofereça ajuda nesses temas.
 
-Você DEVE responder APENAS com a palavra-chave ${TRANSFER_KEYWORD} SOMENTE em um destes casos:
+Use o marcador ${TRANSFER_KEYWORD} SOMENTE em um destes casos:
   a) O cliente pediu EXPLICITAMENTE para falar com um humano/atendente; OU
   b) É um problema técnico específico que realmente precisa de intervenção humana e que você não consegue resolver — por exemplo: infraestrutura bloqueada ou um bug reportado pelo cliente.
 
-Perguntas sobre cobrança (valor do plano, fatura, 2ª via, vencimento, se o pagamento passou, motivo de recusa do cartão, parcelas) NÃO são motivo de transferência: responda você mesma usando o bloco DADOS DE COBRANÇA. Só transfira se o cliente pedir explicitamente, ou se ele quiser ALTERAR algo (cancelar, reembolsar, trocar de plano, mudar forma de pagamento) — você só consulta, não executa alterações.
+Perguntas sobre cobrança (valor do plano, fatura, 2ª via, vencimento, se o pagamento passou, motivo de recusa do cartão, parcelas) NÃO são motivo de transferência: responda você mesma usando o bloco DADOS DE COBRANÇA. Upgrade de plano, troca de cartão e cancelamento o próprio cliente faz no painel — oriente pelas FONTES. Só transfira se o cliente pedir explicitamente, ou se for algo que só a equipe faz (reembolso, estorno, cobrança que ele não reconhece) — você só consulta, não executa alterações.
 
-Quando transferir, retorne APENAS ${TRANSFER_KEYWORD} — nada antes ou depois, sem explicação.
+Quando transferir, NUNCA mande o cliente embora sem resposta. Escreva antes, em poucas linhas:
+- o que você entendeu e o que você verificou (ex.: o resultado do teste da infra, se houver);
+- o que ele pode fazer enquanto isso, se houver algo seguro nas FONTES (ex.: conferir as Executions do n8n);
+- que você está passando o caso para a equipe.
+Não prometa prazo — o sistema informa o prazo logo em seguida. Termine com ${TRANSFER_KEYWORD} sozinho na última linha (antes do bloco META).
 Dúvida genérica, pergunta fora de contexto, ou algo que você consegue responder NÃO são motivos para transferir.
 
 Se o cliente tem APENAS plano(s) Starter ativo(s) (nenhuma assinatura ativa de Advanced, Ultra, Max ou outro), NUNCA transfira para humano — mesmo que peça. Tente resolver tudo. Se não conseguir, oriente para a Central de ajuda (${HELP_CENTER_URL}/ajuda) e o Discord (${COMMUNITY_DISCORD}). Se o cliente tiver alguma assinatura ativa não-Starter, o atendimento humano é normal.
@@ -1491,7 +1515,7 @@ function communityInviteFor(ctx: InviteContext): string | null {
 
 const META_INSTRUCTION = `
 [ANÁLISE OBRIGATÓRIA — BLOCO META]
-No FINAL de TODA resposta (inclusive quando responder apenas ${TRANSFER_KEYWORD}), anexe em uma linha própria:
+No FINAL de TODA resposta (inclusive quando transferir), anexe em uma linha própria:
 [META: intent=<valor> sentiment=<valor> urgency=<valor> resolved=<sim|nao>]
 
 - intent: credenciais | n8n | evolution | infra_down | billing | cancelamento | upgrade | dominio | duvida_geral | outro
@@ -1826,13 +1850,25 @@ async function writeAuditedReply(
   console.log(`[AI] Reply: "${rawReply.substring(0, 80)}" meta=${JSON.stringify(analysis)} latency=${Date.now() - start}ms`);
 
   const answerForAudit = rawReply.replace(CONTROL_MARKERS_RE, '').replace(/\n{3,}/g, '\n\n').trim();
-  if (rawReply.includes(TRANSFER_KEYWORD) || answerForAudit.length < MIN_AUDITED_CHARS) {
+  if (answerForAudit.length < MIN_AUDITED_CHARS) {
     return { llm, rawReply, analysis, audit: null };
   }
 
   const auditStart = Date.now();
   const verdict = await auditReply(apiKey, { ...auditInput, answer: answerForAudit }, onUsage);
   const audit: AuditLog = { approved: verdict?.approved ?? null, problems: verdict?.problems ?? [], rewritten: false, latency_ms: 0 };
+
+  // Transferência: o texto que acompanha o [TRANSFERIR] também é conferido. Se
+  // for reprovado, não se reescreve (a reescrita pode perder o marcador e a
+  // conversa não iria para a equipe) — transfere só com a mensagem do sistema.
+  if (rawReply.includes(TRANSFER_KEYWORD)) {
+    if (verdict && !verdict.approved) {
+      console.warn(`[AI] Texto da transferência reprovado — vai sem texto: ${verdict.problems.join(' | ')}`);
+      rawReply = TRANSFER_KEYWORD;
+    }
+    audit.latency_ms = Date.now() - auditStart;
+    return { llm, rawReply, analysis, audit };
+  }
 
   if (verdict && !verdict.approved) {
     console.warn(`[AI] Revisor reprovou a resposta: ${verdict.problems.join(' | ')}`);
@@ -2260,7 +2296,7 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
     content: m.sender_type === 'contact' ? sanitizeContactText(m.content) : String(m.content ?? '').slice(0, 6000),
   }));
   // Turno atual: texto puro, ou multimodal (texto + imagem) quando o cliente
-  // anexou uma foto — o modelo (gemini-2.5-flash) analisa a imagem de verdade.
+  // anexou uma foto — o modelo (LLM_MODEL, multimodal) analisa a imagem de verdade.
   const userContent: ChatMessage['content'] = imageUrl
     ? [
         { type: 'text', text: message },
@@ -2470,9 +2506,11 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
   }
 
   return {
-    // Handoff normal: o "reply" é só a keyword — o cliente recebe apenas a
-    // mensagem de sistema de encaminhamento (inserida pelo gateway).
-    reply: should_handoff ? null : reply,
+    // Handoff: o texto que a IA escreveu ANTES do [TRANSFERIR] (o que testou,
+    // o que o cliente pode fazer enquanto isso) vai para o cliente, seguido da
+    // mensagem de sistema com o prazo (inserida pelo gateway). Antes ia só a
+    // mensagem de sistema — o cliente era transferido sem resposta nenhuma.
+    reply: should_handoff ? (reply.trim() || null) : reply,
     should_handoff,
     blocked: false,
     auto_resolved,
