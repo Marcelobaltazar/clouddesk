@@ -604,14 +604,17 @@ Deno.serve(async (req) => {
     const service = serviceClient();
 
     // ── Rate limiting por ação ──────────────────────────────────────────────────
+    // Leituras ('memory') contam na própria instância: gravar no banco a cada
+    // carga de página era ~85% das escritas do rate limit (Disk IO, 13/10/2026).
+    // Envio de mensagem, CSAT e credenciais seguem no banco (exato).
     const RULES: Record<WidgetAction, RateRule[]> = {
-      hello:              [{ name: 'hello', max: 60, windowSeconds: 300 }],
-      bootstrap:          [{ name: 'boot', max: 30, windowSeconds: 300 }],
+      hello:              [{ name: 'hello', max: 60, windowSeconds: 300, store: 'memory' }],
+      bootstrap:          [{ name: 'boot', max: 30, windowSeconds: 300, store: 'memory' }],
       // Lista é releitura barata (o cliente navega entre lista e thread várias
       // vezes por sessão) — teto folgado, só para conter abuso.
-      conversations:      [{ name: 'convlist', max: 90, windowSeconds: 300 }],
+      conversations:      [{ name: 'convlist', max: 90, windowSeconds: 300, store: 'memory' }],
       // mark_read dispara a cada abertura de thread e volta de foco.
-      mark_read:          [{ name: 'read', max: 120, windowSeconds: 300 }],
+      mark_read:          [{ name: 'read', max: 120, windowSeconds: 300, store: 'memory' }],
       start: [
         { name: 'newconv', max: 6, windowSeconds: 3600 },
         { name: 'msg', max: 10, windowSeconds: 60 },
@@ -623,13 +626,15 @@ Deno.serve(async (req) => {
         { name: 'msg-h', max: 40, windowSeconds: 3600 },
         { name: 'msg-d', max: 200, windowSeconds: 86400 },
       ],
-      messages:           [{ name: 'list', max: 60, windowSeconds: 300 }],
+      messages:           [{ name: 'list', max: 60, windowSeconds: 300, store: 'memory' }],
       csat:               [{ name: 'csat', max: 10, windowSeconds: 3600 }],
       resend_credentials: [{ name: 'cred', max: 3, windowSeconds: 3600 }],
       // Disparos: leitura a cada carga de página/foco; eventos a cada
       // visualização/clique/passo de tour — tetos folgados, só contra abuso.
-      campaigns:          [{ name: 'camp', max: 60, windowSeconds: 300 }],
-      campaign_event:     [{ name: 'campev', max: 240, windowSeconds: 300 }],
+      campaigns:          [{ name: 'camp', max: 60, windowSeconds: 300, store: 'memory' }],
+      // O receipt é um upsert por (disparo, e-mail): spam de evento não faz a
+      // tabela crescer, então o teto pode ser por instância.
+      campaign_event:     [{ name: 'campev', max: 240, windowSeconds: 300, store: 'memory' }],
     };
 
     const exceeded = await checkRateRules(service, email, RULES[action]);
