@@ -37,15 +37,16 @@ atualizar o n8n?", "Quedas frequentes", "Não consigo excluir minha instância",
 S11 IA Ilimitada, S17/S18 mensagem não chega, S20 credenciais, S21 terminal/env,
 S22 Supabase/Chatwoot, S23 backup, S24 suporte, S27 Hermes/OpenClaw.
 
-**Fora por enquanto:** S7 (cancelar só número/adicional — feito pela equipe;
-precisa de confirmação diante da regra "ninguém cancela pelo cliente"); S3, S6,
+**Segunda leva (mesmo dia):** S7 publicado depois da confirmação de que adicional
+(número virtual, IA Ilimitada, backup) só a equipe de suporte cancela; o artigo
+"Minha instância n8n está offline…" foi reescrito (mandava rodar docker/kubectl —
+agora: confirmar pela URL, aguardar, Executions, reiniciar pelo console, chat).
+
+**Fora por enquanto:** S3, S6,
 S9, S10 (baixa confiança ou já cobertos por artigo/página de preços); S12–S16, S19,
 S25, S26 (fundidos em snippets existentes ou já cobertos).
 
-**Pendências na base (não alteradas):**
-- "Minha instância n8n está offline ou inacessível (Erros 404, 502…)" manda o
-  cliente rodar `docker restart`/`kubectl` — o cliente não tem terminal (S21).
-  Precisa ser reescrito ou despublicado.
+**Pendência na base (não alterada):**
 - "Onde posso ver minhas credenciais?" e "Onde encontrar minhas credenciais?" são
   dois artigos sobre o mesmo tema (hoje não se contradizem).
 

@@ -826,3 +826,89 @@ delete from desk_ai_snippets where title = $kbtxt$IA Ilimitada: erro de limite, 
 delete from desk_ai_snippets where title = $kbtxt$Como funciona o backup diário?$kbtxt$;
 delete from desk_ai_snippets where title = $kbtxt$Hermes e OpenClaw$kbtxt$;
 commit;
+
+-- Segunda leva (13/10/2026): artigo "n8n offline" + snippet de adicionais
+begin;
+update desk_knowledge_base set content = $kbtxt$## O Problema
+
+Você está enfrentando problemas para acessar sua instância do n8n. Isso pode se manifestar de diversas formas:
+
+*   **Erro 502 (Bad Gateway):** O servidor agindo como um gateway ou proxy recebeu uma resposta inválida de um servidor upstream.
+*   **Erro 404 (Not Found):** O servidor não conseguiu encontrar o recurso solicitado, indicando que a URL pode estar incorreta ou o serviço não está respondendo.
+*   **Instância 'fora do ar' ou 'caiu':** A interface do n8n não carrega, ou os workflows não estão sendo executados/recebendo dados.
+*   **Workflows não recebem mensagens:** Seus webhooks estão registrados e ativos, mas os dados não chegam ao n8n.
+*   **Aba 'Executions' não abre:** Você não consegue visualizar o histórico de execuções dos seus workflows.
+
+Esses sintomas indicam que sua instância do n8n pode estar inoperante, inacessível ou com problemas de comunicação.
+
+## Por que acontece
+
+A indisponibilidade do n8n pode ser causada por uma variedade de fatores, incluindo:
+
+1.  **Problemas no contêiner/pod do n8n:** O contêiner onde o n8n está rodando pode ter travado, sido encerrado inesperadamente, ou estar com falta de recursos (CPU, memória).
+2.  **Problemas de rede ou firewall:** Bloqueios de rede, configurações de firewall incorretas ou problemas no balanceador de carga/proxy reverso podem impedir o acesso ao n8n.
+3.  **Configuração incorreta do n8n:** Variáveis de ambiente erradas, problemas de conexão com o banco de dados (se configurado), ou configurações de porta incorretas.
+4.  **Recursos insuficientes no servidor:** O servidor onde o n8n está hospedado pode estar sobrecarregado, sem memória ou CPU disponível, causando a falha do serviço.
+5.  **Atualização falha:** Uma atualização recente do n8n pode ter introduzido um problema ou não foi concluída corretamente.
+6.  **Problemas no serviço de proxy reverso (nginx, Caddy, etc.):** Se você usa um proxy reverso na frente do n8n, ele pode estar com problemas e não conseguindo encaminhar as requisições corretamente (comum em erros 502).
+7.  **Domínio/DNS:** Problemas na resolução de DNS ou no apontamento do domínio para o IP correto do servidor.
+
+## Solução passo a passo
+
+Siga os passos abaixo para diagnosticar e resolver o problema da sua instância n8n offline:
+
+1.  **Verifique o status do serviço/contêiner do n8n:**
+    *   **Para Docker/Docker Compose:**
+        ```bash
+        docker ps -a | grep n8n
+        docker logs <container_id_ou_nome_do_n8n>
+        ```
+        Verifique se o contêiner está `Up` e procure por erros nos logs.
+    *   **Para Kubernetes (pods):**
+        ```bash
+        kubectl get pods -n <namespace_do_n8n> | grep n8n
+        kubectl describe pod <nome_do_pod_n8n> -n <namespace_do_n8n>
+        kubectl logs <nome_do_pod_n8n> -n <namespace_do_n8n>
+        ```
+        Verifique o `STATUS` do pod (deve ser `Running`) e procure por eventos ou erros nos logs.
+
+2.  **Reinicie o serviço/contêiner do n8n:**
+    *   **Para Docker/Docker Compose:**
+        ```bash
+        docker restart <container_id_ou_nome_do_n8n>
+        ```
+    *   **Para Kubernetes (reinício forçado do pod):**
+        ```bash
+        kubectl delete pod <nome_do_pod_n8n> -n <namespace_do_n8n>
+        ```
+        Isso forçará o Kubernetes a criar um novo pod, o que pode resolver problemas temporários.
+
+3.  **Verifique a utilização de recursos do servidor:**
+    *   Use comandos como `top`, `htop`, `free -h` ou `df -h` para verificar o uso de CPU, memória e espaço em disco no servidor onde o n8n está hospedado. Recursos esgotados podem causar a falha do n8n.
+
+4.  **Verifique as configurações de rede e firewall:**
+    *   Certifique-se de que a porta em que o n8n está escutando (geralmente 5678) está acessível e não está bloqueada por um firewall (tanto no servidor quanto em qualquer firewall de rede externo).
+    *   Se você usa um proxy reverso (Nginx, Caddy), verifique os logs do proxy para ver se há erros de comunicação com o n8n. Certifique-se de que a configuração do proxy está correta e apontando para a porta e IP certos do n8n.
+
+5.  **Teste a conectividade interna:**
+    *   Se você tem acesso ao servidor, tente acessar o n8n localmente (ex: `curl http://localhost:5678`). Se funcionar localmente, mas não externamente, o problema é de rede ou proxy.
+
+6.  **Verifique as variáveis de ambiente do n8n:**
+    *   Confirme se todas as variáveis de ambiente essenciais (como `N8N_HOST`, `N8N_PORT`, `DB_TYPE`, `DB_POSTGRES_HOST`, etc.) estão configuradas corretamente.
+
+7.  **Consulte a documentação oficial do n8n:**
+    *   A documentação pode ter informações específicas para sua forma de instalação (Docker, Kubernetes, etc.) e dicas de troubleshooting.
+
+## Como evitar
+
+Para minimizar a ocorrência de problemas de indisponibilidade do n8n, considere as seguintes práticas:
+
+*   **Monitoramento:** Implemente um sistema de monitoramento para sua instância n8n e para os recursos do servidor (CPU, memória, disco). Configure alertas para quando o serviço ficar inacessível ou os recursos atingirem limites críticos.
+*   **Recursos adequados:** Aloque recursos de CPU e memória suficientes para o contêiner/pod do n8n, especialmente se você tiver muitos workflows ou workflows complexos.
+*   **Backups regulares:** Faça backups regulares da sua base de dados do n8n e dos seus workflows. Isso permite uma recuperação rápida em caso de falha catastrófica.
+*   **Atualizações controladas:** Ao atualizar o n8n, faça-o em um ambiente de teste primeiro, se possível, e sempre siga as instruções de atualização cuidadosamente. Considere usar tags de versão específicas em vez de `latest` para evitar atualizações automáticas que possam quebrar a compatibilidade.
+*   **Logs centralizados:** Configure o n8n para enviar logs para um sistema de log centralizado (ELK Stack, Grafana Loki, etc.) para facilitar a depuração de problemas.
+*   **Redundância:** Para ambientes de produção críticos, considere configurar o n8n com alta disponibilidade (se sua arquitetura permitir) para evitar um único ponto de falha.
+*   **Revisão de configurações:** Periodicamente, revise as configurações do n8n, do proxy reverso e do firewall para garantir que estão otimizadas e corretas.$kbtxt$, updated_at = now() where id = '5c8adc2c-7f23-4235-b919-8cc043d7f7ac';
+delete from desk_ai_snippets where title = $kbtxt$Como cancelar só o número virtual ou outro adicional?$kbtxt$;
+commit;
