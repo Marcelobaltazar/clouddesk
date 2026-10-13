@@ -42,6 +42,10 @@ S22 Supabase/Chatwoot, S23 backup, S24 suporte, S27 Hermes/OpenClaw.
 "Minha instância n8n está offline…" foi reescrito (mandava rodar docker/kubectl —
 agora: confirmar pela URL, aguardar, Executions, reiniciar pelo console, chat).
 
+**Terceira leva (mesmo dia):** número virtual passou a ser cancelado pelo próprio
+cliente (Números Virtuais, no painel lateral); só IA Ilimitada e backup seguem com
+a equipe. Snippet de adicionais atualizado.
+
 **Fora por enquanto:** S3, S6,
 S9, S10 (baixa confiança ou já cobertos por artigo/página de preços); S12–S16, S19,
 S25, S26 (fundidos em snippets existentes ou já cobertos).

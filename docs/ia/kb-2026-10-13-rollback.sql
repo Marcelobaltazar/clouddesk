@@ -912,3 +912,12 @@ Para minimizar a ocorrência de problemas de indisponibilidade do n8n, considere
 *   **Revisão de configurações:** Periodicamente, revise as configurações do n8n, do proxy reverso e do firewall para garantir que estão otimizadas e corretas.$kbtxt$, updated_at = now() where id = '5c8adc2c-7f23-4235-b919-8cc043d7f7ac';
 delete from desk_ai_snippets where title = $kbtxt$Como cancelar só o número virtual ou outro adicional?$kbtxt$;
 commit;
+
+-- Terceira leva (13/10/2026): número virtual passa a ser cancelado pelo próprio cliente
+begin;
+update desk_ai_snippets set content = $kbtxt$Cancelar só um adicional (número virtual, IA Ilimitada, backup) sem mexer na sua infraestrutura é feito pela equipe de suporte — pelo painel você só consegue cancelar o plano inteiro.
+
+É só pedir por aqui informando qual adicional (e, se for número, qual número).
+
+Dica: número já aquecido vale ouro. Se for usar com outro cliente depois, pode valer a pena manter.$kbtxt$, updated_at = now() where id = 'b69d058e-6fef-49a3-be3b-dcdd82425b4a';
+commit;
