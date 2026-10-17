@@ -46,6 +46,11 @@ agora: confirmar pela URL, aguardar, Executions, reiniciar pelo console, chat).
 cliente (Números Virtuais, no painel lateral); só IA Ilimitada e backup seguem com
 a equipe. Snippet de adicionais atualizado.
 
+**Desfeito em 17/10/2026:** a opção não existe para o cliente (caso real: "Não tem
+essa opção"). Número virtual voltou a ser cancelado pela equipe, e a Luna pede o
+número completo com DDD. Snippet em `kb-2026-10-17-numero-virtual.sql` (rollback ao
+lado); guard `wantsVirtualNumberCancel` em `support-intents.ts`.
+
 **Fora por enquanto:** S3, S6,
 S9, S10 (baixa confiança ou já cobertos por artigo/página de preços); S12–S16, S19,
 S25, S26 (fundidos em snippets existentes ou já cobertos).

@@ -6,7 +6,15 @@
 // técnico mandado para a fila financeira.
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { claimsAlreadyPaid, contestsBillingReading, detectBillingChange, teamOnlyTopic, wantsAddonCancel } from './support-intents.ts';
+import {
+  claimsAlreadyPaid,
+  contestsBillingReading,
+  detectBillingChange,
+  extractBrPhones,
+  teamOnlyTopic,
+  wantsAddonCancel,
+  wantsVirtualNumberCancel,
+} from './support-intents.ts';
 
 Deno.test('cobrança: problema técnico NÃO vai para a fila financeira', () => {
   for (const msg of [
@@ -113,7 +121,7 @@ Deno.test('adicional: pedido de cancelar IA Ilimitada/backup vai para a equipe',
   }
 });
 
-Deno.test('adicional: plano, número virtual ou número na Evolution não vão para a equipe', () => {
+Deno.test('adicional: plano ou número na Evolution não vão para a equipe', () => {
   for (const msg of [
     'quero cancelar meu plano',
     'como cancelo a assinatura da minha infra?',
@@ -122,13 +130,50 @@ Deno.test('adicional: plano, número virtual ou número na Evolution não vão p
     'a IA ilimitada está dando erro de limite',
     'vai conseguir resolver a questão da IA Ilimitada, ou vou precisar cancelar?',
     'quero cancelar o plano e manter o número, dá?',
-    // Número virtual: o próprio cliente cancela no painel (desde 13/10/2026)
-    'Como faço para cancelar meu número virtual? Eu contratei por engano',
-    'gostaria de cancelar uns números virtuais sem derrubar minha infra',
-    'não quero mais o número virtual',
+    'quero cancelar meu plano, e o número (61) 91234-5678 vai junto?',
   ]) {
     assertEquals(wantsAddonCancel(msg), false, `não deveria ser adicional: "${msg}"`);
   }
+});
+
+// Número virtual: só a equipe cancela (16/10/2026). Entre 13 e 16/10 a base
+// mandava o cliente cancelar em Números Virtuais — opção que ele não tem.
+Deno.test('número virtual: pedido de cancelar vai para a equipe', () => {
+  for (const msg of [
+    'Como faço para cancelar meu número virtual? Eu contratei por engano',
+    'gostaria de cancelar uns números virtuais sem derrubar minha infra',
+    'não quero mais o número virtual',
+    'quero excluir o numero virtual',
+    'como desativo o virtual number?',
+    'Quero desativar um número: (61) 94756-0348',
+    'Pode cancelar também o número: (61) 94756-8198',
+  ]) {
+    assertEquals(wantsVirtualNumberCancel(msg), true, `deveria ir para a equipe: "${msg}"`);
+    assertEquals(wantsAddonCancel(msg), true, `adicional para o Starter: "${msg}"`);
+  }
+});
+
+Deno.test('número virtual: dúvida, compra ou problema não é cancelamento', () => {
+  for (const msg of [
+    'como compro um número virtual?',
+    'o número virtual não recebe o código',
+    'quanto custa cada número virtual?',
+    'quero cancelar o plano e manter o número virtual, dá?',
+    'meu número virtual foi bloqueado pela Meta',
+    'preciso remover o número da instância da Evolution',
+    'quero desativar o número',
+  ]) {
+    assertEquals(wantsVirtualNumberCancel(msg), false, `não deveria ser cancelamento de número: "${msg}"`);
+  }
+});
+
+Deno.test('número virtual: telefone com DDD é lido em vários formatos', () => {
+  assertEquals(extractBrPhones('Quero desativar um número: (61) 94756-0348'), ['(61) 94756-0348']);
+  assertEquals(extractBrPhones('cancela o 61947560348 e o +55 11 3123-4567'), ['(61) 94756-0348', '(11) 3123-4567']);
+  assertEquals(extractBrPhones('5561947560348'), ['(61) 94756-0348']);
+  // Sem DDD não serve: a Luna pede o número completo
+  assertEquals(extractBrPhones('o número é 94756-0348'), []);
+  assertEquals(extractBrPhones('meu CPF é 123.456.789-01, pedido 16/10/2026'), []);
 });
 
 // ── Operações que só a equipe executa (liberam a transferência do Starter) ────

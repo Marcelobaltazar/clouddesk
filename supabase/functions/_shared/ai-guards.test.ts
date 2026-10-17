@@ -151,17 +151,38 @@ Deno.test('guard: todas as respostas fixas respeitam o tom e trazem o prazo calc
     _test.billingChangeReply('refund', w),
     _test.billingChangeReply('wrong_charge', w),
     _test.billingChangeReply('paid_but_blocked', w),
-    _test.addonCancelReply(w),
+    _test.addonCancelReply('quero cancelar a IA ilimitada', w),
+    _test.addonCancelReply('quero cancelar meu número virtual', w),
+    _test.addonCancelReply('Quero desativar um número: (61) 94756-0348', w),
   ]) {
     assertTone(reply);
   }
   for (const reply of [
     _test.blockedAfterPaymentReply('sua infraestrutura', w),
     _test.billingChangeReply('refund', w),
-    _test.addonCancelReply(w),
+    _test.addonCancelReply('quero cancelar a IA ilimitada', w),
+    _test.addonCancelReply('quero cancelar meu número virtual', w),
   ]) {
     assertStringIncludes(reply, w);
   }
+});
+
+// 16/10/2026: o cliente não cancela número virtual pelo painel — quem cancela é
+// a equipe, e ela precisa do número completo com DDD.
+Deno.test('guard: cancelar número virtual é com a equipe e pede o número com DDD', () => {
+  const w = 'em até 12 horas';
+  const semNumero = _test.addonCancelReply('Como faço para cancelar meu número virtual?', w);
+  assertStringIncludes(semNumero, 'feito pela nossa equipe');
+  assertStringIncludes(semNumero, 'número completo com DDD');
+  assertEquals(/voc[eê] mesmo cancela|Números Virtuais/.test(semNumero), false);
+
+  const comNumero = _test.addonCancelReply('Quero desativar um número: (61) 94756-0348', w);
+  assertStringIncludes(comNumero, '(61) 94756-0348');
+  assertEquals(comNumero.includes('DDD'), false);
+
+  // IA Ilimitada / backup não falam mais de número virtual
+  const ia = _test.addonCancelReply('quero cancelar a IA ilimitada', w);
+  assertEquals(/n[uú]mero virtual|Números Virtuais/.test(ia), false);
 });
 
 Deno.test('prompt: regras de tom e de responsabilidade estão no prompt base', () => {
