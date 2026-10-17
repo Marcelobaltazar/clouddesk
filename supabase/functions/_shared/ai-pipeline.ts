@@ -51,9 +51,11 @@ import {
   claimsAlreadyPaid,
   contestsBillingReading,
   detectBillingChange,
+  extractBrPhones,
   mentionsPayment,
   teamOnlyTopic,
   wantsAddonCancel,
+  wantsVirtualNumberCancel,
   type BillingChangeKind,
 } from './support-intents.ts';
 import { humanReplyWindow } from './support-sla.ts';
@@ -195,7 +197,7 @@ export const _test = {
   cancelScheduledReply: (end: string) => cancelScheduledReply(end),
   cancelHandoffReply: (unpaid: boolean, w: string) => cancelHandoffReply(unpaid, w),
   billingChangeReply: (kind: BillingChangeKind, w: string) => billingChangeReply(kind, w),
-  addonCancelReply: (w: string) => addonCancelReply(w),
+  addonCancelReply: (message: string, w: string) => addonCancelReply(message, w),
   recentPaymentConfirmed: (b: BillingInfo | null, minutes?: number, now?: number) => recentPaymentConfirmed(b, minutes, now),
   paymentConfirmedWaitReply: (label: string) => paymentConfirmedWaitReply(label),
   BASE_SYSTEM_PROMPT: () => BASE_SYSTEM_PROMPT,
@@ -379,7 +381,7 @@ const MCP_CONNECT_URL = kbArticleUrl(
 /** No Starter só isto vai para a equipe (13/10/2026). Reembolso, cobrança
  *  indevida, adicional e infra paga bloqueada saem antes, pelos guards. */
 const STARTER_TEAM_ONLY =
-  'pedidos que só a equipe executa — resetar a senha do n8n de quem ficou sem acesso, restaurar um backup, recriar a credencial da IA Ilimitada, reembolso ou cobrança indevida, cancelar um adicional, liberar infra que já foi paga e continua bloqueada. Esses vão para a equipe, e aí dizer que está passando o pedido pra ela é o certo';
+  'pedidos que só a equipe executa — resetar a senha do n8n de quem ficou sem acesso, restaurar um backup, recriar a credencial da IA Ilimitada, reembolso ou cobrança indevida, cancelar um adicional (número virtual, IA Ilimitada ou backup — o cliente não cancela nenhum deles pelo painel), liberar infra que já foi paga e continua bloqueada. Esses vão para a equipe, e aí dizer que está passando o pedido pra ela é o certo';
 const MCP_FACTS = `Todos os clientes têm o MCP da Cloudfy, sem custo. Com ele o cliente conecta a infraestrutura no ChatGPT ou no Claude (também no Cursor e no Codex) e pede, em português, pra IA criar e ajustar os fluxos do n8n, investigar execuções com erro e ver as instâncias do WhatsApp. Pra conectar: no Cloudfy Console, área MCP. Passo a passo no Claude: ${MCP_CONNECT_URL}`;
 
 // ─── Constants / prompt ───────────────────────────────────────────────────────
@@ -1067,11 +1069,22 @@ function cancelHandoffReply(unpaid: boolean, replyWindow: string): string {
   );
 }
 
-function addonCancelReply(replyWindow: string): string {
+function addonCancelReply(message: string, replyWindow: string): string {
+  if (!wantsVirtualNumberCancel(message)) {
+    return (
+      `Cancelar a IA Ilimitada ou o backup é com a equipe — sua infraestrutura continua como está.\n\n` +
+      `Já passei seu pedido pra eles: alguém te responde por aqui ${replyWindow}.`
+    );
+  }
+  // Pelo painel o cliente não consegue: quem cancela é a equipe, e ela precisa
+  // do número completo com DDD para achar a linha.
+  const phones = extractBrPhones(message);
+  const which = phones.length > 0
+    ? `Já passei seu pedido pra eles com ${phones.length > 1 ? 'os números' : 'o número'} ${phones.join(', ')}: alguém te responde por aqui ${replyWindow}.`
+    : `Já passei seu pedido pra eles. Me manda aqui o número completo com DDD que vc quer cancelar — ex.: (11) 91234-5678 —, que é por ele que a equipe acha a linha. Alguém te responde por aqui ${replyWindow}.`;
   return (
-    `Cancelar a IA Ilimitada ou o backup é com a equipe — sua infraestrutura continua como está.\n\n` +
-    `Já passei seu pedido pra eles: alguém te responde por aqui ${replyWindow}. ` +
-    `Se for número virtual, esse você mesmo cancela em **Números Virtuais**, no painel lateral da Cloudfy.`
+    `O cancelamento do número virtual é feito pela nossa equipe — pelo painel não dá pra cancelar sozinho. ` +
+    `Sua infraestrutura continua como está.\n\n${which}`
   );
 }
 
@@ -2387,14 +2400,14 @@ export async function runAiPipeline(
       : guardReply(blockedSelfServiceReply(label), 'guard:blocked-infra-selfservice', 'billing');
   }
 
-  // Cancelar a IA Ilimitada ou o backup: só a equipe de suporte consegue — o
-  // painel do cliente só cancela o plano inteiro (número virtual o cliente
-  // cancela sozinho desde 13/10/2026; a IA orienta pela base).
+  // Cancelar a IA Ilimitada, o backup ou um número virtual: só a equipe de
+  // suporte consegue — o painel do cliente só cancela o plano inteiro (entre 13
+  // e 16/10/2026 a base dizia que número virtual dava pelo painel; não dá).
   // Mandar para Configurações → Faturamento aqui faria o cliente cancelar a
   // infra sem querer. Vale para todos os planos.
   if (!isDraft && wantsAddonCancel(message)) {
-    console.log('[AI] Guard cancelamento de adicional: equipe');
-    return await persistGuardHandoff(addonCancelReply(replyWindow), 'guard:cancel-addon', 'cancelamento', 'media');
+    console.log(`[AI] Guard cancelamento de adicional: equipe (número virtual=${wantsVirtualNumberCancel(message)})`);
+    return await persistGuardHandoff(addonCancelReply(message, replyWindow), 'guard:cancel-addon', 'cancelamento', 'media');
   }
 
   // Guard de CANCELAMENTO (precede billing: "cancelar minha assinatura" é

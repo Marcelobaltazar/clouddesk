@@ -49,8 +49,7 @@ const CONTEST_BILLING_RE =
   /\bnao (e|eh|era|se trata)((\s|\/)+(sobre|de|do|da|um|uma|questao|duvida|assunto|caso|problema|chamado|nem|isso|referente|a|o))*(\s|\/)+(pagamento|cobranca|financeiro|fatura|billing)\b|\b(nao tem (nada )?a ver|nada a ver|nao tem relacao) com (o |a )?(pagamento|cobranca|financeiro|fatura)\b|\b(entendeu|entenderam|interpretou|classificou|classificacao( automatica)?) errad\w*|\bcorrigindo a classificacao\b/;
 
 /** Cancelar um ADICIONAL que só a equipe de suporte consegue cancelar (IA
- *  Ilimitada, backup). Número virtual NÃO entra: desde 13/10/2026 o próprio
- *  cliente cancela em Números Virtuais, no painel — a IA orienta pela base. */
+ *  Ilimitada, backup e — ver wantsVirtualNumberCancel — número virtual). */
 const ADDON_NOUN = String.raw`(ia ilimitada|i\.?a\.? ilimitada|llm unlimited|backup|adicion(al|ais)|add-?ons?)`;
 /** Exige pedido ("quero", "como faço", "tem como"…): "ou vou precisar
  *  cancelar?" é desabafo. Entre o verbo e o adicional não pode aparecer o plano
@@ -62,8 +61,43 @@ const ADDON_CANCEL_RE = new RegExp(
 
 export type BillingChangeKind = 'refund' | 'wrong_charge' | 'paid_but_blocked';
 
+/** Telefone brasileiro com DDD: (61) 94756-0348, 61947560348, +55 61 94756-0348. */
+const BR_PHONE_RE = /(?<!\d)(?:\+?55[\s.-]*)?\(?([1-9]{2})\)?[\s.-]*(9?\d{4})[\s.-]?(\d{4})(?!\d)/g;
+
+/** Números com DDD citados na mensagem, no formato (DD) NNNNN-NNNN. Número sem
+ *  DDD não conta — é exatamente o que a equipe precisa para achar a linha. */
+export function extractBrPhones(text: string): string[] {
+  const found = new Set<string>();
+  for (const m of String(text ?? '').matchAll(BR_PHONE_RE)) {
+    found.add(`(${m[1]}) ${m[2]}-${m[3]}`);
+  }
+  return [...found];
+}
+
+/** Número virtual: o cliente NÃO consegue cancelar sozinho — a equipe cancela
+ *  (16/10/2026; entre 13 e 16/10 a base dizia que dava pelo painel, e o cliente
+ *  voltava com "Não tem essa opção"). */
+const VIRTUAL_NOUN = String.raw`(numeros? virtua(l|is)|virtual numbers?)`;
+const REMOVE_VERB = String.raw`(cancel\w*|desativ\w*|encerr\w*|exclu\w*|remov\w*|tir(ar|o|e)|retir\w*)`;
+/** Mesmo critério do adicional: pedido explícito, e o plano não pode aparecer
+ *  entre o verbo e o número ("cancelar o plano e manter o número virtual"). */
+const VIRTUAL_CANCEL_RE = new RegExp(
+  String.raw`\b(quero|queria|gostaria|preciso|desejo|solicito|solicitar|pedir|como|tem como|da pra|consigo|podem|pode|posso)\b[^.?!]{0,25}\b${REMOVE_VERB}\b((?!plano|assinatura|infra)[^.?!]){0,25}\b${VIRTUAL_NOUN}\b` +
+  String.raw`|\bnao quero mais\b((?!plano|assinatura|infra)[^.?!]){0,20}\b${VIRTUAL_NOUN}\b`,
+);
+/** "Quero desativar um número: (61) 94756-0348" — sem a palavra "virtual", mas
+ *  com o telefone: na Cloudfy o único número que se cancela é o virtual. Número
+ *  da Evolution/WAHA é outra coisa (remover da instância, não cancelar). */
+const PHONE_CANCEL_RE =
+  /\b(cancel\w*|desativ\w*|encerr\w*)\b((?!plano|assinatura|infra|evolution|waha|instancia)[^.?!]){0,25}\bnumeros?\b/;
+
+export function wantsVirtualNumberCancel(text: string): boolean {
+  const t = normalizeForIntent(text);
+  return VIRTUAL_CANCEL_RE.test(t) || (PHONE_CANCEL_RE.test(t) && extractBrPhones(text).length > 0);
+}
+
 export function wantsAddonCancel(text: string): boolean {
-  return ADDON_CANCEL_RE.test(normalizeForIntent(text));
+  return ADDON_CANCEL_RE.test(normalizeForIntent(text)) || wantsVirtualNumberCancel(text);
 }
 
 /**
